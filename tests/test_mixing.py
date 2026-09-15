@@ -2749,6 +2749,127 @@ def test_correction_reply_speaks_the_measure():
     assert conn2.results[-1].payload["correction"]["addMeasure"] is None
 
 
+# ---------------------------------------------------------------- §35 mix now (0.7.190)
+
+def test_stir_guards_want_a_quiet_finished_batch_and_a_pump():
+    cfg = _cfg()
+    cfg["switches"] = {"mixPumpA": {"switchEntity": "switch.pump_a"}}
+    cfg["batch"] = _stored_batch()
+    assert mixing.stir_guard_reasons(cfg, NOW) == []
+    cfg["batch"]["state"] = "ready"
+    assert mixing.stir_guard_reasons(cfg, NOW) == []
+    cfg["batch"]["circulateUntil"] = _iso(NOW + timedelta(minutes=4, seconds=40))
+    reasons = mixing.stir_guard_reasons(cfg, NOW)
+    assert any("already stirring" in r and "5 min left" in r for r in reasons), reasons
+    cfg["batch"] = {"state": "salting"}
+    assert any("mix run is under way" in r for r in mixing.stir_guard_reasons(cfg, NOW))
+    cfg["batch"] = {"state": "heating"}
+    assert any("mix run is under way" in r for r in mixing.stir_guard_reasons(cfg, NOW))
+    cfg["batch"] = {"state": "idle"}
+    assert any("Nothing to stir" in r for r in mixing.stir_guard_reasons(cfg, NOW))
+    cfg["batch"] = _stored_batch()
+    cfg["switches"] = {"mixPumpB": {"switchEntity": "switch.pump_b"}}
+    assert mixing.stir_guard_reasons(cfg, NOW) == []          # one pump is enough
+    cfg["switches"] = {}
+    assert any("Bind a mixing pump plug" in r for r in mixing.stir_guard_reasons(cfg, NOW))
+    cfg["simulate"] = True
+    assert mixing.stir_guard_reasons(cfg, NOW) == []
+    cfg["enabled"] = False
+    assert any("not enabled" in r for r in mixing.stir_guard_reasons(cfg, NOW))
+
+
+def test_batch_state_says_how_long_the_stir_has_left():
+    cfg = _cfg()
+    burst = mixing.batch_state(
+        _stored_batch(circulateUntil=_iso(NOW + timedelta(minutes=7, seconds=20))), cfg, NOW)
+    assert burst["circulating"] is True and burst["stirMinutesLeft"] == 7.0
+    quiet = mixing.batch_state(_stored_batch(), cfg, NOW)
+    assert quiet["circulating"] is False and quiet["stirMinutesLeft"] is None
+    assert "stirMinutesLeft" not in mixing.batch_state({"state": "idle"}, cfg, NOW)
+
+
+def _fire_record(record):
+    async def _go():
+        await record["callback"](record["run_at"])
+    run(_go())
+
+
+def test_mix_now_runs_a_burst_and_the_schedule_retimes_from_it():
+    scheduler = install_scheduler(integration)
+    now = datetime.now(timezone.utc)
+    # A ready batch with its first scheduled stir an hour out.
+    hass, entry = _station({"batch": _stored_batch(
+        state="ready", nextCirculateAt=(now + timedelta(hours=1)).isoformat())})
+
+    async def _arm():
+        await integration._async_schedule_mixing_circulation(
+            hass, entry, integration._config_from_entry(entry))
+    run(_arm())
+    armed_start = next(r for r in scheduler.scheduled if not r["cancelled"])
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_stir_now(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    assert payload.get("success") is not False, payload
+    assert ("turn_on", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    assert ("turn_on", "switch.mix_pump_b") in _switch_calls(hass, "switch.mix_pump_b")
+    batch = _mix_state(entry)["batch"]
+    assert batch["state"] == "storing"          # the first stir is the ready→storing edge
+    assert batch["circulateUntil"] and batch["nextCirculateAt"] == ""
+    assert payload["summary"]["batch"]["circulating"] is True
+    assert payload["summary"]["batch"]["stirMinutesLeft"] == 10.0
+    assert armed_start["cancelled"], "the scheduled start leg must be superseded by the stop leg"
+    log = _activity_tail(entry, 1)[0]
+    assert "stirring now" in log and "re-times from this one" in log, log
+    # A second tap while stirring is refused with the minutes left, never an error.
+    run(integration.websocket_mixing_stir_now(hass, conn, {"id": 2}))
+    assert conn.results[-1].payload["success"] is False
+    assert any("already stirring" in r for r in conn.results[-1].payload["reasons"])
+    # The stop leg lands ~10 min out; firing it re-anchors the cadence from THIS stir.
+    stop = next(r for r in scheduler.scheduled[before:]
+                if not r["cancelled"]
+                and 9 * 60 < (r["run_at"] - datetime.now(timezone.utc)).total_seconds() < 11 * 60)
+    _fire_record(stop)
+    assert ("turn_off", "switch.mix_pump_a") in _switch_calls(hass, "switch.mix_pump_a")
+    batch = _mix_state(entry)["batch"]
+    assert batch["circulateUntil"] == "" and batch["lastCirculatedAt"]
+    hours_out = (datetime.fromisoformat(batch["nextCirculateAt"])
+                 - datetime.now(timezone.utc)).total_seconds() / 3600.0
+    assert 5.9 < hours_out < 6.1
+
+
+def test_mix_now_with_circulation_off_is_a_one_off_and_refuses_elsewhere():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station({"batch": _stored_batch(),
+                            "storage": {"circulateEveryH": 0, "circulateForMin": 15,
+                                        "retestAfterDays": 7}})
+    conn = FakeConnection()
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_stir_now(hass, conn, {"id": 1}))
+    assert conn.results[-1].payload.get("success") is not False, conn.results[-1].payload
+    assert "one-off" in _activity_tail(entry, 1)[0]
+    stop = next(r for r in scheduler.scheduled[before:]
+                if not r["cancelled"]
+                and 14 * 60 < (r["run_at"] - datetime.now(timezone.utc)).total_seconds() < 16 * 60)
+    _fire_record(stop)
+    batch = _mix_state(entry)["batch"]
+    assert batch["circulateUntil"] == "" and batch["nextCirculateAt"] == ""
+    assert ("turn_off", "switch.mix_pump_b") in _switch_calls(hass, "switch.mix_pump_b")
+    # Not on an idle vessel, and not mid-mix — refused with a reason.
+    hass2, entry2 = _station()
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_stir_now(hass2, conn2, {"id": 1}))
+    assert conn2.results[-1].payload["success"] is False
+    assert any("Nothing to stir" in r for r in conn2.results[-1].payload["reasons"])
+    hass3, entry3 = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                        "stageAt": _iso(NOW)}})
+    conn3 = FakeConnection()
+    run(integration.websocket_mixing_stir_now(hass3, conn3, {"id": 1}))
+    assert conn3.results[-1].payload["success"] is False
+    assert any("mix run is under way" in r for r in conn3.results[-1].payload["reasons"])
+    assert _mix_state(entry3)["batch"]["state"] == "salting"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

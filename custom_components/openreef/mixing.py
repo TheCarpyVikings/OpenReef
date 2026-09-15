@@ -318,6 +318,10 @@ def batch_state(batch: Any, cfg: Any, now: datetime) -> dict[str, Any]:
         # of asking the keeper to trust an invisible timer. Empty mid-burst
         # by design — "circulating" carries that half of the story.
         out["nextCirculateAt"] = str(batch.get("nextCirculateAt") or "")
+        # How long the running burst has left (doc §35) — the panel says
+        # "about 7 min left" off this, never off its own clock.
+        out["stirMinutesLeft"] = (round(max(0.0, (until - now).total_seconds() / 60.0), 0)
+                                  if out["circulating"] else None)
     if status == "salting":
         stamp = _parse_iso(batch.get("stageAt"))
         hours = mix_hours(salt_cfg.get("brand"), salt_cfg.get("mixHours"))
@@ -799,6 +803,42 @@ def transfer_guard_reasons(cfg: Any, litres: Any, top_up: bool = False) -> list[
         if lit > free + 0.05:
             reasons.append(f"That would overflow the vessel — "
                            f"about {free:g} L of {vol:g} L free")
+    return reasons
+
+
+def _pumps_driven(cfg: Any) -> bool:
+    """Simulate counts; otherwise at least one bound mixing-pump plug — a stir
+    with nothing to switch is a button that does nothing."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    if cfg.get("simulate"):
+        return True
+    switches = cfg.get("switches") if isinstance(cfg.get("switches"), dict) else {}
+    return any(isinstance(switches.get(role), dict)
+               and str(switches[role].get("switchEntity") or "").strip()
+               for role in ("mixPumpA", "mixPumpB"))
+
+
+def stir_guard_reasons(cfg: Any, now: datetime) -> list[str]:
+    """Why a MIX NOW (doc §35) must not start: it is the same burst the
+    storing schedule runs, on demand — so it wants a finished batch, pumps
+    that are not already stirring, and a pump to switch."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    reasons: list[str] = []
+    if not cfg.get("enabled"):
+        reasons.append("Mixing station is not enabled")
+    batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
+    state = str(batch.get("state") or "idle")
+    if state in ("heating", "salting"):
+        reasons.append("A mix run is under way — its pumps stir the batch from the salt going in")
+    elif state not in ("ready", "storing"):
+        reasons.append("Nothing to stir — the vessel holds no finished batch")
+    until = _parse_iso(batch.get("circulateUntil"))
+    if until is not None and until > now:
+        mins = max(1, _half_up((until - now).total_seconds() / 60.0))
+        reasons.append(f"The pumps are already stirring — about {mins} min left")
+    if not _pumps_driven(cfg):
+        reasons.append("Bind a mixing pump plug (or turn on Simulate) — "
+                       "a stir needs OpenReef on the switch")
     return reasons
 
 

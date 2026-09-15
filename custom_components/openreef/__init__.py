@@ -17719,21 +17719,38 @@ async def _async_schedule_mixing_circulation(
             if (not mix2.get("enabled")
                     or str(batch2.get("state") or "idle") not in ("ready", "storing")):
                 return
-            for role in ("mixPumpA", "mixPumpB"):
-                try:
-                    await _async_mixing_set_switch(hass, cfg2, role, True, None)
-                except Exception:  # noqa: BLE001 - one dead pump must not kill the burst
-                    _LOGGER.exception("Could not start %s for the circulation burst", role)
-            for_min = _awc_num(mix2.get("storage", {}).get("circulateForMin"),
-                               10, 1, MIXING_CIRCULATE_FOR_MAX_MIN)
-            stamp = datetime.now(timezone.utc)
-            batch2["state"] = "storing"       # the first burst is the ready→storing edge
-            batch2["circulateUntil"] = (stamp + timedelta(minutes=for_min)).isoformat()
-            batch2["nextCirculateAt"] = ""
+            await _async_mixing_start_burst(hass, cfg2, None)
             await _async_save_config(hass, latest, cfg2)  # save re-arms the stop leg
 
     store[MIXING_CIRC_UNSUB] = async_track_point_in_time(
         hass, _start, max(next_at, now + timedelta(seconds=30)))
+
+
+async def _async_mixing_start_burst(
+    hass: HomeAssistant, config: dict[str, Any], context: Any
+) -> int:
+    """Start ONE storing-circulation burst on ``config`` in place — the
+    scheduled stir and the keeper's Mix now (doc §35) share this exactly:
+    pumps ON (best effort per role — one dead pump must not kill the burst),
+    the first burst is the ready→storing edge, circulateUntil stamped for
+    circulateForMin, nextCirculateAt cleared. The stop leg re-anchors the
+    cadence from the moment the burst ends, so a manual stir re-times the
+    schedule from itself. Caller holds the lock and saves (the save pass arms
+    the stop leg). Returns the burst length in minutes."""
+    cfg = _mixing_cfg(config)
+    batch = cfg.setdefault("batch", {})
+    for role in ("mixPumpA", "mixPumpB"):
+        try:
+            await _async_mixing_set_switch(hass, config, role, True, context)
+        except Exception:  # noqa: BLE001 - one dead pump must not kill the burst
+            _LOGGER.exception("Could not start %s for the circulation burst", role)
+    for_min = _awc_num(cfg.get("storage", {}).get("circulateForMin"),
+                       10, 1, MIXING_CIRCULATE_FOR_MAX_MIN)
+    stamp = datetime.now(timezone.utc)
+    batch["state"] = "storing"       # the first burst is the ready→storing edge
+    batch["circulateUntil"] = (stamp + timedelta(minutes=for_min)).isoformat()
+    batch["nextCirculateAt"] = ""
+    return int(for_min)
 
 
 def _mixing_sync_reminders(config: dict[str, Any], now: datetime, event: str) -> None:
@@ -18821,6 +18838,42 @@ async def websocket_mixing_abort(
                              f"emptied, the run's plugs switched off{kept}", "warning")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/mixing_stir_now"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_mixing_stir_now(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Mix now (doc §35): the storing-circulation burst on demand — the very
+    burst the schedule runs, started by the keeper. Refused with reasons
+    (never an error) mid-mix, on an idle vessel, while the pumps already
+    stir, or with no pump to switch. The schedule re-times from this stir:
+    the stop leg stamps the next one circulateEveryH after the burst ends;
+    with the cadence off it is a one-off."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    async with _mixing_lock(hass):
+        config = _config_from_entry(entry)
+        cfg = _mixing_cfg(config)
+        reasons = mixing_engine.stir_guard_reasons(cfg, datetime.now(timezone.utc))
+        if reasons:
+            connection.send_result(msg["id"], {"success": False, "reasons": reasons})
+            return
+        for_min = await _async_mixing_start_burst(hass, config, connection.context(msg))
+        every_h = _awc_num(cfg.get("storage", {}).get("circulateEveryH"),
+                           0, 0, MIXING_CIRCULATE_EVERY_MAX_H)
+        _append_activity(
+            config, f"Mixing station: stirring now — pumps run {for_min} min"
+            + (f"; the next scheduled stir re-times from this one (every {every_h:g} h)"
+               if every_h > 0 else
+               " — storage circulation is off, so this one is a one-off"),
+            "control")
+        config = await _async_save_config(hass, entry, config)  # save arms the stop leg
+    _mixing_send(connection, msg, hass, config, started=True)
 
 
 @websocket_api.websocket_command({
@@ -22400,6 +22453,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_mixing_advance)
     websocket_api.async_register_command(hass, websocket_mixing_log_salinity)
     websocket_api.async_register_command(hass, websocket_mixing_abort)
+    websocket_api.async_register_command(hass, websocket_mixing_stir_now)
     websocket_api.async_register_command(hass, websocket_mixing_mark_used)
     websocket_api.async_register_command(hass, websocket_mixing_set_level)
     websocket_api.async_register_command(hass, websocket_mixing_rodi_draw)

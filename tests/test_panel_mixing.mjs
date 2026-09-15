@@ -1439,4 +1439,55 @@ test("the Salt & mix card states the dose for whatever the vessel holds — gram
   assert(!cardSlice(stored._mixingTab()).includes("data-mixing-vessel-dose"), "a stored batch has no dose to state");
 });
 
+// --- §35 Mix now — the stir on demand (0.7.190) -----------------------------------
+
+test("Mix now sits beside the stir schedule — and steps aside while the pumps run", async () => {
+  const storing = (over = {}) => summaryBlob({ batch: { status: "storing", contents: "salt", litres: 40,
+    remainingLitres: 40, circulating: false, nextCirculateAt: "", ...over } });
+  const still = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } }, storing());
+  still._activeTab = "mixing";
+  let html = still._mixingTab();
+  assert(html.includes('data-action="mixing-stir-now"') && html.includes(">Mix now<"), "quiet storage lost Mix now");
+  assert(/stir 10 min every 6 h/.test(html), "the cadence line must stay beside the button");
+  const stirring = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } },
+    storing({ circulating: true, stirMinutesLeft: 7 }));
+  stirring._activeTab = "mixing";
+  html = stirring._mixingTab();
+  assert(html.includes("Stirring now") && html.includes("about 7 min left"), "a live burst must say how long is left");
+  assert(!html.includes('data-action="mixing-stir-now"'), "Mix now must step aside while the pumps run");
+  noPlaceholders(html, "stirring card");
+  // An old summary without the minutes still reads cleanly.
+  const oldStir = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 } }, storing({ circulating: true }));
+  oldStir._activeTab = "mixing";
+  html = oldStir._mixingTab();
+  assert(html.includes("running their burst.") && !html.includes("min left"), "no minutes means no minutes");
+  noPlaceholders(html, "stirring card without minutes");
+  // Circulation off: Mix now still offered, and the line says the burst length.
+  const off = await mixingPanel({ batch: { state: "storing", type: "salt", litres: 40 },
+    storage: { circulateEveryH: 0, circulateForMin: 15, retestAfterDays: 7 } }, storing());
+  off._activeTab = "mixing";
+  html = off._mixingTab();
+  assert(html.includes("Storage circulation is off") && html.includes("Mix now still runs the pumps for 15 min")
+    && html.includes('data-action="mixing-stir-now"'), "circulation off must still offer a one-off stir");
+  // A ready batch gets it too; idle and salting never do.
+  const ready = await mixingPanel({ batch: { state: "ready", type: "salt", litres: 40 } },
+    summaryBlob({ batch: { status: "ready", contents: "salt", litres: 40, remainingLitres: 40, circulating: false, nextCirculateAt: "" } }));
+  ready._activeTab = "mixing";
+  assert(ready._mixingTab().includes('data-action="mixing-stir-now"'), "a ready batch lost Mix now");
+  const idle = await mixingPanel();
+  idle._activeTab = "mixing";
+  assert(!idle._mixingTab().includes("mixing-stir-now"), "an empty vessel offered a stir");
+  const salting = await mixingPanel({ batch: { state: "salting", litres: 40 } },
+    summaryBlob({ batch: { status: "salting", contents: "salt", litres: 40, remainingLitres: 40,
+      mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } } }));
+  salting._activeTab = "mixing";
+  assert(!salting._mixingTab().includes("mixing-stir-now"), "a salting run offered a stir its pumps already give");
+  // The tap calls the command, nothing else.
+  const calls = [];
+  still._render = () => {};
+  still._callWS = async (msg) => { calls.push(msg); return {}; };
+  await still._mixingAction({ type: "openreef/mixing_stir_now" });
+  assert(calls.length === 1 && calls[0].type === "openreef/mixing_stir_now", "Mix now must call mixing_stir_now");
+});
+
 runTests();

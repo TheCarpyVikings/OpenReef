@@ -817,3 +817,30 @@ now picks the story for what the vessel holds and prints it under the status lin
 
 Nothing is computed on the panel; the guide card keeps its fuller story (the rest-of-the-way
 projection, the what-if row).
+
+## §35 Mix now — the stir on demand (0.7.190)
+
+Reece: "Can we add a 'mix now' button to the pump mix scheduler please."
+
+The storing schedule stirs the batch for `circulateForMin` every `circulateEveryH`; the card
+said "Next stir Wed 03:26 — nothing to press". Now there is something to press.
+
+- **One burst, two starters.** `_async_mixing_start_burst` is the burst the scheduled start
+  leg always ran (pumps ON best-effort per role, the first burst is the ready→storing edge,
+  `circulateUntil` stamped, `nextCirculateAt` cleared), lifted out so the new
+  `openreef/mixing_stir_now` runs exactly the same thing. The stop leg is untouched: it
+  re-anchors `nextCirculateAt` from the moment the burst ENDS, so a manual stir re-times the
+  schedule from itself (the stamps ARE the schedule); with the cadence off it is a one-off.
+  A start leg armed for later is superseded by the save pass arming the stop leg instead.
+- **Guards, as reasons.** `mixing.stir_guard_reasons(cfg, now)`: a finished batch only
+  (mid-mix the pumps already run; idle has nothing to stir), not while a burst is in flight
+  ("about 5 min left"), and a pump to switch (`_pumps_driven`: Simulate or at least one bound
+  mixing-pump plug — the booster twin). Refused with `success: False, reasons`, never an
+  error — the panel paints them above the fold like every other refusal.
+- **The clock, visible.** `batch_state` gains `stirMinutesLeft` (None when quiet, absent on
+  idle) so the card says "Stirring now — the pumps are running their burst, about 7 min
+  left" off the backend's clock.
+- **Panel.** The circulation line becomes a row: the schedule text on the left, **Mix now**
+  (`mixing-stir-now`, secondary compact) on the right; the button steps aside while the pumps
+  run. With the cadence off the line says "Mix now still runs the pumps for 15 min". Ready
+  and storing only.

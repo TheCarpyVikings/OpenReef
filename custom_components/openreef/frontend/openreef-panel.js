@@ -1735,6 +1735,7 @@ class OpenReefPanel extends HTMLElement {
         } else { this._mixingMessage = "Enter the salinity reading first."; this._render(); }
       }
       if (action === "mixing-abort") this._mixingAction({ type: "openreef/mixing_abort" });
+      if (action === "mixing-stir-now") this._mixingAction({ type: "openreef/mixing_stir_now" });
       if (action === "mixing-mark-used") {
         const used = Number(this.shadowRoot.querySelector("[data-mixing-used]")?.value) || 0;
         if (used > 0) this._mixingAction({ type: "openreef/mixing_mark_used", litres: used });
@@ -26742,10 +26743,12 @@ const rigSteps = [
       const everyH = Number(mix.storage?.circulateEveryH) || 0;
       const forMin = Number(mix.storage?.circulateForMin) || 0;
       let text;
-      if (everyH <= 0) {
-        text = "Storage circulation is off (set a cadence in settings to keep the batch stirred).";
-      } else if (batch.circulating) {
-        text = "Stirring now — the pumps are running their scheduled burst.";
+      if (batch.circulating) {
+        // Manual or scheduled, the burst says how long it has left (backend clock).
+        const left = Number(batch.stirMinutesLeft);
+        text = `Stirring now — the pumps are running their burst${Number.isFinite(left) && left > 0 ? `, about ${this._format(left, 0)} min left` : ""}.`;
+      } else if (everyH <= 0) {
+        text = `Storage circulation is off (set a cadence in settings to keep the batch stirred) — Mix now still runs the pumps for ${forMin} min.`;
       } else {
         const next = batch.nextCirculateAt ? new Date(batch.nextCirculateAt) : null;
         const when = next && !Number.isNaN(next.getTime()) ? this._mixingStirClock(next) : "";
@@ -26755,7 +26758,14 @@ const rigSteps = [
             ? `Next stir ${when} — pumps run ${forMin} min, and that first stir flips the batch to Store by itself. Nothing to press.`
             : `Next stir ${when} — pumps run ${forMin} min every ${everyH} h, never continuously.`;
       }
-      circulationLine = `<small class="awc-hint">${text}</small>`;
+      // Mix now (doc §35): the same burst the schedule runs, on demand — and
+      // the schedule re-times from it. Steps aside while the pumps already run.
+      const stirBtn = batch.circulating ? ""
+        : `<button class="secondary compact-button" data-action="mixing-stir-now" ${disabled}>Mix now</button>`;
+      circulationLine = `
+        <div class="button-row" style="align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <small class="awc-hint">${text}</small>${stirBtn}
+        </div>`;
     }
 
     return `
