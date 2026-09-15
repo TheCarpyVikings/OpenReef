@@ -36,7 +36,6 @@ const READ_COMMANDS = [
   "openreef/icp_dashboard",
   "openreef/lighting_window",
   "openreef/list_reef_presets",
-  "openreef/guardian_status",
 ];
 
 const wsUrl = `${HA_URL.replace(/^http/, "ws")}/api/websocket`;

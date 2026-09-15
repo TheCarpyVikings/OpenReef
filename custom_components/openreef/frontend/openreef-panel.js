@@ -97,17 +97,6 @@ class OpenReefPanel extends HTMLElement {
     this._visionAt = 0;
     this._visionLoading = false;
     this._visionError = "";
-    // Guardian (Lagertha live avatar): transcript is panel-owned (the backend
-    // is stateless); videoEl/audioEl are PERSISTENT detached nodes so the
-    // Simli WebRTC streams survive full-innerHTML re-renders — they get
-    // re-mounted into #guardian-face-slot after every render.
-    this._guardian = {
-      status: null, loading: false, error: "", message: "",
-      transcript: [], busy: false,
-      recording: false, recorder: null, chunks: [], stream: null,
-      face: null, videoEl: null, audioEl: null,
-      speaking: false, keysOpen: false,
-    };
     this._spawning = { presets: null, program: null, loading: false, generating: false, error: "", copied: "", execStatus: null, execAt: 0, execLoading: false };
     this._nps = { summary: null, at: 0, loading: false, error: "", message: "", addOpen: false, confirmDelete: "", demo: false, timelineOpen: "",
                   // The feeding log's window (local days) and how many rows are unfolded (doc §13.19).
@@ -156,12 +145,6 @@ class OpenReefPanel extends HTMLElement {
     // never persisted — the charts are derived entirely from logged completions.
     this._maintChart = { weeks: 12, unit: "pct" };
     this._manualEntryDefaults = {};
-    this._onboarding = null;
-    this._onboardingChecked = false;
-    this._avatarPoses = {};
-    this._stickerReady = false;
-    this._walkReady = false;
-    this._buddy = { dismissed: false, expanded: false, lastKey: "", timer: null };
     this._pulseActive = false;
     this._pulseTimer = null;
     this._pulseTick = 0;
@@ -250,7 +233,6 @@ class OpenReefPanel extends HTMLElement {
     // its flow animations on every state push.
     if (this._activeTab === "diagram") return false;
     if (this._setupOpen || this._trend || this._activeTab === "settings") return false;
-    if (this._onboarding && this._onboarding.active) return false;
     // Don't recreate camera <img> elements on hass updates — it would restart the
     // live MJPEG streams. A manual Refresh button re-renders on demand.
     if (this._activeTab === "cameras" || this._cameraFocus) return false;
@@ -309,10 +291,6 @@ class OpenReefPanel extends HTMLElement {
     this._stopTimelapse();
     this._stopFeedPlayer();
     this._stopPulseRuntime();
-    // HA soft-navigation removes the panel without a page unload; a live Simli
-    // face on the detached nodes would keep streaming — and billing — for up
-    // to its 10-minute idle timeout if it isn't closed here.
-    this._guardianStopFace();
     if (this._modeCountdownTimer) {
       window.clearInterval(this._modeCountdownTimer);
       this._modeCountdownTimer = null;
@@ -451,7 +429,7 @@ class OpenReefPanel extends HTMLElement {
     if (this._nps?.demo) return false;   // a refresh would clobber the staged demo view
     if (!this._hass || this._busy || this._configDirty || this._isEditingFormControl()) return false;
     if (this._pulseActive || this._cameraFocus || this._recordingFocus || this._trend) return false;
-    if (this._onboarding?.active || this._setupOpen) return false;
+    if (this._setupOpen) return false;
     return true;
   }
 
@@ -1238,7 +1216,6 @@ class OpenReefPanel extends HTMLElement {
         this._stopTimelapse();
         this._stopFeedPlayer();
         this._feedPlayer.sessionId = "";
-        if (id !== "guardian") this._guardianLeave();
         this._activeTab = id;
         this._setupOpen = false;
         this._equipmentDetail = null;
@@ -1267,43 +1244,8 @@ class OpenReefPanel extends HTMLElement {
         this._pendingScroll = target.dataset.scroll || (sectionToOpen ? `or-section-${sectionToOpen}` : "");
         this._render();
       }
-      if (action === "guardian-save-keys") this._guardianSaveKeys();
-      if (action === "guardian-keys-toggle") {
-        this._guardian.keysOpen = !this._guardian.keysOpen;
-        this._render();
-      }
-      if (action === "guardian-send") this._guardianSendText();
-      if (action === "guardian-ptt") this._guardianToggleRecord();
-      if (action === "guardian-face-start") this._guardianStartFace();
-      if (action === "guardian-face-stop") { this._guardianStopFace(); this._render(); }
-      if (action === "guardian-clear") {
-        this._guardian.transcript = [];
-        this._guardian.error = "";
-        this._render();
-      }
-      if (action === "onboarding-start") { this._activeTab = "mission"; this._startOnboarding(); }
-      if (action === "onboarding-next") this._onboardingNext();
-      if (action === "onboarding-back") this._onboardingBack();
-      if (action === "onboarding-skip") this._endOnboarding(true);
-      if (action === "onboarding-tone") this._toggleTone();
+      if (action === "toggle-tone") this._toggleTone();
       if (action === "set-controller") { this._setController(target.dataset.id); this._render(); }
-      if (action === "buddy-toggle") {
-        if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
-        this._buddy.expanded = !this._buddy.expanded;
-        this._render();
-      }
-      if (action === "buddy-dismiss") {
-        // Session hide only (he's on by default and returns next load — no dead-end).
-        if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
-        this._buddy.dismissed = true;
-        this._render();
-      }
-      if (action === "toggle-buddy") {
-        // Persistent on/off from Settings.
-        this._setBuddyEnabled(!this._buddyEnabled());
-        this._buddy.dismissed = false;
-        this._render();
-      }
       if (action === "setup") {
         this._setupOpen = true;
         this._setupStep = 0;
@@ -7183,8 +7125,6 @@ class OpenReefPanel extends HTMLElement {
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
         ${this._equipmentDetail ? this._equipmentDetailModal() : ""}
         ${this._controlConfirm ? this._controlConfirmModal() : ""}
-        ${this._onboarding && this._onboarding.active ? this._onboardingOverlay() : ""}
-        ${this._buddyOverlay()}
       </main>
     `;
 
@@ -7193,10 +7133,6 @@ class OpenReefPanel extends HTMLElement {
     // The setup wizard keeps its place only within a step; every other
     // dialog keeps it for as long as it stays open.
     if (this._setupOpen ? preserveSetupScroll : Boolean(scrollState.key)) this._restoreScrollState(scrollState);
-    if (this._onboarding && this._onboarding.active) {
-      requestAnimationFrame(() => this._positionOnboarding());
-    }
-    this._maybeAutoStartOnboarding();
     if (this._activeTab === "live") this._loadLiveSparklines();
     if (this._pendingScroll) {
       const anchor = this._pendingScroll;
@@ -7205,9 +7141,6 @@ class OpenReefPanel extends HTMLElement {
         const el = this.shadowRoot.getElementById(anchor);
         if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
       });
-    }
-    if (this._activeTab === "guardian") {
-      requestAnimationFrame(() => this._guardianAfterRender());
     }
     // Diagram tab: (re)start the particle/fish motion and drag wiring against
     // the freshly rendered svg; leaving the tab stops the rAF loop.
@@ -7250,423 +7183,6 @@ class OpenReefPanel extends HTMLElement {
     this.shadowRoot.appendChild(this._betaFab);
   }
 
-  // --- Guardian (Lagertha live avatar) ------------------------------------
-  // Stage A: BYO keys (Anthropic + OpenAI, Simli optional), push-to-talk
-  // voice loop and text chat against openreef/guardian_* websocket commands.
-  // Voice-only mode (static Lagertha art + mp3 playback) is the graceful
-  // fallback when Simli isn't configured; with a Simli key the vendored
-  // WebRTC client streams the live face and lip-syncs raw PCM.
-
-  async _guardianLoadStatus(force = false) {
-    const g = this._guardian;
-    if (g.loading || (g.status && !force)) return;
-    g.loading = true;
-    try {
-      g.status = await this._callWS({ type: "openreef/guardian_status" });
-      g.error = "";
-    } catch (err) {
-      g.error = "Guardian backend unavailable — is the integration up to date?";
-    }
-    g.loading = false;
-    this._render();
-  }
-
-  _guardianLeave() {
-    // On-demand by design: leaving the tab ends the (per-minute billed)
-    // Simli session and any live recording. The transcript survives.
-    this._guardianStopFace();
-    const g = this._guardian;
-    if (g.recorder && g.recording) {
-      try { g.recorder.stop(); } catch { /* already stopped */ }
-    }
-    g.recording = false;
-  }
-
-  _guardianTab() {
-    // Fenced: one exception in this single web component blanks the whole panel.
-    try {
-      const g = this._guardian;
-      if (!g.status && !g.loading) this._guardianLoadStatus();
-      const keys = g.status?.keys || null;
-      const ready = !!keys?.ready;
-      const faceReady = !!keys?.faceReady;
-      const faceActive = !!g.face?.active;
-      const faceConnecting = !!g.face?.connecting;
-      const showKeys = g.keysOpen || (keys && !ready);
-
-      let statusPill = `<div class="pill">Loading…</div>`;
-      if (g.error) statusPill = `<div class="pill warning">${this._escape(g.error)}</div>`;
-      else if (keys && !ready) statusPill = `<div class="pill warning">Needs API keys</div>`;
-      else if (faceActive) statusPill = `<div class="pill ok">Live face connected</div>`;
-      else if (ready) statusPill = `<div class="pill ok">Ready${faceReady ? "" : " — voice only"}</div>`;
-
-      const art = `${this._avatarBase()}${g.speaking ? "point.png" : "idle.png"}`;
-      const transcript = g.transcript.map((turn) => `
-        <div class="guardian-turn ${turn.role === "user" ? "guardian-user" : "guardian-lagertha"}">
-          <span class="guardian-who">${turn.role === "user" ? "You" : "Lagertha"}</span>
-          <p>${this._escape(turn.content)}</p>
-        </div>
-      `).join("");
-
-      const keyRow = (label, name, info) => `
-        <label class="guardian-key">
-          <span>${label} ${info?.set ? `<em class="guardian-hint">set ····${this._escape(info.hint || "")}</em>` : ""}</span>
-          <input type="password" id="guardian-key-${name}" placeholder="${info?.set ? "Leave blank to keep" : "Paste key"}" autocomplete="off">
-        </label>
-      `;
-      const problems = g.status?.problems || g.keyProblems || {};
-      const problemText = Object.entries(problems)
-        .map(([name, text]) => `<p class="guardian-problem">${this._escape(name)}: ${this._escape(text)}</p>`)
-        .join("");
-
-      return `
-        <style>
-          .guardian-stage { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
-          .guardian-face { width: 260px; min-width: 220px; }
-          .guardian-face img { width: 100%; border-radius: 14px; display: block; }
-          .guardian-face video { width: 100%; border-radius: 14px; display: block; background: #06131c; }
-          .guardian-chat { flex: 1; min-width: 280px; }
-          .guardian-log { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
-          .guardian-turn { border-radius: 12px; padding: 8px 12px; max-width: 92%; }
-          .guardian-turn p { margin: 2px 0 0; white-space: pre-wrap; }
-          .guardian-who { font-size: 11px; opacity: 0.65; text-transform: uppercase; letter-spacing: 0.06em; }
-          .guardian-user { align-self: flex-end; background: rgba(72, 149, 194, 0.18); }
-          .guardian-lagertha { align-self: flex-start; background: rgba(122, 194, 122, 0.14); }
-          .guardian-input-row { display: flex; gap: 8px; margin-top: 10px; }
-          .guardian-input-row input { flex: 1; }
-          .guardian-ptt.recording { background: #b3452e; color: #fff; animation: guardianPulse 1.2s infinite; }
-          @keyframes guardianPulse { 50% { filter: brightness(1.25); } }
-          .guardian-key { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
-          .guardian-hint { font-style: normal; opacity: 0.65; font-size: 12px; }
-          .guardian-problem { color: #d98b6a; font-size: 13px; margin: 4px 0 0; }
-          .guardian-busy { opacity: 0.7; font-style: italic; }
-        </style>
-        <section class="card">
-          <div class="card-head">
-            <div>
-              <h2>Lagertha — Reef Guardian</h2>
-              <p>Ask her anything about the tank. She reads the controller; she can't touch it (yet).</p>
-            </div>
-            ${statusPill}
-          </div>
-          <div class="guardian-stage">
-            <div class="guardian-face">
-              ${faceActive || faceConnecting
-                ? `<div id="guardian-face-slot">${faceConnecting ? `<p class="guardian-busy">Summoning the shield-maiden…</p>` : ""}</div>`
-                : `<img src="${art}" alt="Lagertha">`}
-              <div class="button-row">
-                ${faceActive
-                  ? `<button class="secondary" data-action="guardian-face-stop">End live face</button>`
-                  : faceReady && !faceConnecting
-                    ? `<button class="secondary" data-action="guardian-face-start">Start live face</button>`
-                    : ""}
-              </div>
-              ${g.face?.error ? `<p class="guardian-problem">${this._escape(g.face.error)}</p>` : ""}
-            </div>
-            <div class="guardian-chat">
-              <div class="guardian-log" id="guardian-log">
-                ${transcript || `<p class="guardian-busy">No conversation yet. Hold court with the mic, or type below.</p>`}
-                ${g.busy ? `<p class="guardian-busy">Lagertha is thinking…</p>` : ""}
-              </div>
-              <div class="guardian-input-row">
-                <button class="secondary guardian-ptt ${g.recording ? "recording" : ""}" data-action="guardian-ptt" ${!ready || g.busy ? "disabled" : ""}>
-                  ${g.recording ? "■ Stop & send" : "🎙 Speak"}
-                </button>
-                <input type="text" id="guardian-input" placeholder="Ask Lagertha…" ${!ready || g.busy ? "disabled" : ""}>
-                <button class="primary" data-action="guardian-send" ${!ready || g.busy ? "disabled" : ""}>Send</button>
-                <button class="secondary" data-action="guardian-clear" ${g.transcript.length ? "" : "disabled"}>Clear</button>
-              </div>
-              ${g.message ? `<p class="guardian-busy">${this._escape(g.message)}</p>` : ""}
-            </div>
-          </div>
-        </section>
-        <section class="card">
-          <div class="card-head">
-            <div>
-              <h2>Setup</h2>
-              <p>Bring your own keys — they stay in Home Assistant and are never included in config exports.</p>
-            </div>
-            <button class="secondary" data-action="guardian-keys-toggle">${showKeys ? "Hide" : "API keys"}</button>
-          </div>
-          ${showKeys ? `
-            <p>Two keys make her talk; the Simli pair gives her a face. <strong>Anthropic</strong> (console.anthropic.com) is the brain, <strong>OpenAI</strong> (platform.openai.com) is ears + voice, <strong>Simli</strong> (simli.com, optional) is the live face.</p>
-            ${keyRow("Anthropic API key (required)", "anthropic", keys?.anthropic)}
-            ${keyRow("OpenAI API key (required)", "openai", keys?.openai)}
-            ${keyRow("Simli API key (optional)", "simli", keys?.simli)}
-            <label class="guardian-key">
-              <span>Simli face ID ${keys?.simliFaceId ? `<em class="guardian-hint">${this._escape(keys.simliFaceId)}</em>` : ""}</span>
-              <input type="text" id="guardian-key-face" placeholder="${keys?.simliFaceId ? "Leave blank to keep" : "e.g. your Lagertha face ID"}" autocomplete="off">
-            </label>
-            ${problemText}
-            <div class="button-row">
-              <button class="primary" data-action="guardian-save-keys" ${g.busy ? "disabled" : ""}>Save keys</button>
-            </div>
-          ` : ""}
-        </section>
-      `;
-    } catch (err) {
-      return `<section class="card"><h2>Lagertha</h2><p>Guardian view failed: ${this._escape(err?.message || String(err))}</p></section>`;
-    }
-  }
-
-  _guardianAfterRender() {
-    const g = this._guardian;
-    // Re-mount the persistent WebRTC media nodes after the innerHTML rewrite.
-    const slot = this.shadowRoot.getElementById("guardian-face-slot");
-    if (slot && g.videoEl && (g.face?.active || g.face?.connecting)) {
-      if (!slot.contains(g.videoEl)) {
-        slot.appendChild(g.videoEl);
-        slot.appendChild(g.audioEl);
-      }
-    }
-    const log = this.shadowRoot.getElementById("guardian-log");
-    if (log) log.scrollTop = log.scrollHeight;
-    const input = this.shadowRoot.getElementById("guardian-input");
-    if (input && !input.dataset.guardianBound) {
-      input.dataset.guardianBound = "1";
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") this._guardianSendText();
-      });
-    }
-  }
-
-  async _guardianSaveKeys() {
-    const read = (id) => {
-      const el = this.shadowRoot.getElementById(id);
-      return el && el.value.trim() ? el.value.trim() : null;
-    };
-    const payload = { type: "openreef/guardian_set_keys" };
-    const anthropic = read("guardian-key-anthropic");
-    const openai = read("guardian-key-openai");
-    const simli = read("guardian-key-simli");
-    const face = read("guardian-key-face");
-    if (anthropic) payload.anthropic = anthropic;
-    if (openai) payload.openai = openai;
-    if (simli) payload.simli = simli;
-    if (face) payload.simli_face_id = face;
-    if (Object.keys(payload).length === 1) {
-      this._guardian.message = "Nothing to save — paste at least one key first.";
-      this._render();
-      return;
-    }
-    this._guardian.busy = true;
-    this._render();
-    try {
-      const result = await this._callWS(payload);
-      this._guardian.status = { ...(this._guardian.status || {}), keys: result.keys, problems: result.problems };
-      this._guardian.message = Object.keys(result.problems || {}).length
-        ? "Saved, but a key check failed — see below."
-        : "Keys saved. Lagertha is listening.";
-    } catch (err) {
-      this._guardian.message = `Saving failed: ${err?.message || err}`;
-    }
-    this._guardian.busy = false;
-    this._render();
-  }
-
-  async _guardianSendText() {
-    const g = this._guardian;
-    if (g.busy) return;
-    const input = this.shadowRoot.getElementById("guardian-input");
-    const text = input ? input.value.trim() : "";
-    if (!text) return;
-    input.value = "";
-    g.transcript.push({ role: "user", content: text });
-    g.busy = true;
-    g.message = "";
-    this._render();
-    try {
-      const result = await this._callWS({
-        type: "openreef/guardian_chat",
-        history: g.transcript.slice(-24),
-      });
-      g.transcript.push({ role: "assistant", content: result.reply });
-    } catch (err) {
-      g.message = err?.message || "Lagertha couldn't answer that.";
-    }
-    g.busy = false;
-    this._render();
-  }
-
-  async _guardianToggleRecord() {
-    const g = this._guardian;
-    if (g.recording && g.recorder) {
-      g.recorder.stop();
-      return;
-    }
-    if (g.busy) return;
-    if (!navigator.mediaDevices?.getUserMedia) {
-      g.message = "Microphone needs a secure (https) connection to Home Assistant.";
-      this._render();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus" : "";
-      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-      g.chunks = [];
-      recorder.ondataavailable = (event) => { if (event.data.size) g.chunks.push(event.data); };
-      recorder.onstop = () => {
-        stream.getTracks().forEach((track) => track.stop());
-        g.stream = null;
-        g.recording = false;
-        const blob = new Blob(g.chunks, { type: recorder.mimeType || "audio/webm" });
-        g.chunks = [];
-        this._guardianSendVoice(blob);
-      };
-      g.recorder = recorder;
-      g.stream = stream;
-      g.recording = true;
-      g.message = "";
-      recorder.start();
-      this._render();
-    } catch (err) {
-      g.message = "Microphone access was refused.";
-      this._render();
-    }
-  }
-
-  async _guardianSendVoice(blob) {
-    const g = this._guardian;
-    if (!blob || blob.size < 200) { this._render(); return; }
-    g.busy = true;
-    this._render();
-    try {
-      const buffer = await blob.arrayBuffer();
-      let binary = "";
-      const bytes = new Uint8Array(buffer);
-      const CHUNK = 0x8000;
-      for (let i = 0; i < bytes.length; i += CHUNK) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-      }
-      const result = await this._callWS({
-        type: "openreef/guardian_voice",
-        audio: btoa(binary),
-        mime: blob.type || "audio/webm",
-        history: g.transcript.slice(-24),
-        tts: g.face?.active ? "pcm" : "mp3",
-      });
-      if (!result.transcript) {
-        g.message = "I couldn't make out any words there, keeper.";
-      } else {
-        g.transcript.push({ role: "user", content: result.transcript });
-        g.transcript.push({ role: "assistant", content: result.reply });
-        if (result.audio && result.audioFormat === "pcm" && g.face?.active) {
-          this._guardianLipSync(result.audio);
-        } else if (result.audio && result.audioFormat === "mp3") {
-          this._guardianPlayMp3(result.audio);
-        }
-      }
-    } catch (err) {
-      g.message = err?.message || "The voice loop failed.";
-    }
-    g.busy = false;
-    this._render();
-  }
-
-  _guardianPlayMp3(b64) {
-    const g = this._guardian;
-    try {
-      const audio = new Audio(`data:audio/mpeg;base64,${b64}`);
-      g.speaking = true;
-      audio.onended = () => { g.speaking = false; this._render(); };
-      audio.onerror = () => { g.speaking = false; this._render(); };
-      audio.play().catch(() => { g.speaking = false; this._render(); });
-      this._render();
-    } catch { g.speaking = false; }
-  }
-
-  _guardianLipSync(b64) {
-    // OpenAI TTS pcm is 24 kHz s16le mono; Simli wants 16 kHz. Downsample by
-    // averaging (same approach as the original Lagertha build) then feed the
-    // WebRTC client, which owns playback + lip movement.
-    const g = this._guardian;
-    const client = g.face?.client;
-    if (!client) return;
-    try {
-      const raw = atob(b64);
-      const bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
-      const input = new Int16Array(bytes.buffer, 0, Math.floor(bytes.length / 2));
-      const ratio = 24000 / 16000;
-      const output = new Int16Array(Math.round(input.length / ratio));
-      let offset = 0;
-      for (let i = 0; i < output.length; i += 1) {
-        const next = Math.round((i + 1) * ratio);
-        let sum = 0; let count = 0;
-        for (let j = offset; j < next && j < input.length; j += 1) { sum += input[j]; count += 1; }
-        output[i] = count ? sum / count : 0;
-        offset = next;
-      }
-      client.sendAudioData(new Uint8Array(output.buffer));
-    } catch { /* lip-sync is best-effort; the text reply already landed */ }
-  }
-
-  async _guardianStartFace() {
-    const g = this._guardian;
-    if (g.face?.active || g.face?.connecting) return;
-    g.face = { connecting: true, active: false, client: null, error: "" };
-    this._render();
-    try {
-      const creds = await this._callWS({ type: "openreef/guardian_simli_session" });
-      const mod = await import("/openreef_static/vendor/simli-client.mjs");
-      const SimliClient = (mod.default && mod.default.SimliClient) || mod.SimliClient;
-      if (!SimliClient) throw new Error("Simli client bundle failed to load");
-      if (!g.videoEl) {
-        g.videoEl = document.createElement("video");
-        g.videoEl.autoplay = true;
-        g.videoEl.playsInline = true;
-        g.videoEl.muted = true;
-        g.audioEl = document.createElement("audio");
-        g.audioEl.autoplay = true;
-      }
-      const client = new SimliClient();
-      client.Initialize({
-        apiKey: creds.apiKey,
-        faceID: creds.faceId,
-        handleSilence: true,
-        maxSessionLength: 3600,
-        maxIdleTime: 600,
-        session_token: "",
-        SimliURL: "",
-        videoRef: g.videoEl,
-        audioRef: g.audioEl,
-        enableConsoleLogs: false,
-        maxRetryAttempts: 3,
-        retryDelay_ms: 2000,
-        videoReceivedTimeout: 15000,
-        enableSFU: true,
-        model: "fasttalk",
-      });
-      await client.start();
-      g.face = { connecting: false, active: true, client, error: "" };
-    } catch (err) {
-      g.face = { connecting: false, active: false, client: null, error: err?.message || "Could not start the live face" };
-    }
-    this._render();
-  }
-
-  _guardianStopFace() {
-    const g = this._guardian;
-    const client = g.face?.client;
-    if (client) { try { client.close(); } catch { /* already closed */ } }
-    if (g.videoEl) { try { g.videoEl.srcObject = null; } catch { /* detached */ } }
-    if (g.audioEl) { try { g.audioEl.srcObject = null; } catch { /* detached */ } }
-    g.face = null;
-  }
-
-  // --- Avatar onboarding tour (Phase 1) -----------------------------------
-
-  _onboardingDone() {
-    try { return window.localStorage?.getItem("openreef:onboarding:v1:done") === "1"; }
-    catch { return false; }
-  }
-
-  _setOnboardingDone() {
-    try { window.localStorage?.setItem("openreef:onboarding:v1:done", "1"); } catch { /* ignore */ }
-  }
-
   _tone() {
     try { return window.localStorage?.getItem("openreef:tone") === "professional" ? "professional" : "cheeky"; }
     catch { return "cheeky"; }
@@ -7704,376 +7220,6 @@ class OpenReefPanel extends HTMLElement {
     if (c === "apex") return true;
     if (c === "no" || c === "none" || c === "other") return false;
     return this._detectApex();
-  }
-
-  _avatarBase() { return "/openreef_static/avatar/"; }
-
-  _avatarEmoji(pose) {
-    return { idle: "👋", point: "👉", smug: "😏", facepalm: "🤦", celebrate: "🎉", concerned: "😟", thinking: "🤔", chilled: "😎" }[pose] || "🙂";
-  }
-
-  _probeAvatar() {
-    if (this._avatarProbing) return;
-    this._avatarProbing = true;
-    ["idle", "point", "smug", "facepalm", "celebrate", "concerned", "thinking", "chilled"].forEach((pose) => {
-      const img = new Image();
-      img.onload = () => { this._avatarPoses[pose] = true; if (!this._isEditingFormControl()) this._render(); };
-      img.src = `${this._avatarBase()}${pose}.png`;
-    });
-  }
-
-  _probeSticker() {
-    if (this._stickerReady || this._stickerProbing) return;
-    this._stickerProbing = true;
-    const img = new Image();
-    img.onload = () => { this._stickerReady = true; this._stickerProbing = false; if (this._onboarding && this._onboarding.active) this._render(); };
-    img.onerror = () => { this._stickerProbing = false; };
-    img.src = `${this._avatarBase()}apex-throne.png`;
-  }
-
-  _probeWalk() {
-    if (this._walkReady || this._walkProbing) return;
-    this._walkProbing = true;
-    // Preload all four so frame swaps are instant once the cycle runs.
-    ["walk-1", "walk-2", "walk-3", "walk-4"].forEach((f) => { const i = new Image(); i.src = `${this._avatarBase()}${f}.png`; });
-    const img = new Image();
-    img.onload = () => { this._walkReady = true; this._walkProbing = false; };
-    img.onerror = () => { this._walkProbing = false; };
-    img.src = `${this._avatarBase()}walk-1.png`;
-  }
-
-  // Aim the spotlight + (desktop) narrator at the card's CURRENT position. Safe to
-  // call every frame, so it tracks a card while the page smooth-scrolls.
-  _aimOnboarding(anchorEl, snap = false) {
-    const narrator = this.shadowRoot.querySelector(".or-narrator");
-    const spotlight = this.shadowRoot.querySelector(".or-spotlight");
-    if (!narrator || !spotlight) return;
-    if (anchorEl) {
-      const r = anchorEl.getBoundingClientRect();
-      const pad = 8;
-      spotlight.style.opacity = "1";
-      spotlight.style.top = `${r.top - pad}px`;
-      spotlight.style.left = `${r.left - pad}px`;
-      spotlight.style.width = `${r.width + pad * 2}px`;
-      spotlight.style.height = `${r.height + pad * 2}px`;
-    } else {
-      spotlight.style.opacity = "0";
-      spotlight.style.width = "0px";
-      spotlight.style.height = "0px";
-    }
-    if (window.innerWidth <= 640) {
-      ["left", "top", "right", "bottom", "transform"].forEach((p) => { narrator.style[p] = ""; });
-      this._onboarding.pos = null;
-      return;
-    }
-    const m = 14;
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const nw = narrator.offsetWidth;
-    const nh = narrator.offsetHeight;
-    let centreX;
-    let top;
-    if (anchorEl) {
-      const r = anchorEl.getBoundingClientRect();
-      centreX = r.left + r.width / 2;
-      if (vh - r.bottom >= nh + 20) top = r.bottom + 14;
-      else if (r.top >= nh + 20) top = r.top - nh - 14;
-      else top = Math.max(m, vh - nh - m);
-    } else {
-      centreX = vw / 2;
-      top = Math.max(m, (vh - nh) / 2);
-    }
-    const left = Math.round(Math.max(m, Math.min(centreX - nw / 2, vw - nw - m)));
-    top = Math.round(top);
-    if (snap) narrator.style.transition = "none";
-    narrator.style.left = `${left}px`;
-    narrator.style.top = `${top}px`;
-    narrator.style.right = "auto";
-    narrator.style.bottom = "auto";
-    narrator.style.transform = "none";
-    if (snap) { void narrator.offsetWidth; narrator.style.transition = ""; }
-    this._onboarding.pos = { left, top };
-  }
-
-  // rAF loop: tracks the card each frame (so the spotlight + guide follow the page
-  // as it smooth-scrolls) and plays the walk frames; ends back on the frontal pose.
-  _trackOnboarding(anchorEl, dir) {
-    cancelAnimationFrame(this._onboarding.walkRaf);
-    const walkAnim = this._onboarding.walking && this._walkReady && window.innerWidth > 640;
-    const DUR = walkAnim ? 1500 : 700;
-    const FRAME_MS = 210;
-    const start = performance.now();
-    const wi = this.shadowRoot.querySelector(".or-walk-img");
-    if (wi) wi.style.transform = dir > 4 ? "scaleX(-1)" : "none"; // frames face left; flip heading right
-    const tick = () => {
-      if (!this._onboarding || !this._onboarding.active) return;
-      this._aimOnboarding(anchorEl);
-      const t = performance.now() - start;
-      if (walkAnim) {
-        const f = (Math.floor(t / FRAME_MS) % 4) + 1;
-        const el = this.shadowRoot.querySelector(".or-walk-img");
-        if (el) el.src = `${this._avatarBase()}walk-${f}.png`;
-      }
-      if (t >= DUR) {
-        if (this._onboarding.walking) { this._onboarding.walking = false; this._render(); }
-        return;
-      }
-      this._onboarding.walkRaf = requestAnimationFrame(tick);
-    };
-    this._onboarding.walkRaf = requestAnimationFrame(tick);
-  }
-
-  _avatarMarkup(pose) {
-    if (this._avatarPoses[pose]) {
-      return `<img class="or-avatar-img" src="${this._avatarBase()}${this._escape(pose)}.png" alt="">`;
-    }
-    return `<div class="or-avatar-ph" data-pose="${this._escape(pose)}">${this._avatarEmoji(pose)}</div>`;
-  }
-
-  _onboardingScript() {
-    return [
-      { id: "welcome", anchor: null, pose: "idle",
-        cheeky: "Hey — I'm your reef guide, the little reefer who lives in your dashboard. 30-second tour, and not a line of Apex code: no virtual outlets, no Defer commands, no scattered docs.",
-        cheekyNoApex: "Hey — I'm your reef guide, the little reefer who lives in your dashboard. Give me 30 seconds and I'll show you round — no spreadsheets, no guesswork.",
-        professional: "Welcome to OpenReef. I'm your reef guide — here's a quick 30-second tour of the main features." },
-      { id: "reef-health", anchor: "reef-health", pose: "point",
-        cheeky: "Your whole reef's health in one honest number. Apex Fusion shows you the graphs and leaves you to play detective — I actually tell you what they mean.",
-        cheekyNoApex: "Your whole reef's health in one honest number. No more squinting at separate graphs wondering if it all adds up — I tell you what they mean.",
-        professional: "Your Reef Health Score: one explainable 0-100 read on the tank, weighted for your reef type." },
-      { id: "dosing", anchor: "dosing", pose: "smug",
-        cheeky: "Your alk, cal and mag consumption — worked out, with exactly how much to dose. The maths is free; the Trident's reagents sadly aren't. Good news: my mate Harry does ABC reagents cheaper.",
-        cheekyNoApex: "Your alk, cal and mag consumption — worked out from your tests, with exactly how much to dose. The maths most reefers do by hand, or skip entirely and wonder why the corals sulk.",
-        link: { label: "Harry's ABC reagents → marine-spec.co.uk", url: "https://www.marine-spec.co.uk" },
-        professional: "The Dosing Advisor estimates alk/cal/mag consumption from history, projects when you'll reach a limit, and suggests dose changes. Advisory only." },
-      { id: "attention", anchor: "attention", pose: "facepalm",
-        cheeky: "Anything wrong shows up here in plain English. No fault codes to Google, no scattered docs, no three-day forum thread just to get your auto top-off behaving.",
-        cheekyNoApex: "Anything wrong shows up here in plain English — before your corals tell you the hard way. No cryptic codes, no guesswork.",
-        professional: "Anything that needs attention - alerts, missing mappings, safety interlocks - is summarised here in plain English." },
-      { id: "sensors", anchor: "sensors", pose: "point",
-        cheeky: "Tap any reading for its full trend. Apex probes, Trident, and the cheap non-Apex sensors your controller flatly refuses to talk to — all in one place.",
-        cheekyNoApex: "Tap any reading for its full trend. Every probe and smart plug you own — even the cheap ones — in one place, with proper history.",
-        professional: "Tap any reading to open its trend, with ranges from 1 hour to 30 days." },
-      { id: "safety", anchor: "settings", pose: "idle",
-        cheeky: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings.",
-        professional: "One serious note: OpenReef never switches an outlet until you map it and arm it yourself. Your livestock is never automated behind your back. Set that up in Settings." },
-      { id: "done", anchor: null, pose: "celebrate",
-        cheeky: "That's the tour — your reef's in good hands. Now go show your Apex who's boss. 🪸",
-        cheekyNoApex: "That's the tour — your reef's in good hands. Now go enjoy the tank instead of babysitting it. 🪸",
-        professional: "That's the tour. You can replay it any time from the Tour button." },
-    ];
-  }
-
-  _onboardingVisibleSteps() {
-    // Always show every step (so every pose and the supplier tip appear). A step
-    // whose anchor element isn't on screen just renders centred with no spotlight
-    // (see _positionOnboarding).
-    return this._onboardingScript();
-  }
-
-  _startOnboarding() {
-    const steps = this._onboardingVisibleSteps();
-    if (!steps.length) return;
-    this._probeAvatar();
-    this._probeSticker();
-    this._probeWalk();
-    this._onboarding = { active: true, step: 0, steps, scrolledStep: -1, walking: false, walkRaf: null };
-    this._render();
-  }
-
-  _endOnboarding(markDone = true) {
-    if (markDone) this._setOnboardingDone();
-    if (this._onboarding) cancelAnimationFrame(this._onboarding.walkRaf);
-    this._onboarding = null;
-    this._render();
-  }
-
-  _onboardingNext() {
-    if (!this._onboarding) return;
-    if (this._onboarding.step >= this._onboarding.steps.length - 1) { this._endOnboarding(true); return; }
-    this._onboarding.step += 1;
-    this._onboarding.walking = true;
-    this._render();
-  }
-
-  _onboardingBack() {
-    if (!this._onboarding) return;
-    if (this._onboarding.step === 0) return;
-    this._onboarding.step -= 1;
-    this._onboarding.walking = true;
-    this._render();
-  }
-
-  _maybeAutoStartOnboarding() {
-    if (this._onboardingChecked) return;
-    this._onboardingChecked = true;
-    if (this._onboardingDone()) return;
-    if (this._setupOpen || this._trend || this._activeTab !== "mission") return;
-    if (this._onboarding && this._onboarding.active) return;
-    requestAnimationFrame(() => {
-      if (!this._setupOpen && !this._trend && this._activeTab === "mission" && !this._onboardingDone()) {
-        this._startOnboarding();
-      }
-    });
-  }
-
-  _positionOnboarding() {
-    if (!this._onboarding || !this._onboarding.active) return;
-    const narrator = this.shadowRoot.querySelector(".or-narrator");
-    const spotlight = this.shadowRoot.querySelector(".or-spotlight");
-    if (!spotlight || !narrator) return;
-    const step = this._onboarding.steps[this._onboarding.step];
-    const anchorEl = step && step.anchor ? this.shadowRoot.querySelector(`[data-tour="${step.anchor}"]`) : null;
-    const stepChanged = this._onboarding.scrolledStep !== this._onboarding.step;
-    if (!stepChanged) {
-      // Re-render mid/after walk or on a tone toggle: just keep things aligned.
-      this._aimOnboarding(anchorEl);
-      return;
-    }
-    this._onboarding.scrolledStep = this._onboarding.step;
-    const firstPlace = !this._onboarding.pos;
-    const prevLeft = this._onboarding.pos ? this._onboarding.pos.left : null;
-    // First placement snaps with no scroll/walk; later steps smooth-scroll the card
-    // into view and the guide tracks + walks to it.
-    if (anchorEl) {
-      anchorEl.scrollIntoView({ block: "center", behavior: firstPlace ? "auto" : "smooth" });
-    }
-    this._aimOnboarding(anchorEl, firstPlace);
-    if (firstPlace) return;
-    const dir = prevLeft == null ? 0 : (this._onboarding.pos.left - prevLeft);
-    this._trackOnboarding(anchorEl, dir);
-  }
-
-  _onboardingOverlay() {
-    const ob = this._onboarding;
-    const steps = ob.steps;
-    const idx = Math.min(ob.step, steps.length - 1);
-    const step = steps[idx];
-    const tone = this._tone();
-    const hasApex = this._hasApex();
-    const line = tone === "cheeky"
-      ? (hasApex ? step.cheeky : (step.cheekyNoApex || step.cheeky))
-      : (step.professional || step.cheeky);
-    const isLast = idx === steps.length - 1;
-    const dots = steps.map((_, i) => `<span class="or-dot ${i === idx ? "active" : ""}"></span>`).join("");
-    // On desktop, render the guide where it last stood so it walks to the next card.
-    const seed = window.innerWidth > 640 && ob.pos
-      ? ` style="left:${ob.pos.left}px;top:${ob.pos.top}px;right:auto;bottom:auto;transform:none;"`
-      : "";
-    // While moving between cards (desktop, frames loaded) show the walk cycle; otherwise the pose.
-    const walkingNow = ob.walking && this._walkReady && window.innerWidth > 640;
-    const avatarInner = walkingNow
-      ? `<img class="or-avatar-img or-walk-img" src="${this._avatarBase()}walk-${(ob.walkFrame % 4) + 1}.png" alt="">`
-      : this._avatarMarkup(step.pose);
-    return `
-      <div class="or-onboard" role="dialog" aria-label="OpenReef guided tour">
-        <div class="or-spotlight"></div>
-        <div class="or-narrator"${seed}>
-          <div class="or-avatar pose-${this._escape(step.pose)}">${avatarInner}</div>
-          <div class="or-bubble">
-            <div class="or-bubble-top">
-              <span class="eyebrow">Your guide · ${idx + 1}/${steps.length}</span>
-              <button class="or-tone" data-action="onboarding-tone" title="Switch tone">${tone === "cheeky" ? "😏 Cheeky" : "👔 Pro"}</button>
-            </div>
-            ${isLast && tone === "cheeky" && hasApex && this._stickerReady ? `<img class="or-sticker" src="${this._avatarBase()}apex-throne.png" alt="OpenReef's professional assessment of the competition">` : ""}
-            <p class="or-line">${this._escape(line)}</p>
-            ${step.link && tone === "cheeky" && hasApex ? `<a class="or-link" href="${this._escape(step.link.url)}" target="_blank" rel="noopener noreferrer">${this._escape(step.link.label)}</a>` : ""}
-            <div class="or-dots">${dots}</div>
-            <div class="or-actions">
-              <button class="secondary compact-button" data-action="onboarding-skip">Skip</button>
-              <span class="or-spacer"></span>
-              ${idx > 0 ? `<button class="secondary compact-button" data-action="onboarding-back">Back</button>` : ""}
-              <button class="primary compact-button" data-action="onboarding-next">${isLast ? "Finish 🍻" : "Next"}</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }
-
-  // --- Phase 3: reactive corner buddy ------------------------------------
-
-  _buddyEnabled() {
-    try { return window.localStorage?.getItem("openreef:buddy") !== "off"; }
-    catch { return true; }
-  }
-
-  _setBuddyEnabled(on) {
-    try { window.localStorage?.setItem("openreef:buddy", on ? "on" : "off"); } catch { /* ignore */ }
-  }
-
-  _buddyReaction(health, tone) {
-    const critical = health.status === "critical"
-      || health.criticalCount > 0
-      || (health.appliedCap && health.appliedCap.status === "critical");
-    const warning = !critical && (health.status === "warning" || health.warningCount > 0 || Boolean(health.appliedCap));
-    if (critical) {
-      // Serious — identical in both tones, no jokes. Uses the engine's own text.
-      return { mood: "critical", pose: "concerned", title: health.topReason || "Needs attention now", line: health.nextAction || "Check this as soon as you can.", key: `crit|${health.topReason || ""}` };
-    }
-    if (warning) {
-      return { mood: "warning", pose: "point", title: health.topReason || "Worth a look", line: health.nextAction || "", key: `warn|${health.topReason || ""}` };
-    }
-    if (health.learningCount > 0) {
-      return {
-        mood: "learning", pose: "thinking",
-        title: tone === "cheeky" ? "Still learning your tank" : "Learning baselines",
-        line: tone === "cheeky"
-          ? (this._hasApex() ? "Give me a few more days of data and I'll spot the patterns Fusion never would." : "Give me a few more days of data and I'll spot the patterns you'd never catch by eye.")
-          : "Some trends are still establishing a baseline.",
-        key: "learn",
-      };
-    }
-    const great = health.grade === "A";
-    return {
-      mood: "ok", pose: great ? "celebrate" : "chilled",
-      title: tone === "cheeky" ? (great ? "Boringly stable" : "All cruising") : "All in range",
-      line: tone === "cheeky"
-        ? (great ? "Exactly how a reef should be. Nothing for you to do." : "Nothing needs you right now.")
-        : "All monitored parameters are within range.",
-      key: great ? "ok-a" : "ok",
-    };
-  }
-
-  _buddyOverlay() {
-    if (!this._config || this._activeTab !== "mission") return "";
-    if (this._onboarding && this._onboarding.active) return "";
-    if (this._setupOpen || this._trend || this._modeConfirm || this._equipmentDetail || this._controlConfirm) return "";
-    if (this._buddy.dismissed || !this._buddyEnabled()) return "";
-    this._probeAvatar();
-
-    const tone = this._tone();
-    const reaction = this._buddyReaction(this._reefHealthScore(), tone);
-    // Auto-open the bubble when the situation changes; collapse non-critical after a while.
-    if (reaction.key !== this._buddy.lastKey) {
-      this._buddy.lastKey = reaction.key;
-      this._buddy.expanded = true;
-      if (this._buddy.timer) { clearTimeout(this._buddy.timer); this._buddy.timer = null; }
-      if (reaction.mood !== "critical") {
-        this._buddy.timer = setTimeout(() => {
-          if (this._buddy) { this._buddy.expanded = false; this._buddy.timer = null; this._render(); }
-        }, 9000);
-      }
-    }
-    const expanded = this._buddy.expanded;
-    const bubble = expanded ? `
-      <div class="or-buddy-bubble mood-${reaction.mood}">
-        <button class="or-buddy-close" data-action="buddy-dismiss" title="Hide your reef buddy">×</button>
-        <div class="or-bubble-top">
-          <span class="eyebrow">Reef buddy</span>
-          <button class="or-tone" data-action="onboarding-tone" title="Switch tone">${tone === "cheeky" ? "😏 Cheeky" : "👔 Pro"}</button>
-        </div>
-        <strong class="or-buddy-title">${this._escape(reaction.title)}</strong>
-        ${reaction.line ? `<p class="or-buddy-line">${this._escape(reaction.line)}</p>` : ""}
-      </div>` : "";
-    return `
-      <div class="or-buddy">
-        ${bubble}
-        <button class="or-buddy-avatar mood-${reaction.mood}" data-action="buddy-toggle" title="Your reef buddy">
-          <span class="or-buddy-dot mood-${reaction.mood}"></span>
-          ${this._avatarMarkup(reaction.pose)}
-        </button>
-      </div>
-    `;
   }
 
   _messages() {
@@ -14863,7 +14009,6 @@ const rigSteps = [
       { id: "system", label: "System", icon: "⚙",
         pages: [
           ["controls", "Controls"],
-          ...(this._config?.guardian?.enabled !== false ? [["guardian", "Lagertha"]] : []),
           ["settings", "Settings"],
         ] },
     ];
@@ -15004,7 +14149,6 @@ const rigSteps = [
         const armed = safe(() => Object.values(this._config?.equipment || {}).filter((e) => e?.entity).length, 0);
         return this._hubCard(id, label, armed ? `${armed} armed` : "—", "switches, timers, interlocks", "ok");
       }
-      if (id === "guardian") return this._hubCard(id, label, "standing by", "ask Lagertha anything", "ok");
       if (id === "settings") return this._hubCard(id, label, "→", "every knob, one place", "ok");
       return this._hubCard(id, label, "→", "", "ok");
     }).join("");
@@ -15016,7 +14160,7 @@ const rigSteps = [
             water: "Everything the water needs — changes, dosing, chores, and the tests that keep them honest.",
             feeding: "Everything that eats — the feeding station, the hatchery, and the spawning calendar.",
             watch: "Eyes on the tank — cameras, live numbers, and the power they burn.",
-            system: "The machinery — switches, the guardian, and every setting.",
+            system: "The machinery — switches and every setting.",
           }[groupId] || "")}</p>
         </div>
         ${groupId === "feeding" ? this._npsFeedingStrip() : ""}
@@ -15061,9 +14205,6 @@ const rigSteps = [
     if (this._activeTab === "vision") {
       // Falls back to Mission if vision was disabled while this tab was active.
       return this._config?.vision?.enabled ? this._visionTab() : this._mission();
-    }
-    if (this._activeTab === "guardian") {
-      return this._config?.guardian?.enabled !== false ? this._guardianTab() : this._mission();
     }
     if (this._activeTab === "settings") return this._settings();
     return this._mission();
@@ -17517,12 +16658,15 @@ const rigSteps = [
     return quips[Math.floor(Math.random() * quips.length)] || "";
   }
 
-  _overlayReaction() {
-    return this._buddyReaction(this._reefHealthScore(), this._tone());
-  }
-
+  // Calm = nothing critical, nothing warning, no cap applied and no trend still
+  // learning its baseline. The quip is the only thing gated on it, and a joke
+  // must never sit on top of a tank that needs the user.
   _overlayIsCalm() {
-    return this._overlayReaction().mood === "ok";
+    const health = this._reefHealthScore();
+    if (health.status === "critical" || health.criticalCount > 0) return false;
+    if (health.status === "warning" || health.warningCount > 0) return false;
+    if (health.appliedCap) return false;
+    return !(health.learningCount > 0);
   }
 
   // The quip only shows in cheeky tone, on a calm tank, when enabled. Not Apex-gated.
@@ -17533,11 +16677,6 @@ const rigSteps = [
     if (!this._overlayIsCalm()) return "";
     if (!this._overlayQuip) this._overlayQuip = this._pickOverlayQuip();
     return this._overlayQuip;
-  }
-
-  _overlayPose() {
-    if (this._overlayQuipText()) return "smug";  // cocky pose when it's throwing the jab
-    return this._overlayReaction().pose;
   }
 
   _overlayShortLabel(id, sensor) {
@@ -17586,23 +16725,20 @@ const rigSteps = [
     const pos = ["top-left", "top-right", "bottom-left", "bottom-right"].includes(cfg.position)
       ? cfg.position
       : "bottom-left";
-    if (!chips.length && !showName && !(cfg.showAvatar)) return "";
+    if (!chips.length && !showName && !quip) return "";
     const chipsHtml = chips.map((chip) => `
       <span class="cam-overlay-chip ${chip.key === "reefHealth" ? "is-health" : ""}">
         <small>${this._escape(chip.label)}</small>
         <strong data-overlay-stat="${this._escape(chip.key)}">${this._escape(chip.value)}${chip.unit ? ` ${this._escape(chip.unit)}` : ""}</strong>
       </span>`).join("");
-    const avatar = cfg.showAvatar
-      ? `<div class="cam-overlay-avatar">
-          ${quip ? `<span class="cam-overlay-bubble">${this._escape(quip)}</span>` : ""}
-          ${this._avatarMarkup(this._overlayPose())}
-        </div>`
+    const jab = quip
+      ? `<div class="cam-overlay-jab"><span class="cam-overlay-bubble">${this._escape(quip)}</span></div>`
       : "";
     return `
       <div class="cam-overlay pos-${pos}" data-camera-overlay>
         ${showName ? `<span class="cam-overlay-title">${this._escape(tank.name)}</span>` : ""}
         ${chips.length ? `<div class="cam-overlay-chips">${chipsHtml}</div>` : ""}
-        ${avatar}
+        ${jab}
       </div>`;
   }
 
@@ -17768,8 +16904,7 @@ const rigSteps = [
       topReason: health.topReason || "",
       tiles,
       insight: insight ? { kicker: insight.kicker, title: insight.title, detail: insight.detail, status: insight.status } : null,
-      showBuddy: cfg.showBuddy !== false,
-      pose: this._overlayPose(),
+      quip: cfg.showQuip !== false ? this._overlayQuipText() : "",
     };
   }
 
@@ -17905,16 +17040,22 @@ const rigSteps = [
       ctx.fill();
     }
 
-    // Reef Buddy last, top-right under the wordmark: it's the only part that
-    // needs a network fetch, and a slow or blocked avatar must never cost the
-    // user the readings — the race means a stalled load just omits the art.
-    if (model.showBuddy) {
-      const size = Math.round(170 * scale);
-      const avatar = await Promise.race([
-        this._loadImage(`${this._avatarBase()}${model.pose}.png`).catch(() => null),
-        new Promise((resolve) => window.setTimeout(() => resolve(null), 1500)),
-      ]);
-      if (avatar) ctx.drawImage(avatar, w - pad - size, pad + Math.round(46 * scale), size, size);
+    // The calm-tank jab last, bottom-right: purely decorative, so it is drawn
+    // after every reading has already landed on the card.
+    if (model.quip) {
+      ctx.save();
+      ctx.font = font(26, "700");
+      const bw = Math.round(ctx.measureText(model.quip).width + 36 * scale);
+      const bh = Math.round(52 * scale);
+      const bx = w - pad - bw;
+      const by = h - pad - bh;
+      this._roundRect(ctx, bx, by, bw, bh, Math.round(13 * scale));
+      ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+      ctx.fill();
+      ctx.fillStyle = "#0a2230";
+      ctx.textBaseline = "middle";
+      ctx.fillText(model.quip, bx + Math.round(18 * scale), by + bh / 2);
+      ctx.restore();
     }
   }
 
@@ -18037,31 +17178,22 @@ const rigSteps = [
       ctx.restore();
     }
 
-    // --- avatar + speech bubble (opposite side from the stats panel) ---
-    if (cfg.showAvatar) {
-      const avSize = Math.round(240 * scale);
-      const ax = pos.includes("right") ? pad : w - pad - avSize;
-      const ay = h - pad - avSize;
-      const quip = this._overlayQuipText();
-      if (quip) {
-        ctx.save();
-        ctx.font = font(28, "700");
-        const tw = ctx.measureText(quip).width;
-        const bw = Math.round(tw + 40 * scale);
-        const bh = Math.round(56 * scale);
-        const bx = Math.max(pad, Math.min(Math.round(ax + avSize / 2 - bw / 2), w - pad - bw));
-        const by = ay - bh - Math.round(14 * scale);
-        this._roundRect(ctx, bx, by, bw, bh, Math.round(14 * scale));
-        ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
-        ctx.fill();
-        ctx.fillStyle = "#0a2230";
-        ctx.textBaseline = "middle";
-        ctx.fillText(quip, bx + Math.round(20 * scale), by + bh / 2);
-        ctx.restore();
-      }
-      const pose = this._overlayPose();
-      const avatar = await this._loadImage(`${this._avatarBase()}${pose}.png`).catch(() => null);
-      if (avatar) ctx.drawImage(avatar, ax, ay, avSize, avSize);
+    // --- the jab (opposite side from the stats panel, along the bottom) ---
+    const quip = this._overlayQuipText();
+    if (quip) {
+      ctx.save();
+      ctx.font = font(28, "700");
+      const bw = Math.round(ctx.measureText(quip).width + 40 * scale);
+      const bh = Math.round(56 * scale);
+      const bx = pos.includes("right") ? pad : w - pad - bw;
+      const by = h - pad - bh;
+      this._roundRect(ctx, bx, by, bw, bh, Math.round(14 * scale));
+      ctx.fillStyle = "rgba(255, 255, 255, 0.94)";
+      ctx.fill();
+      ctx.fillStyle = "#0a2230";
+      ctx.textBaseline = "middle";
+      ctx.fillText(quip, bx + Math.round(20 * scale), by + bh / 2);
+      ctx.restore();
     }
 
     // --- OpenReef wordmark (top-right, out of the stats panel's way) ---
@@ -18094,7 +17226,7 @@ const rigSteps = [
     const body = `
       <label class="toggle-card">
         <input type="checkbox" data-scope="overlay" data-field="enabled" ${cfg.enabled ? "checked" : ""}>
-        <span><strong>Show stats on the live feed</strong><small>Burn selected readings (and the Reef Buddy) onto the camera view, and into a shareable tank card.</small></span>
+        <span><strong>Show stats on the live feed</strong><small>Burn selected readings onto the camera view, and into a shareable tank card.</small></span>
       </label>
       <p class="eyebrow">Stats to show</p>
       ${sensors.length
@@ -18108,7 +17240,6 @@ const rigSteps = [
       <div class="grid two compact">
         ${extra("showReefHealth", "Reef Health score", "Show the overall health grade.")}
         ${extra("showTankName", "Tank name", "Title the overlay with your tank's name.")}
-        ${extra("showAvatar", "Reef Buddy avatar", "Your reef guide, reacting to the tank's health.")}
         ${extra("showQuip", "Cheeky one-liner", "A rotating Apex jab — cheeky mode + calm tank only. Your dig to share.")}
       </div>
       <p class="eyebrow">Position</p>
@@ -18565,7 +17696,7 @@ const rigSteps = [
         patch: {
           backdrop: "wall", showHealthRing: true, showStats: true, showSparklines: true,
           showCategories: true, showEquipment: true, showToday: true, showInsights: true,
-          showTicker: true, showMode: true, showClock: true, showBuddy: true,
+          showTicker: true, showMode: true, showClock: true, showQuip: true,
         },
       },
       photoframe: {
@@ -18574,7 +17705,7 @@ const rigSteps = [
         patch: {
           backdrop: "auto", showHealthRing: true, showStats: false, showSparklines: false,
           showCategories: false, showEquipment: false, showToday: false, showInsights: true,
-          showTicker: false, showMode: false, showClock: true, showBuddy: false,
+          showTicker: false, showMode: false, showClock: true, showQuip: false,
         },
       },
       minimal: {
@@ -18583,7 +17714,7 @@ const rigSteps = [
         patch: {
           backdrop: "wall", showHealthRing: true, showStats: false, showSparklines: false,
           showCategories: false, showEquipment: false, showToday: false, showInsights: false,
-          showTicker: false, showMode: false, showClock: true, showBuddy: false,
+          showTicker: false, showMode: false, showClock: true, showQuip: false,
         },
       },
       diagram: {
@@ -18592,7 +17723,7 @@ const rigSteps = [
         patch: {
           backdrop: "diagram", showHealthRing: false, showStats: false, showSparklines: false,
           showCategories: false, showEquipment: false, showToday: false, showInsights: true,
-          showTicker: false, showMode: true, showClock: true, showBuddy: false,
+          showTicker: false, showMode: true, showClock: true, showQuip: false,
         },
       },
       command: {
@@ -18601,7 +17732,7 @@ const rigSteps = [
         patch: {
           backdrop: "diagram", showHealthRing: true, showStats: true, showSparklines: true,
           showCategories: true, showEquipment: true, showToday: true, showInsights: true,
-          showTicker: true, showMode: true, showClock: true, showBuddy: false,
+          showTicker: true, showMode: true, showClock: true, showQuip: false,
         },
       },
     };
@@ -18628,9 +17759,7 @@ const rigSteps = [
   _openPulse(fromGesture = false) {
     if (!this._pulseEnabled() || this._pulseActive) return;
     // Pulse owns the single live-video session; close the camera modal if open.
-    // A live (per-minute billed) Simli face must not survive into kiosk mode.
     this._stopCameraWebRTC();
-    this._guardianStopFace();
     this._cameraFocus = null;
     this._recordingFocus = null;
     this._overlayQuip = this._pickOverlayQuip();
@@ -18730,8 +17859,8 @@ const rigSteps = [
     if (!this._pulseTimer) {
       this._pulseTimer = window.setInterval(() => {
         this._pulseTick += 1;
-        // Fresh quip roughly every 40s keeps the buddy alive without spamming.
-        if (this._pulseCfg().showBuddy !== false && this._pulseTick % 4 === 0) {
+        // Fresh quip roughly every 40s keeps the wall's voice alive without spamming.
+        if (this._pulseCfg().showQuip !== false && this._pulseTick % 4 === 0) {
           this._overlayQuip = this._pickOverlayQuip();
         }
         // Refresh sparkline history every ~5 minutes on the data wall.
@@ -19680,10 +18809,9 @@ const rigSteps = [
           </div>
           ${cfg.showTicker !== false ? `<div class="pulse-ticker" data-pulse-ticker>${this._pulseTickerMarkup()}</div>` : ""}
         </div>
-        ${cfg.showBuddy !== false ? `
-          <div class="pulse-buddy">
-            ${quip ? `<span class="cam-overlay-bubble" data-pulse-quip>${this._escape(quip)}</span>` : ""}
-            ${this._avatarMarkup(this._overlayPose())}
+        ${cfg.showQuip !== false && quip ? `
+          <div class="pulse-jab">
+            <span class="cam-overlay-bubble" data-pulse-quip>${this._escape(quip)}</span>
           </div>
         ` : ""}
         <div class="pulse-focus-host" data-pulse-focus-host></div>
@@ -23842,7 +22970,7 @@ const rigSteps = [
     const summaryCards = [
       cards.trust ? this._missionSummaryCard("Trust Check", this._trustStatusLabel(trust.status || "unknown"), this._trustSummaryText(trust), trust.status || "unknown", "settings", { action: "system-check-open" }) : "",
       cards.health ? this._missionSummaryCard("Reef Health", `${health.score}/100`, `${health.gradeDetail || `${health.grade} grade`} · ${health.topReason}`, health.status, "mission", { scroll: "or-anchor-health" }) : "",
-      cards.dosing && dosing ? this._missionSummaryCard("Dosing", dosing.value, dosing.detail, dosing.status, "dosing", { tour: "dosing" }) : "",
+      cards.dosing && dosing ? this._missionSummaryCard("Dosing", dosing.value, dosing.detail, dosing.status, "dosing") : "",
       cards.live ? this._missionSummaryCard("Sensors", `${mappedSensors}/${sensors.length}`, sensorSummary.detail, sensorSummary.status, "live") : "",
       cards.controls ? this._missionSummaryCard("Equipment", `${armedEquipment}/${equipment.length}`, equipment.length ? "armed devices" : "none mapped", armedUnavailable.length ? "critical" : armedEquipment ? "ok" : "unknown", "controls") : "",
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
@@ -23871,7 +22999,7 @@ const rigSteps = [
     ].filter(Boolean);
     const tankPill = `<span class="pill ${sensorSummary.status}">${mappedSensors}/${sensors.length} sensors · ${armedEquipment} on</span>`;
     const tankSection = tankCols.length
-      ? this._missionSection("mission-tank", "Detail", "Tank details", tankPill, `<div class="grid ${tankCols.length === 1 ? "" : tankCols.length === 2 ? "two" : "three"}">${tankCols.join("")}</div>`, false, "sensors")
+      ? this._missionSection("mission-tank", "Detail", "Tank details", tankPill, `<div class="grid ${tankCols.length === 1 ? "" : tankCols.length === 2 ? "two" : "three"}">${tankCols.join("")}</div>`)
       : "";
 
     return `
@@ -23884,9 +23012,8 @@ const rigSteps = [
           </div>
           <div class="actions">
             ${this._pulseEnabled() ? `<button class="secondary" data-action="open-pulse" title="Full-screen presentation mode">✨ Present</button>` : ""}
-            <button class="secondary" data-action="onboarding-start" title="Take the guided tour">👋 Tour</button>
             <button class="secondary" data-action="validate">Refresh checks</button>
-            <button class="primary" data-action="tab" data-id="settings" data-tour="settings">Open settings</button>
+            <button class="primary" data-action="tab" data-id="settings">Open settings</button>
           </div>
         </div>
         ${this._modePanel()}
@@ -23911,11 +23038,10 @@ const rigSteps = [
     const sectionAttr = opts.section ? ` data-section="${this._escape(opts.section)}"` : "";
     const msectionAttr = opts.msection ? ` data-msection="${this._escape(opts.msection)}"` : "";
     const scrollAttr = opts.scroll ? ` data-scroll="${this._escape(opts.scroll)}"` : "";
-    const tourAttr = opts.tour ? ` data-tour="${this._escape(opts.tour)}"` : "";
     // One coherent accessible name instead of three separate inline nodes.
     const ariaLabel = this._escape([label, value, detail].filter(Boolean).join(" — "));
     // opts.action: a card that opens a dialog instead of switching tab.
-    const actionAttrs = opts.action ? `data-action="${this._escape(opts.action)}"` : `data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr}${tourAttr}`;
+    const actionAttrs = opts.action ? `data-action="${this._escape(opts.action)}"` : `data-action="tab" data-id="${this._escape(tab)}"${sectionAttr}${msectionAttr}${scrollAttr}`;
     return `
       <button class="summary-card ${status}" ${actionAttrs} aria-label="${ariaLabel}">
         <span>${this._escape(label)}</span>
@@ -23929,10 +23055,10 @@ const rigSteps = [
   // + a working chevron. `pill` is a full <span class="pill ..."> string (kept
   // visible when collapsed so collapsed never means hidden info). `defaultOpen`
   // may be dynamic (e.g. auto-open on attention); an explicit toggle overrides it.
-  _missionSection(key, eyebrow, title, pill, body, defaultOpen = false, tourId = "") {
+  _missionSection(key, eyebrow, title, pill, body, defaultOpen = false) {
     const open = this._missionSectionOpen(key, defaultOpen);
     return `
-      <article class="panel mission-section ${open ? "open" : "collapsed"}" id="or-msection-${this._escape(key)}" ${tourId ? `data-tour="${this._escape(tourId)}"` : ""}>
+      <article class="panel mission-section ${open ? "open" : "collapsed"}" id="or-msection-${this._escape(key)}">
         <button class="mission-section-head" data-action="toggle-health-section" data-section="${this._escape(key)}" data-open="${open ? 1 : 0}" aria-expanded="${open ? "true" : "false"}">
           <span class="mission-section-title">
             <span class="eyebrow">${this._escape(eyebrow)}</span>
@@ -24008,7 +23134,7 @@ const rigSteps = [
     const groups = health.groups || {};
     const detailsOpen = this._healthSectionOpen("details");
     return `
-      <article class="panel health-breakdown ${this._escape(health.status)}" id="or-anchor-health" data-tour="reef-health">
+      <article class="panel health-breakdown ${this._escape(health.status)}" id="or-anchor-health">
         <div class="section-head">
           <div>
             <p class="eyebrow">Why this score?</p>
@@ -30117,7 +29243,7 @@ const rigSteps = [
       ["showStats", "Live stats", "Overlay chips on camera; big tiles with graphs on the data wall."],
       ["showTicker", "Event ticker", "Recent activity and alerts along the bottom."],
       ["showMode", "Current mode", "Running / Feed / Maintenance pill in the header."],
-      ["showBuddy", "Reef Buddy", "Corner avatar with rotating calm-only quips."],
+      ["showQuip", "Calm-tank quip", "A rotating one-liner in the corner — only ever on a calm tank."],
       ["showClock", "Clock", "Live clock next to the tank name."],
       ["showInsights", "Insight cards", "A rotating story card — consumption projections, test nags, tonight's moon, trust checks. The wall explains itself."],
       ["showShare", "Share button", "One-tap share of the live Pulse view — your wall, stats baked on, straight to the share sheet."],
@@ -30530,25 +29656,16 @@ const rigSteps = [
   }
 
   _guideSettings() {
-    const buddyOn = this._buddyEnabled();
     const cheeky = this._tone() === "cheeky";
     return this._settingsPanel(
       "guide",
-      "Guide & buddy",
-      "Your reef guide's personality, the live reactive buddy, and the guided tour.",
+      "Tone",
+      "How OpenReef talks to you. The jokes only ever land on a calm tank — safety messages stay serious in either voice.",
       `
         <div class="stack tight">
           <div class="control-row">
-            <div><strong>Reef buddy</strong><div class="muted">A live mascot in the Mission Control corner that reacts to your tank state.</div></div>
-            <button class="${buddyOn ? "primary" : "secondary"} compact-button" data-action="toggle-buddy">${buddyOn ? "On" : "Off"}</button>
-          </div>
-          <div class="control-row">
             <div><strong>Tone</strong><div class="muted">Cheeky adds the humour; Professional keeps it plain. Safety messages stay serious either way.</div></div>
-            <button class="secondary compact-button" data-action="onboarding-tone">${cheeky ? "😏 Cheeky" : "👔 Professional"}</button>
-          </div>
-          <div class="control-row">
-            <div><strong>Guided tour</strong><div class="muted">Replay the walkthrough on Mission Control any time.</div></div>
-            <button class="secondary compact-button" data-action="onboarding-start">👋 Replay</button>
+            <button class="secondary compact-button" data-action="toggle-tone">${cheeky ? "😏 Cheeky" : "👔 Professional"}</button>
           </div>
         </div>
       `,
@@ -31970,16 +31087,14 @@ ${parts.buttons}
 
   _setupProfileStep() {
     const themeColor = this._themeColor();
-    this._probeAvatar();
     return this._setupShell(
       "Welcome to OpenReef",
       "OpenReef is your Home Assistant-native reef controller. Let's get the basics set up — you can change everything later in Settings.",
       `
         <div class="setup-intro">
-          <div class="setup-intro-avatar">${this._avatarMarkup("idle")}</div>
           <div class="setup-intro-bubble">
-            <strong>Hi, I'm your reef guide 👋</strong>
-            <p class="muted">A little reefer who lives in your dashboard. I'll keep an eye on the tank with you — and once you're set up, I'll show you round in a quick tour.</p>
+            <strong>Three steps and you're reefing 👋</strong>
+            <p class="muted">Nothing here touches your tank until you say so — every switch stays locked until you arm it yourself.</p>
           </div>
         </div>
         <div class="setup-guide">
@@ -32514,43 +31629,9 @@ ${parts.buttons}
         .dose-footer { color: #8da2ba; display: block; margin-top: 4px; }
         .doser-overrides summary { cursor: pointer; color: #9fb2c7; }
         .doser-overrides .mini-grid { margin-top: 8px; }
-        .or-onboard { position: fixed; inset: 0; z-index: 12; pointer-events: none; }
-        .or-spotlight { position: fixed; border-radius: 12px; box-shadow: 0 0 0 9999px rgba(4, 12, 20, .62); outline: 2px solid var(--openreef-accent); outline-offset: 2px; opacity: 0; transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease, opacity .2s ease; pointer-events: none; }
-        .or-narrator { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); width: min(520px, calc(100vw - 28px)); display: flex; gap: 12px; align-items: flex-end; pointer-events: auto; z-index: 13; transition: left 1.4s cubic-bezier(.4,.15,.35,1), top 1.4s cubic-bezier(.4,.15,.35,1); }
-        .or-avatar { flex: 0 0 auto; width: 176px; display: grid; place-items: end center; }
-        .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 10px rgba(0,0,0,.45)); animation: or-bob 2.6s ease-in-out infinite; }
-        .or-walk-img { animation: none; transform-origin: center bottom; }
-        @keyframes or-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-        .or-avatar-ph { width: 168px; height: 168px; border-radius: 50%; display: grid; place-items: center; font-size: 74px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); box-shadow: 0 6px 14px rgba(0,0,0,.45); }
-        .or-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 16px; padding: 18px 20px; box-shadow: 0 18px 50px rgba(0,0,0,.5); }
-        .or-bubble-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 6px; }
         .or-tone { border: 1px solid #294055; border-radius: 999px; background: #172536; color: #dcecff; font-size: 11px; font-weight: 800; padding: 3px 10px; }
         .or-tone:hover { border-color: var(--openreef-accent); }
-        .or-sticker { display: block; width: 100%; max-height: 360px; object-fit: contain; border-radius: 10px; margin-bottom: 12px; }
-        .or-line { color: #e9f1f8; font-size: 17px; line-height: 1.5; overflow-wrap: anywhere; }
-        .or-link { display: inline-block; margin-top: 8px; color: var(--openreef-accent); font-weight: 800; text-decoration: none; border-bottom: 1px solid var(--openreef-accent-border); overflow-wrap: anywhere; }
-        .or-link:hover { border-bottom-color: var(--openreef-accent); }
-        .or-dots { display: flex; gap: 6px; margin: 10px 0; }
-        .or-dot { width: 7px; height: 7px; border-radius: 50%; background: #2b4056; }
-        .or-dot.active { background: var(--openreef-accent); }
-        .or-actions { display: flex; gap: 8px; align-items: center; }
-        .or-actions .or-spacer { flex: 1 1 auto; }
-        .or-buddy { position: fixed; right: 16px; bottom: 16px; z-index: 11; display: flex; align-items: flex-end; gap: 10px; pointer-events: none; }
-        .or-buddy-avatar { position: relative; flex: 0 0 auto; width: 122px; padding: 0; border: 0; background: transparent; cursor: pointer; pointer-events: auto; display: block; }
-        .or-buddy-avatar .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 12px rgba(0,0,0,.5)); }
-        .or-buddy-avatar .or-avatar-ph { width: 92px; height: 92px; margin: 0 auto; }
-        .or-buddy-dot { position: absolute; top: 8px; right: 12px; width: 14px; height: 14px; border-radius: 50%; border: 2px solid #07111a; background: #22c55e; }
-        .or-buddy-dot.mood-warning { background: #f59e0b; }
-        .or-buddy-dot.mood-critical { background: #ef4444; animation: or-pulse 1.2s ease-in-out infinite; }
-        .or-buddy-dot.mood-learning { background: #38bdf8; }
         @keyframes or-pulse { 50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, .25); } }
-        .or-buddy-bubble { position: relative; pointer-events: auto; max-width: 300px; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 12px 30px 12px 14px; box-shadow: 0 16px 44px rgba(0,0,0,.5); }
-        .or-buddy-bubble.mood-warning { border-color: #a16207; }
-        .or-buddy-bubble.mood-critical { border-color: #ef4444; background: #2b171c; }
-        .or-buddy-title { display: block; color: #f1f6fb; margin-top: 2px; }
-        .or-buddy-line { color: #cbd9e8; margin-top: 4px; line-height: 1.4; overflow-wrap: anywhere; }
-        .or-buddy-close { position: absolute; top: 6px; right: 8px; width: 22px; height: 22px; border: 0; border-radius: 50%; background: transparent; color: #8da2ba; font-size: 16px; line-height: 1; cursor: pointer; }
-        .or-buddy-close:hover { color: #e5edf5; }
         .manual-entry-panel { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .96)); }
         .manual-entry-grid { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(130px, .5fr) minmax(110px, .45fr) minmax(180px, .8fr) minmax(140px, .6fr) minmax(220px, 1fr) auto; gap: 12px; align-items: end; }
         .manual-session-grid { display: grid; grid-template-columns: minmax(180px, .45fr) minmax(260px, 1fr); gap: 12px; align-items: end; }
@@ -33278,9 +32359,7 @@ ${parts.buttons}
         .pulse-ticker-item strong { color: #e9f4fb; font-weight: 700; font-size: 13px; }
         .pulse-ticker-item.is-critical strong { color: #fecaca; }
         .pulse-ticker-item.is-warning strong { color: #fde68a; }
-        .pulse-buddy { position: absolute; right: 26px; bottom: 120px; display: flex; flex-direction: column; align-items: center; gap: 8px; width: 120px; pointer-events: none; }
-        .pulse-buddy .or-avatar-img, .pulse-buddy .or-avatar-ph { width: 104px; height: 104px; object-fit: contain; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, .5)); }
-        .pulse-buddy .or-avatar-ph { display: grid; place-items: center; font-size: 52px; }
+        .pulse-jab { position: absolute; right: 26px; bottom: 120px; display: flex; justify-content: flex-end; max-width: 280px; pointer-events: none; }
         .pulse-close { position: absolute; top: 22px; right: 22px; z-index: 2; width: 42px; height: 42px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .25); background: rgba(4, 10, 16, .55); color: #e5edf5; font-size: 17px; opacity: .35; transition: opacity .2s ease; backdrop-filter: blur(8px); }
         .pulse-close:hover, .pulse-close:focus-visible { opacity: 1; }
         /* Reef Pulse data wall (no camera, or Backdrop = Data wall) */
@@ -33345,7 +32424,7 @@ ${parts.buttons}
         .pulse-tap:active { transform: scale(.985); }
         .pulse-ring[data-action] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
         /* Burn-in guard: the HUD layers drift by a couple of px on a slow orbit. */
-        .pulse-head, .pulse-foot, .pulse-wall, .pulse-buddy { transition: transform 3s ease; transform: translate(var(--pulse-shift, 0px, 0px)); }
+        .pulse-head, .pulse-foot, .pulse-wall, .pulse-jab { transition: transform 3s ease; transform: translate(var(--pulse-shift, 0px, 0px)); }
         /* Night dim: whole screen fades down; alerts and taps bring it back. */
         .pulse-root { transition: filter 2s ease; }
         .pulse-root.pulse-dimmed { filter: brightness(.32); }
@@ -33408,7 +32487,7 @@ ${parts.buttons}
         .pulse-insight-dots span.is-critical { background: rgba(239, 68, 68, .55); }
         .pulse-insight-dots span.is-warning.on { background: #f59e0b; }
         .pulse-insight-dots span.is-critical.on { background: #ef4444; }
-        .pulse-has-focus .pulse-buddy { display: none; }
+        .pulse-has-focus .pulse-jab { display: none; }
         .pulse-root.pulse-alert-warning::after, .pulse-root.pulse-alert-critical::after { content: ""; position: absolute; inset: 0; pointer-events: none; animation: pulse-edge 1.8s ease-in-out infinite; }
         .pulse-root.pulse-alert-warning::after { box-shadow: inset 0 0 90px rgba(245, 158, 11, .4); }
         .pulse-root.pulse-alert-critical::after { box-shadow: inset 0 0 110px rgba(239, 68, 68, .5); }
@@ -33417,7 +32496,7 @@ ${parts.buttons}
         @media (max-width: 700px) {
           .pulse-head { padding: 16px 62px 0 16px; }
           .pulse-foot { padding: 0 16px 14px; }
-          .pulse-buddy { display: none; }
+          .pulse-jab { display: none; }
           /* The label alone is decoration and the phone header has no room for
              it — but when it is the way to change mode it has to stay. */
           .pulse-mode { display: none; }
@@ -33479,10 +32558,8 @@ ${parts.buttons}
         .cam-overlay-chip small { color: #9fc7e0; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
         .cam-overlay-chip strong { color: #fff; font-size: 14px; font-weight: 800; }
         .cam-overlay-chip.is-health small { color: #7fe0c4; }
-        .cam-overlay-avatar { position: absolute; bottom: 10px; right: 12px; display: flex; flex-direction: column; align-items: center; gap: 6px; width: 96px; }
-        .cam-overlay.pos-bottom-right .cam-overlay-avatar, .cam-overlay.pos-top-right .cam-overlay-avatar { right: auto; left: 12px; }
-        .cam-overlay-avatar .or-avatar-img, .cam-overlay-avatar .or-avatar-ph { width: 96px; height: 96px; object-fit: contain; }
-        .cam-overlay-avatar .or-avatar-ph { display: grid; place-items: center; font-size: 48px; }
+        .cam-overlay-jab { position: absolute; bottom: 10px; right: 12px; display: flex; justify-content: flex-end; max-width: 60%; }
+        .cam-overlay.pos-bottom-right .cam-overlay-jab, .cam-overlay.pos-top-right .cam-overlay-jab { right: auto; left: 12px; justify-content: flex-start; }
         .cam-overlay-bubble { background: rgba(255, 255, 255, .94); color: #0a2230; font-weight: 800; font-size: 12px; padding: 5px 10px; border-radius: 12px; max-width: 180px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
         .range-picker { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
         .controller-picker { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-top: 6px; }
@@ -33519,9 +32596,6 @@ ${parts.buttons}
         .apex-guide h3 { margin-bottom: 4px; }
         .apex-guide p { color: #a8bed4; }
         .setup-intro { display: flex; align-items: center; gap: 16px; padding: 6px 4px 14px; }
-        .setup-intro-avatar { flex: 0 0 auto; width: 110px; }
-        .setup-intro-avatar .or-avatar-img { width: 100%; height: auto; display: block; filter: drop-shadow(0 6px 12px rgba(0,0,0,.45)); }
-        .setup-intro-avatar .or-avatar-ph { width: 88px; height: 88px; border-radius: 50%; display: grid; place-items: center; font-size: 40px; background: radial-gradient(circle at 50% 35%, var(--openreef-accent-soft), #0b1724); border: 2px solid var(--openreef-accent-border); }
         .setup-intro-bubble { flex: 1 1 auto; min-width: 0; background: #101f2f; border: 1px solid var(--openreef-accent-border); border-radius: 14px; padding: 14px 16px; }
         .setup-intro-bubble strong { color: #f1f6fb; }
         .setup-intro-bubble p { margin-top: 4px; line-height: 1.4; }
@@ -33632,15 +32706,6 @@ ${parts.buttons}
           .chart-wrap { padding: 10px; }
           .trend-chart { height: 200px; }
           .summary-card { min-height: auto; }
-          .or-narrator { bottom: 10px; width: calc(100vw - 12px); flex-direction: column; align-items: flex-start; gap: 0; }
-          .or-avatar { width: 168px; margin-left: 8px; margin-bottom: -8px; }
-          .or-avatar-ph { width: 120px; height: 120px; font-size: 52px; }
-          .or-bubble { width: 100%; padding: 14px 16px; }
-          .or-line { font-size: 16px; }
-          .or-sticker { max-height: 260px; }
-          .or-buddy { right: 10px; bottom: 10px; flex-direction: column; align-items: flex-end; gap: 8px; }
-          .or-buddy-avatar { width: 92px; }
-          .or-buddy-bubble { max-width: calc(100vw - 24px); }
           .manual-history-row { flex-direction: column; }
           /* .has-unit must be named too: it carries a two-class selector, so
              the single-class reset below it never won and unit rows kept the
@@ -33726,7 +32791,6 @@ ${parts.buttons}
           .inline-btn { min-height: 36px; padding: 7px 12px; }
           .coral-swatch { width: 36px; height: 36px; }
           .or-tone { min-height: 34px; padding: 6px 12px; }
-          .or-buddy-close { width: 34px; height: 34px; font-size: 18px; }
           /* The living diagram is the one thing on the page worth every pixel:
              let it bleed past the page gutter on phones. */
           .panel.diagram-stage { margin: 0 calc(-1 * var(--or-page-pad, 8px)); padding: 4px; border-radius: 0; border-left: 0; border-right: 0; max-height: none; }

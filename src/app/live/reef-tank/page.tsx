@@ -165,7 +165,7 @@ export default function ReefTankLivePage() {
               <h2>Live stream unavailable</h2>
               <p>
                 The camera stream did not start cleanly. Tap reconnect to try again. If it keeps failing,
-                Lagertha can still send you a fresh photo or recording.
+                OpenReef can still send you a fresh photo or recording.
               </p>
               <button
                 type="button"

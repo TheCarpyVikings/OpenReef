@@ -8,8 +8,7 @@ const content: DeepDiveContent = {
   slug: "reef-pulse",
   h1: "Reef Pulse",
   lede: "Controllers have dashboards — pages you visit at a desk when something's wrong. Reef Pulse is the opposite: a full-screen wall mode for the tank room, built into the controller itself. Health ring, live tiles, insights, your reef breathing on an old iPad. Press ✨ Present and the panel becomes the wall.",
-  buddyLine: "Your controller has a login page. Your reef deserves a showing-off mode.",
-  buddyPose: "celebrate",
+  pullQuote: "Your controller has a login page. Your reef deserves a showing-off mode.",
   img: "/demos/pulse.png",
   imgAlt: "OpenReef Reef Pulse present mode — full-screen wall display",
   demoLabel: "Press Present in the demo",
@@ -28,10 +27,9 @@ const content: DeepDiveContent = {
       ],
     },
     {
-      heading: "Insights, sharing, and a summonable Viking",
+      heading: "Insights and sharing",
       paragraphs: [
         "A rotating insight card reads your tank's recent story — consumption trends, drift, what changed this week — so the wall isn't just current values, it's context. The share button captures the wall you're actually looking at, ready for the group chat or the forum thread.",
-        "And if you run the Lagertha avatar, she's summon-only on the wall: present mode never burns avatar minutes in the background — she appears when asked and leaves when dismissed.",
       ],
       snippet: `the wall, in one tap →
   health ring · A · 100
@@ -45,7 +43,6 @@ const content: DeepDiveContent = {
     "The camera backdrop needs a mapped, online camera; without one, Pulse falls back to the stat wall or diagram gracefully.",
     "Keep-awake uses the browser's wake-lock — a cheap wall tablet in kiosk mode is the reliable setup, and that's the intended home.",
     "Night dim by ambient light needs a lux entity in Home Assistant; without one you still get the schedule.",
-    "The Lagertha avatar is optional, needs its own API keys, and is summon-only in Pulse by design — live avatar minutes are billed, and a wall display should cost nothing to leave running.",
   ],
   faq: [
     {

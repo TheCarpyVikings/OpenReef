@@ -180,11 +180,11 @@ test("share model honours the display toggles it inherits from Pulse", async () 
   try {
     const panel = prep(await makePanel({
       tank: {},
-      pulse: { showInsights: false, showBuddy: false, showMode: false },
+      pulse: { showInsights: false, showQuip: false, showMode: false },
     }));
     const model = panel._pulseShareModel();
     assertEqual(model.insight, null, "insights off -> no strip on the card");
-    assertEqual(model.showBuddy, false, "buddy off -> no avatar on the card");
+    assertEqual(model.quip, "", "quip off -> no jab on the card");
     assertEqual(model.modeLabel, "", "mode off -> no mode in the stamp");
     assertEqual(model.tankName, "OpenReef", "unnamed tank still gets a title");
   } finally {
@@ -217,7 +217,7 @@ test("card text is ellipsized to its box so a long label can never bleed out", a
 // Lockstep with _normalise_core_config's pulse section: a face writing a field
 // the backend doesn't validate would be silently dropped or ride unvalidated.
 const NORMALISED_PULSE_FIELDS = new Set([
-  "enabled", "showHealthRing", "showStats", "showTicker", "showMode", "showBuddy",
+  "enabled", "showHealthRing", "showStats", "showTicker", "showMode", "showQuip",
   "showClock", "kioskAutoStart", "showSparklines", "showCategories", "showEquipment",
   "showToday", "showInsights", "showShare", "keepAwake", "nightDim", "cameraId",
   "backdrop", "graphRange", "timelapseStyle", "sizePreset",
@@ -261,7 +261,7 @@ test("faces express their intent: full wall, quiet photo frame, minimal night", 
   assertEqual(faces.command.patch.backdrop, "diagram", "command centre is built on the living diagram");
   assert(["showStats", "showCategories", "showEquipment", "showToday"].every((k) => faces.command.patch[k] === true),
     "command centre turns the whole data wall on around the diagram");
-  assertEqual(faces.command.patch.showBuddy, false, "a monitor face stays clean of the buddy");
+  assertEqual(faces.command.patch.showQuip, false, "a monitor face stays free of the jab");
 });
 
 // --- per-device face override ---------------------------------------------
@@ -852,7 +852,6 @@ test("fullscreen is taken on the host, so no render can drop it", async () => {
     panel._render = () => {};
     panel._pulseEnabled = () => true;
     panel._stopCameraWebRTC = () => {};
-    panel._guardianStopFace = () => {};
     panel._pickOverlayQuip = () => "";
     panel._openPulse(true);
     assertEqual(hostCalls, 1, "the host element must be the one that goes fullscreen");

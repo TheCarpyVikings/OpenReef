@@ -9,7 +9,6 @@ import { Zap, Shield, Coffee, Activity, Waves, Lightbulb, Power, ClipboardList, 
 import { TasksScreen } from '@/components/dashboard/TasksScreen';
 import { SettingsScreen } from '@/components/dashboard/SettingsScreen';
 import { SpawningScreen } from '@/components/dashboard/SpawningScreen';
-import { GuardianScreen } from '@/components/dashboard/GuardianScreen';
 import { LightsScreen } from '@/components/dashboard/LightsScreen';
 import { WaterChangeScreen } from '@/components/dashboard/WaterChangeScreen';
 import { ReefDiagramScreen } from '@/components/dashboard/ReefDiagramScreen';
@@ -276,13 +275,6 @@ function DashboardContent() {
           <span>Spawning</span>
         </button>
         <button
-          className={`${styles.tabButton} ${activeTab === 'guardian' ? styles.activeTab : ''}`}
-          onClick={() => setActiveTab('guardian')}
-        >
-          <Shield size={20} />
-          <span>Guardian</span>
-        </button>
-        <button
           className={`${styles.tabButton} ${activeTab === 'reports' ? styles.activeTab : ''}`}
           onClick={() => setActiveTab('reports')}
         >
@@ -379,7 +371,6 @@ function DashboardContent() {
 
       {activeTab === 'tasks' && <TasksScreen />}
       {activeTab === 'spawning' && <SpawningScreen />}
-      {activeTab === 'guardian' && <GuardianScreen />}
       {activeTab === 'reports' && <ReportsScreen tasks={tasks} />}
       {activeTab === 'analytics' && <AnalyticsScreen />}
       {activeTab === 'water-change' && <WaterChangeScreen />}

@@ -211,7 +211,6 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
       clone(ws["openreef/icp_dashboard"]),
     "openreef/lighting_window": () => clone(ws["openreef/lighting_window"]),
     "openreef/list_reef_presets": () => clone(ws["openreef/list_reef_presets"]),
-    "openreef/guardian_status": () => clone(ws["openreef/guardian_status"]),
     "openreef/vision_summary": () => clone(ws["openreef/vision_summary"]),
     // The Helm-era pages (0.7.40+): the food shelf + hatchery, the culture
     // jars, the mixing station, cooling headroom, the spawning executor.
@@ -233,9 +232,6 @@ export async function createDemoHass(onMutate: () => void): Promise<{ hass: Demo
     "openreef/capture_now": () => demoBlocked("camera capture"),
     "openreef/capture_timelapse_frame": () => demoBlocked("camera capture"),
     "openreef/test_notification": () => demoBlocked("sending a phone notification"),
-    "openreef/guardian_chat": () => demoBlocked("talking to the live avatar"),
-    "openreef/guardian_voice": () => demoBlocked("talking to the live avatar"),
-    "openreef/guardian_simli_session": () => demoBlocked("the live avatar"),
     "openreef/dosing_dose_now": () => demoBlocked("firing a dosing pump"),
 
     // Not a hardware limit — an honesty one: nothing in the demo persists, so

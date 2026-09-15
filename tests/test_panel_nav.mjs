@@ -14,7 +14,6 @@ const FULL = {
   nps: { enabled: true, hatchery: { enabled: true } },
   dosing: { enabled: true, channels: {} },
   vision: { enabled: true },
-  guardian: { enabled: true },
   equipment: {},
   maintenance: { enabled: true, tasks: {}, completions: {} },
 };

@@ -40,9 +40,9 @@ Home Assistant entities (Apex/Trident sensors, smart plugs, etc.) are **not** to
 2. **Add Integration → OpenReef** to set it up fresh, or just re-open the panel and run Setup
    again.
 
-Config and personality prefs that live in the browser (tone, reef-buddy on/off, "tour done"
-flag, Apex/controller answer) are stored in that browser's local storage — clear the site's
-local storage, or just toggle them back in Settings → Guide & buddy / Profile.
+Personality prefs that live in the browser (tone, Apex/controller answer) are stored in that
+browser's local storage — clear the site's local storage, or just toggle them back in
+Settings → Tone / Profile.
 
 ## If an update won't load at all
 

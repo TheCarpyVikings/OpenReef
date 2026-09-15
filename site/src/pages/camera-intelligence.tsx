@@ -8,8 +8,7 @@ const content: DeepDiveContent = {
   slug: "camera-intelligence",
   h1: "Camera Intelligence",
   lede: "A £30 USB camera and a lot of software: live view in the panel, snapshots when something happens, growth timelapses with a retention ladder, shareable stat cards — and, with Frigate, a second pair of eyes that knows your fish.",
-  buddyLine: "I noticed the tang skipped breakfast before you did. That is the entire point of me.",
-  buddyPose: "concerned",
+  pullQuote: "I noticed the tang skipped breakfast before you did. That is the entire point of me.",
   img: "/demos/cameras.png",
   imgAlt: "OpenReef cameras tab in Home Assistant",
   sections: [

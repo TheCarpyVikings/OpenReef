@@ -279,7 +279,7 @@ def test_overlay_defaults_injected():
     assert isinstance(overlay["stats"], list)
     assert "temp" in overlay["stats"]  # default survives the MVP-sensor filter
     assert overlay["position"] in ("top-left", "top-right", "bottom-left", "bottom-right")
-    for key in ("showReefHealth", "showTankName", "showAvatar", "showQuip"):
+    for key in ("showReefHealth", "showTankName", "showQuip"):
         assert isinstance(overlay[key], bool)
 
 
@@ -289,7 +289,7 @@ def test_overlay_garbage_coerced_and_filtered():
             "enabled": "yes",
             "stats": ["temp", "not_a_sensor", 5, "ph"],
             "position": "middle",
-            "showAvatar": "nah",
+            "showAvatar": "nah",  # removed feature: stale key must be dropped
         }
     }
     result = normalise(bad)  # must not raise
@@ -299,7 +299,7 @@ def test_overlay_garbage_coerced_and_filtered():
     assert 5 not in overlay["stats"]               # non-str dropped
     assert overlay["stats"] == ["temp", "ph"]      # only real sensor ids, order kept
     assert overlay["position"] == "bottom-left"    # invalid corner -> default
-    assert isinstance(overlay["showAvatar"], bool)
+    assert "showAvatar" not in overlay           # Reef Buddy avatar was removed
 
 
 def test_overlay_non_dict_block_coerced():
@@ -489,7 +489,7 @@ def test_pulse_defaults_injected():
     assert pulse["showStats"] is True
     assert pulse["showTicker"] is True
     assert pulse["showMode"] is True
-    assert pulse["showBuddy"] is True
+    assert pulse["showQuip"] is True
     assert pulse["showClock"] is True
     assert pulse["kioskAutoStart"] is False   # kiosk must be opt-in
     assert pulse["cameraId"] == ""

@@ -46,7 +46,7 @@ export function Hero() {
   );
 }
 
-/* ------------------------------ meet the buddy -------------------------------- */
+/* ---------------------------- meet: tone calibration -------------------------- */
 
 interface MeetProps {
   tone: Tone;
@@ -528,11 +528,6 @@ export function Diy({ tone }: { tone: Tone }) {
 /* --------------------------------- comparison --------------------------------- */
 
 export function Compare({ tone, hasApex }: { tone: Tone; hasApex: boolean | null }) {
-  const [stickerOk, setStickerOk] = useState(true);
-  // Deliberately click-to-reveal: the gag is aimed at owners who opted into
-  // Cheeky mode, and it shouldn't ambush anyone reading the price table.
-  const [revealed, setRevealed] = useState(false);
-  const showSticker = tone === "cheeky" && hasApex === true && stickerOk;
   return (
     <section data-sec="compare" className="sec sec-wide sec-compare">
       <div className="card card-wide">
@@ -559,27 +554,6 @@ export function Compare({ tone, hasApex }: { tone: Tone; hasApex: boolean | null
             </tbody>
           </table>
         </div>
-        {showSticker && (
-          <div className="throne-reveal">
-            {revealed ? (
-              <>
-                <img
-                  className="throne-sticker"
-                  src="/avatar/apex-throne.png"
-                  alt="The OpenReef guide sitting on an Apex energy bar like a throne, gesturing rudely"
-                  onError={() => setStickerOk(false)}
-                />
-                <p className="throne-caption">
-                  Affectionately. Mostly. <button onClick={() => setRevealed(false)}>Hide that</button>
-                </p>
-              </>
-            ) : (
-              <button className="btn btn-ghost btn-small" onClick={() => setRevealed(true)}>
-                View OpenReef's professional assessment of the competition
-              </button>
-            )}
-          </div>
-        )}
         <p className="fine-print">
           UK retail prices checked July 2026 (All Things Aquatic, Charterhouse Aquatics) and
           rounded — they move, so check before you buy. Apex, Fusion, Trident and DOS are
@@ -760,7 +734,7 @@ export function Cta() {
         </p>
         <p className="footer-joke">
           No corals were harmed in the making of this website. One Apex had its feelings hurt, but
-          it's fine — we gave it a throne.
+          it's fine — it still runs the outlets.
         </p>
         <p className="footer-joke">
           The hero corals in the dive are real: CC0 photogrammetry scans of National Museum of

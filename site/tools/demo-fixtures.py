@@ -625,7 +625,6 @@ def main() -> int:
         "openreef/icp_dashboard": getattr(integration, "websocket_icp_dashboard", None),
         "openreef/lighting_window": getattr(integration, "websocket_lighting_window", None),
         "openreef/list_reef_presets": getattr(integration, "websocket_list_reef_presets", None),
-        "openreef/guardian_status": getattr(integration, "websocket_guardian_status", None),
         "openreef/vision_summary": getattr(integration, "websocket_vision_summary", None),
         # The Helm-era pages: NPS shelf/hatchery, cultures, mixing station,
         # cooling headroom, and the spawning executor.

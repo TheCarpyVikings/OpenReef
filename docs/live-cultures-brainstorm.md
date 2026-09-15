@@ -588,7 +588,7 @@ a stream, defensible, and it is mostly maths over data we already hold.
 11. **Continuity days, the anti-leaderboard** (S) — one honest number per species: days since the
     rack was last without a producing jar. Consistency, not volume.
 12. **Culture doctor** (M) — a ranked differential from the ledger ("cloudy + day 13 + two missed
-    harvests → ammonia; restart, feed at half"), answered by Lagertha when summoned.
+    harvests → ammonia; restart, feed at half"), surfaced on the culture card.
 13. **Demand-driven production** (M) — size the harvest to the NPS feed plan (ml of bottle per feed ×
     feeds/day) and say when a second cone is worth it.
 14. **Camera tint and the 1 ml count** (L, later arc) — a white card behind the cone and the ELP
@@ -618,7 +618,7 @@ is the #1 crash cause; a pump makes it automatic), and any volume leaderboard.
   guard on the cooling forecast, continuity days, culture card.
 - **0.7.129 (RELEASED 2026-09-05, 2e0dd39, tag v0.7.129):** Reef Juice out of the cultures, onto the
   shelf's hand-dose plan — the addendum under §8.11.
-- **Later arcs:** culture doctor via Lagertha, demand-driven sizing, camera tint, seed swap — none
+- **Later arcs:** culture doctor, demand-driven sizing, camera tint, seed swap — none
   started; the audited remainder is §8.12.
 
 ### 8.10 The grill — answer these and A starts
@@ -724,7 +724,7 @@ Everything §8.9 scheduled is released (0.7.125–0.7.129). The audit against `c
 **Still open (not code):** Darren's answer on the enrichment window (2–4 h vs 6–12 h) — `soakH`
 stays 6 (2–12) until then.
 
-**Never built (the "later arcs", untouched by design):** culture doctor via Lagertha (§8.8 #12);
+**Never built (the "later arcs", untouched by design):** culture doctor (§8.8 #12);
 demand-driven sizing (#13 — `yield_ml_per_day` and the bottle's depletion driver exist, "when a
 second cone is worth it" does not); camera tint and the 1 ml count (#14); seed swap and benchmarking
 (#15); scan-the-product (#8, second half); the continuous reactor (shelved, hardware track). The

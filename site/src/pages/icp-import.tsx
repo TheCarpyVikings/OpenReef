@@ -8,8 +8,7 @@ const content: DeepDiveContent = {
   slug: "icp-import",
   h1: "The ICP Importer",
   lede: "An ICP report is forty-plus numbers in a PDF that most reefers read once, wince at, and file forever. OpenReef turns it into trends, flags — and a calibration check on your own test kits.",
-  buddyLine: "Your test kit and your lab disagree by half a dKH. I'll tell you which one to stop trusting.",
-  buddyPose: "point",
+  pullQuote: "Your test kit and your lab disagree by half a dKH. I'll tell you which one to stop trusting.",
   img: "/demos/icp.png",
   imgAlt: "OpenReef ICP import tab in Home Assistant",
   sections: [

@@ -145,7 +145,7 @@ then **leapfrog** with local-first prediction and camera/control-event intellige
   scheduling, skip/snooze — directly answering the category's notification failure.
 - **Camera V2 (A→D)** — event capture, timelapse, live overlay + shareable card, feed-watch. **No controller
   currently makes local camera evidence a first-class companion to HA control events.**
-- Guided onboarding (Reef Buddy), personality/anti-Apex shareable card (built-in virality), and safety
+- Personality/anti-Apex shareable card (built-in virality) and safety
   interlocks (ATO / return-pump / skimmer / heater / wavemaker).
 
 ## The Leapfrog Ladder
@@ -239,7 +239,7 @@ make defensible when grounded in local HA data and OpenReef's own event history:
 | Camera | V2 A→D: WebRTC live, event capture, timelapse, overlay/share, feed-watch | Vision intelligence next (Tier 2) |
 | Modes | Running, Feed, Maintenance, custom modes, schedules | Strong Apex-parity point |
 | ATO/wavemaker safety | Duty cycle, return-pump checks, wavemaker reminders | Useful differentiators |
-| Onboarding | Reef Buddy guided tour, Cheeky/Pro tone | Shareable card = built-in virality |
+| Personality | Cheeky/Pro tone, calm-only anti-Apex quips | Shareable card = built-in virality |
 | Handoff | Smoke test, feedback template, support summary, diagnostics | Good private beta workflow |
 
 ## Recommended Build Order

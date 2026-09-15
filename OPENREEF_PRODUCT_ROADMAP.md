@@ -171,7 +171,7 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
   (every frame → 1/day → 1/week → 1/month) keeps months of growth in a few hundred frames. Reuses A's
   storage + serving. *(shipped, v0.4.73)*
 - [x] **C. Live overlay + shareable tank card** — user-selected stats (+ Reef Health, tank name) burned
-  onto the live feed with the health-reactive Reef Buddy and a rotating anti-Apex quip (cheeky + calm only,
+  onto the live feed with a rotating anti-Apex quip (cheeky + calm only,
   shown to everyone — the dig is the point). One-tap **Share card** bakes it all into an image via canvas
   → native share sheet / download. *(shipped, v0.4.74)*
 - [x] **D. Feed-watch** — applying Feed mode records a **snapshot burst** across the whole feeding window
@@ -276,9 +276,8 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 - [ ] Weekly/monthly reef reports.
 - [ ] CSV/PDF export.
 - [ ] Shareable support bundle with redaction.
-- [ ] Read-only AI Guardian summaries.
 - [ ] AI report drafting.
-- [x] Guided onboarding tour: in-panel cartoon Reef Buddy guide with spotlight coach-marks, Cheeky/Professional tone toggle, and real avatar art. Phase 2 (walking avatar between cards) and Phase 3 (live-state reactive corner buddy) shipped; Phase 4 (optional TTS/voice) shelved by decision.
+- [~] Guided onboarding tour: built (cartoon guide, coach-marks, walking avatar, reactive corner buddy) and **removed in 0.7.185** along with the Lagertha avatar — the Cheeky/Professional tone toggle is what survives.
 - [ ] Open hardware recommendations.
 - [ ] Ready-made OpenReef units for non-technical reef keepers.
 
@@ -322,7 +321,6 @@ nor a generic cam app (no tank data) can match. Built one phase at a time; tick 
 | Reef diagram | `ReefDiagramScreen.tsx` | Labs/reference | Equipment visualization phase |
 | Calibration | `SettingsScreen.tsx` calibration section | Labs/reference | Monitoring parity |
 | AI advisor | `AIChemistryAdvisor.tsx`, `ai-service.ts` | Labs/reference | Read-only AI phase |
-| Guardian/avatar/TTS | `GuardianScreen.tsx`, `SimliAvatar.tsx`, TTS route | Labs/reference | Optional AI phase |
 | Coral spawning | `SpawningScreen.tsx`, spawning API | Labs/reference | Advanced opt-in phase |
 | Google Sheets sync | Sheets API routes | Labs/reference | Optional export/sync later |
 | Google Tasks sync | Tasks API routes | Labs/reference | Optional sync after local Tasks V1 |

@@ -39,36 +39,16 @@
   padding-left: 1.2rem;
 }
 
-.buddy-inline {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
+.dd-quote {
   background: var(--card);
   border: 1px solid var(--card-border);
+  border-left: 3px solid var(--accent, #35e0c2);
   border-radius: 14px;
-  padding: 0.7rem 1rem;
+  padding: 0.9rem 1.1rem;
   margin: 0 0 1.4rem;
 }
 
-.buddy-inline-face {
-  flex: none;
-  width: 52px;
-  height: 52px;
-  font-size: 1.6rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(53, 224, 194, 0.12);
-  border-radius: 10px;
-}
-
-.buddy-inline-face img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.buddy-inline p {
+.dd-quote p {
   margin: 0;
   font-style: italic;
   color: var(--ink);

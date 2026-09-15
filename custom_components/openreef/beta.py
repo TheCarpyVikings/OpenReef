@@ -258,7 +258,7 @@ async def _async_log_tail(hass: HomeAssistant) -> str:
 
 # --- transport --------------------------------------------------------------
 # `_http` is the seam tests monkeypatch; the aiohttp import is lazy so the
-# dependency-free CI never loads it (same arrangement guardian uses).
+# dependency-free CI never loads it.
 
 
 def _http(hass: HomeAssistant):

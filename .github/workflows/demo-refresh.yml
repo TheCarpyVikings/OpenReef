@@ -105,7 +105,7 @@ jobs:
             cat pr-body.md
           } > pr-full.md
           git checkout -B demo-refresh
-          git add site/public/demo site/public/openreef_static/avatar
+          git add site/public/demo
           if git diff --cached --quiet; then
             echo "Nothing changed after regeneration — no PR needed." >> "$GITHUB_STEP_SUMMARY"
             exit 0

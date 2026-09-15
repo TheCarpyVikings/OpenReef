@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { depthAt, reef } from "./reef";
 import type { Tone } from "./reef";
 import { GITHUB_URL, TICKER } from "./copy";
-import Buddy from "./ui/Buddy";
 import { Compare, Cta, Diy, Features, Hero, Lights, Meet, Sandbox, Spawning } from "./ui/Sections";
 
 const Scene = lazy(() => import("./scene/Scene"));
@@ -67,7 +66,6 @@ export default function App() {
   const [active, setActive] = useState("hero");
   const [score, setScore] = useState(92);
   const [scroll, setScroll] = useState(0);
-  const [konami, setKonami] = useState(false);
   // ?og=1 renders a chrome-free frame for the social-card screenshot.
   const ogMode = useMemo(() => new URLSearchParams(window.location.search).has("og"), []);
 
@@ -122,21 +120,16 @@ export default function App() {
       "b", "a",
     ];
     let i = 0;
-    let timer: ReturnType<typeof setTimeout>;
     const onKey = (e: KeyboardEvent) => {
       i = e.key === seq[i] ? i + 1 : e.key === seq[0] ? 1 : 0;
       if (i === seq.length) {
         i = 0;
         reef.spawnPulse += 1;
-        setKonami(true);
-        clearTimeout(timer);
-        timer = setTimeout(() => setKonami(false), 7000);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
-      clearTimeout(timer);
     };
   }, []);
 
@@ -181,9 +174,6 @@ export default function App() {
         <Cta />
       </main>
 
-      {!ogMode && (
-        <Buddy section={active} tone={tone} hasApex={hasApex} score={score} konami={konami} />
-      )}
     </>
   );
 }

@@ -139,13 +139,6 @@ export interface AppSettings {
             thermostatClimate?: string;
         };
     };
-    ai: {
-        simliApiKey: string;
-        geminiApiKey: string;
-        openaiApiKey: string;
-        enabled: boolean;
-        faceId: string;
-    };
     lighting: {
         channels: {
             white: string;
@@ -397,13 +390,6 @@ const DEFAULT_SETTINGS: AppSettings = {
             { time: '23:00', values: { white: 0, blue: 0, royalBlue: 0, violet: 0, uv: 0, red: 0, green: 0, moonlight: 0 } },
         ]
     },
-    ai: {
-        simliApiKey: '',
-        geminiApiKey: '',
-        openaiApiKey: '',
-        enabled: true,
-        faceId: 'e6fcd8ff-ceda-4fd9-b4f5-ed07e0220eb4', // Provided by user
-    },
     waterChange: {
         enabled: true,
         entities: {
@@ -527,7 +513,6 @@ function sanitizeForStorage(s: AppSettings): AppSettings {
     return {
         ...s,
         general: { ...s.general, haToken: '' },
-        ai: { ...s.ai, openaiApiKey: '', geminiApiKey: '', simliApiKey: '' },
     };
 }
 
@@ -846,7 +831,6 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
                     return cal;
                 })(),
                 spawning: { ...DEFAULT_SETTINGS.spawning, ...initialSettings.spawning },
-                ai: { ...DEFAULT_SETTINGS.ai, ...initialSettings.ai },
                 waterChange: {
                     ...DEFAULT_SETTINGS.waterChange,
                     ...initialSettings.waterChange,

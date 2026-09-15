@@ -23,8 +23,6 @@ function DemoPage() {
   const [opener, setOpener] = useState<boolean>(() => !localStorage.getItem("openreef:demo:opener"));
 
   useEffect(() => {
-    // The panel's guided tour is replaced by the scripted opener.
-    localStorage.setItem("openreef:onboarding:v1:done", "1");
     let cancelled = false;
     let stopTick = () => {};
     (async () => {

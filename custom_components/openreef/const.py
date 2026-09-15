@@ -26,18 +26,11 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.184"
+INTEGRATION_VERSION = "0.7.185"
 
-# Guardian (Lagertha live avatar) — API keys live in the config entry options
-# under their own key, deliberately OUTSIDE the CONF_SETTINGS blob so the
-# panel's settings export/import can never leak secrets.
-CONF_GUARDIAN_KEYS = "guardian_keys"
-GUARDIAN_MODEL = "claude-sonnet-5"
-GUARDIAN_MAX_TOKENS = 1024
-GUARDIAN_MAX_TOOL_ROUNDS = 6
-GUARDIAN_STT_MODEL = "gpt-4o-transcribe"
-GUARDIAN_TTS_MODEL = "gpt-4o-mini-tts"
-GUARDIAN_MAX_AUDIO_B64 = 8_000_000  # ~6 MB of audio; PTT utterances are far smaller
+# Legacy key: the removed Guardian avatar stored its API keys here, outside the
+# CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
+LEGACY_GUARDIAN_KEYS = "guardian_keys"
 
 # Camera V2 — event-triggered capture (Phase A). Clips/snapshots are stored in a
 # managed dir under the HA config directory and served back to the panel same-origin.
@@ -1176,16 +1169,15 @@ DEFAULT_CORE_CONFIG = {
             "monthlyUntilDays": TIMELAPSE_DEFAULT_MONTHLY_DAYS,
         },
     },
-    # Camera V2 — live overlay + shareable tank card (Phase C). Selected stats (+ optional
-    # Reef Buddy avatar and a cheeky anti-Apex quip) burned onto the live feed and into a
-    # one-tap shareable image. Purely a frontend read of live state; config just persists
+    # Camera V2 — live overlay + shareable tank card (Phase C). Selected stats (+ an
+    # optional cheeky anti-Apex quip) burned onto the live feed and into a one-tap
+    # shareable image. Purely a frontend read of live state; config just persists
     # the user's selections.
     "overlay": {
         "enabled": False,
         "stats": ["temp", "ph", "alkalinity"],
         "showReefHealth": True,
         "showTankName": True,
-        "showAvatar": True,
         "showQuip": True,
         "position": "bottom-left",
     },
@@ -1400,7 +1392,7 @@ DEFAULT_CORE_CONFIG = {
         "showStats": True,
         "showTicker": True,
         "showMode": True,
-        "showBuddy": True,
+        "showQuip": True,
         "showClock": True,
         "kioskAutoStart": False,
         "cameraId": "",
@@ -1859,14 +1851,6 @@ DEFAULT_CORE_CONFIG = {
         "range": "all",
         "group": "core",
         "symbol": "Ca",
-    },
-    # Guardian (Lagertha live avatar) — behaviour settings only; API keys are
-    # stored under CONF_GUARDIAN_KEYS in the entry options, never in here.
-    "guardian": {
-        "enabled": True,
-        "tone": "cheeky",
-        "effort": "low",
-        "voice": "shimmer",
     },
 }
 

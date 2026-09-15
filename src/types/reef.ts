@@ -33,7 +33,6 @@ export type DashboardTab =
     | 'energy'
     | 'tasks'
     | 'spawning'
-    | 'guardian'
     | 'reports'
     | 'analytics'
     | 'water-change'

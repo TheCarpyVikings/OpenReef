@@ -5,8 +5,7 @@ export interface DeepDiveContent {
   slug: string;
   h1: string;
   lede: string;
-  buddyLine: string;
-  buddyPose: string;
+  pullQuote: string;
   img: string;
   imgAlt: string;
   /** When the feature is playable in /demo/, a third CTA button appears. */
@@ -33,7 +32,6 @@ function GalleryShot({ shot, onZoom }: { shot: { src: string; alt: string }; onZ
 }
 
 export default function DeepDive({ c }: { c: DeepDiveContent }) {
-  const [artOk, setArtOk] = useState(true);
   const [zoom, setZoom] = useState<{ src: string; alt: string } | null>(null);
   const [imgOk, setImgOk] = useState(true);
   const faqLd = {
@@ -69,16 +67,9 @@ export default function DeepDive({ c }: { c: DeepDiveContent }) {
           <h1>{c.h1}</h1>
           <p className="dd-lede">{c.lede}</p>
 
-          <aside className="buddy-inline">
-            <span className="buddy-inline-face">
-              {artOk ? (
-                <img src={`/avatar/${c.buddyPose}.png`} alt="" onError={() => setArtOk(false)} />
-              ) : (
-                "🪸"
-              )}
-            </span>
-            <p>{c.buddyLine}</p>
-          </aside>
+          <blockquote className="dd-quote">
+            <p>{c.pullQuote}</p>
+          </blockquote>
 
           {imgOk && (
             <button className="dd-shot" onClick={() => setZoom({ src: c.img, alt: c.imgAlt })} aria-label="Enlarge screenshot">

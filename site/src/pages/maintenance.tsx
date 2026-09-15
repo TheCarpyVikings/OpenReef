@@ -8,8 +8,7 @@ const content: DeepDiveContent = {
   slug: "maintenance",
   h1: "Maintenance Reminders",
   lede: "Reef maintenance isn't hard — it's relentless. Thirteen recurring jobs on thirteen different clocks, and forgetting the boring one is how tanks quietly decline. OpenReef keeps the calendar, nags exactly once a day, and logs what actually happened.",
-  buddyLine: "Your RO/DI filters were due in March. It is no longer March.",
-  buddyPose: "facepalm",
+  pullQuote: "Your RO/DI filters were due in March. It is no longer March.",
   img: "/demos/maintenance/3-trends.png",
   imgAlt: "Water changed per week — automatic and hand-logged changes stacked, with the average and the weeks with none",
   demoLabel: "Open Water → Maintenance in the demo",
@@ -41,7 +40,7 @@ const content: DeepDiveContent = {
     {
       heading: "The little things that make it stick",
       paragraphs: [
-        "Task notes ride on the card, under the notification and into the Guardian's snapshot. Checklists give a task up to twelve steps, ticked off on the card for the visit and cleared when you mark it done — the suggested chores come with their usual steps. A streak line tells you how you're really doing: on schedule four in a row, best run nine. Quiet hours hold the night-time pushes; the daily digest keeps its own time, and critical alerts are exempt by design. The digest also nags about bottles — low, empty or expired on the food shelf — so the day's list is the whole day's list.",
+        "Task notes ride on the card and under the notification. Checklists give a task up to twelve steps, ticked off on the card for the visit and cleared when you mark it done — the suggested chores come with their usual steps. A streak line tells you how you're really doing: on schedule four in a row, best run nine. Quiet hours hold the night-time pushes; the daily digest keeps its own time, and critical alerts are exempt by design. The digest also nags about bottles — low, empty or expired on the food shelf — so the day's list is the whole day's list.",
       ],
       list: [
         "Push goes to any Home Assistant notify service — a phone, a group, Telegram",

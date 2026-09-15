@@ -6,7 +6,7 @@ name: tests
 # installed — no HA, no jsdom, no test runner.
 #
 # Suites are DISCOVERED, never listed: enumerating them one step at a time is how
-# five suites (guardian, icp, mode timers, salinity, trust moat) silently sat out
+# five suites (icp, mode timers, salinity, trust moat and one since deleted) sat out
 # of CI. Anything matching tests/test_*.py or tests/test_*.mjs runs here.
 
 on:

@@ -66,16 +66,9 @@ was measured: the nav was 787px tall on a 932px screen, first card 1,129px down.
 - [ ] Wire `FORM_ENDPOINT` in `src/ui/Sections.tsx` to Buttondown/Formspree/Tally
       (until then the form falls back to a mailto).
 - [x] Feature screenshots captured from the live HA integration (`pnpm capture`).
-- [x] Real buddy pose art wired in (`public/avatar/`, copied from the panel).
 - [x] Comparison prices verified against UK retailers, July 2026.
 - [ ] Deploy to OpenReef.co.uk and re-check the OG card renders on socials.
 - [ ] Mobile QA pass (only verified at 1440×900 so far).
-
-Re-copy the buddy art whenever the panel's poses change:
-
-```bash
-cp ../custom_components/openreef/frontend/avatar/{idle,point,smug,facepalm,celebrate,concerned,thinking,chilled,apex-throne}.png public/avatar/
-```
 
 ## How it hangs together
 
@@ -84,8 +77,7 @@ cp ../custom_components/openreef/frontend/avatar/{idle,point,smug,facepalm,celeb
   keyframes and channel curves.
 - `src/scene/Scene.tsx` — the whole 3D scene (water shader, god rays, fish schools,
   procedural reef, health ring, light rail, spawn burst, dosing pumps, Apex throne).
-- `src/copy.ts` — buddy script (cheeky / cheekyNoApex / professional, same shape as the
-  panel's onboarding script), features, tiers, comparison rows, price-ticker items.
+- `src/copy.ts` — features, tiers, comparison rows, price-ticker items.
 - `src/ui/Sections.tsx` — all DOM sections and interactive widgets.
 - Reduced-motion / no-WebGL visitors get a static gradient background; every section
   is plain crawlable HTML either way.

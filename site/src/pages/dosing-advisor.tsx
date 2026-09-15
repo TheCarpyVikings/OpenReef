@@ -8,8 +8,7 @@ const content: DeepDiveContent = {
   slug: "dosing-advisor",
   h1: "The Dosing Advisor",
   lede: "Alkalinity, calcium and magnesium consumption worked out from the tests you already do — with projections, and dose suggestions in plain English. Advisory only, always.",
-  buddyLine: "The maths is free. Trident reagents are the printer ink of the sea.",
-  buddyPose: "smug",
+  pullQuote: "The maths is free. Trident reagents are the printer ink of the sea.",
   img: "/demos/dosing.png",
   imgAlt: "OpenReef Dosing Advisor tab in Home Assistant",
   sections: [

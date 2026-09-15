@@ -1505,7 +1505,6 @@
      "showStats": true,
      "showTicker": true,
      "showMode": true,
-     "showBuddy": true,
      "showClock": true,
      "kioskAutoStart": false,
      "cameraId": "",
@@ -1525,7 +1524,8 @@
      "nightDimLuxThreshold": 10.0,
      "timelapseStyle": "growth",
      "sizePreset": "normal",
-     "allowModes": true
+     "allowModes": true,
+     "showQuip": true
     },
     "diagram": {
      "systemType": "sump",
@@ -2916,12 +2916,6 @@
      "range": "all",
      "group": "core",
      "symbol": "Ca"
-    },
-    "guardian": {
-     "enabled": true,
-     "tone": "cheeky",
-     "effort": "low",
-     "voice": "shimmer"
     },
     "quietHours": {
      "enabled": false,
@@ -4428,7 +4422,6 @@
      "showStats": true,
      "showTicker": true,
      "showMode": true,
-     "showBuddy": true,
      "showClock": true,
      "kioskAutoStart": false,
      "cameraId": "",
@@ -4448,7 +4441,8 @@
      "nightDimLuxThreshold": 10.0,
      "timelapseStyle": "growth",
      "sizePreset": "normal",
-     "allowModes": true
+     "allowModes": true,
+     "showQuip": true
     },
     "diagram": {
      "systemType": "sump",
@@ -5839,12 +5833,6 @@
      "range": "all",
      "group": "core",
      "symbol": "Ca"
-    },
-    "guardian": {
-     "enabled": true,
-     "tone": "cheeky",
-     "effort": "low",
-     "voice": "shimmer"
     },
     "quietHours": {
      "enabled": false,
@@ -7676,32 +7664,6 @@
      "note": "Acropora palmata / cervicornis \u2014 restoration-priority Atlantic species."
     }
    ]
-  },
-  "openreef/guardian_status": {
-   "keys": {
-    "anthropic": {
-     "set": false,
-     "hint": ""
-    },
-    "openai": {
-     "set": false,
-     "hint": ""
-    },
-    "simli": {
-     "set": false,
-     "hint": ""
-    },
-    "simliFaceId": "",
-    "ready": false,
-    "faceReady": false
-   },
-   "settings": {
-    "enabled": true,
-    "tone": "cheeky",
-    "effort": "low",
-    "voice": "shimmer"
-   },
-   "model": "claude-sonnet-5"
   },
   "openreef/vision_summary": {
    "enabled": false,

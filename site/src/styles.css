@@ -716,36 +716,6 @@ th {
   border-right: 1px solid rgba(53, 224, 194, 0.3);
 }
 
-/* The panel's own "professional assessment of the competition" sticker. */
-.throne-sticker {
-  display: block;
-  max-width: 15rem;
-  margin: 1.2rem auto 0;
-  filter: drop-shadow(0 10px 30px rgba(0, 0, 0, 0.55));
-}
-
-.throne-reveal {
-  text-align: center;
-  margin-top: 1.4rem;
-}
-
-.throne-caption {
-  text-align: center;
-  font-size: 0.82rem;
-  color: var(--ink-dim);
-  font-style: italic;
-  margin: 0.4rem 0 0;
-}
-
-.throne-caption button {
-  background: none;
-  border: none;
-  color: var(--teal);
-  cursor: pointer;
-  font-size: 0.82rem;
-  text-decoration: underline;
-}
-
 th.col-star {
   color: var(--teal);
 }
@@ -850,85 +820,6 @@ th.col-star {
   opacity: 0.7;
 }
 
-/* ------------------------------------ buddy ---------------------------------- */
-
-.buddy {
-  position: fixed;
-  bottom: 1.2rem;
-  left: 1.2rem;
-  z-index: 40;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.7rem;
-  max-width: 21rem;
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: 16px;
-  padding: 0.8rem 2rem 0.8rem 0.8rem;
-  backdrop-filter: blur(12px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
-}
-
-.buddy-avatar {
-  font-size: 1.9rem;
-  line-height: 1;
-  background: rgba(53, 224, 194, 0.12);
-  border-radius: 12px;
-  padding: 0.4rem;
-  flex: none;
-}
-
-.buddy-art {
-  display: block;
-  width: 64px;
-  height: 64px;
-  object-fit: contain;
-  filter: drop-shadow(0 3px 8px rgba(0, 0, 0, 0.5));
-}
-
-.buddy-text {
-  margin: 0;
-  font-size: 0.88rem;
-}
-
-.buddy-dismiss {
-  position: absolute;
-  top: 0.3rem;
-  right: 0.5rem;
-  background: none;
-  border: none;
-  color: var(--ink-dim);
-  font-size: 1.1rem;
-  cursor: pointer;
-}
-
-/* Collapsed guide: small avatar chip that stays out of the way of controls. */
-.buddy-chip {
-  position: fixed;
-  bottom: 1.2rem;
-  left: 1.2rem;
-  z-index: 40;
-  font-size: 1.5rem;
-  line-height: 1;
-  background: var(--card);
-  border: 1px solid var(--card-border);
-  border-radius: 999px;
-  width: 3.5rem;
-  height: 3.5rem;
-  padding: 0.25rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  backdrop-filter: blur(12px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-
-.buddy-chip .buddy-art {
-  width: 100%;
-  height: 100%;
-}
-
 /* ------------------------------- gauges/tickers ------------------------------ */
 
 .depth-gauge {
@@ -1020,10 +911,6 @@ th.col-star {
     display: none;
   }
 
-  .buddy {
-    max-width: calc(100vw - 2.4rem);
-  }
-
   /* The CTA section is a flex row; a static footer would sit BESIDE the card,
      so stack it and give it full width. */
   .sec {
@@ -1033,23 +920,6 @@ th.col-star {
 
   .footer {
     width: 100%;
-    /* keep the last line clear of the fixed guide chip */
-    padding-bottom: 3.5rem;
-  }
-
-  /* Smaller and slightly translucent so it obscures as little as possible
-     while scrolling; full opacity as soon as it is touched. */
-  .buddy-chip {
-    width: 3rem;
-    height: 3rem;
-    bottom: 0.9rem;
-    left: 0.9rem;
-    opacity: 0.82;
-  }
-
-  .buddy-chip:active,
-  .buddy-chip:focus-visible {
-    opacity: 1;
   }
 
   /* Comfortable thumbs: the sliders are the main interaction on this site. */

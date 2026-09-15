@@ -23,7 +23,6 @@ const sections = [
     { id: 'spawning', label: 'Coral Spawning', icon: <Waves size={18} /> },
     { id: 'camera', label: 'Camera', icon: <Video size={18} /> },
     { id: 'lighting', label: 'Lighting', icon: <Lightbulb size={18} /> },
-    { id: 'ai', label: 'AI Guardian', icon: <Shield size={18} /> },
     { id: 'data', label: 'Data', icon: <Database size={18} /> },
 ];
 
@@ -1759,80 +1758,6 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ initialSection, 
                                     </div>
                                 </div>
                             </div>
-                        </div>
-                    </div>
-                )}
-
-                {/* AI Guardian Settings */}
-                {activeSection === 'ai' && (
-                    <div className={styles.settingsSection}>
-                        <h4 className={styles.sectionHeader}>AI Guardian Configuration</h4>
-                        <div className={styles.card} style={{ padding: '1.5rem', marginBottom: '2rem' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1.5rem' }}>
-                                <div className={styles.settingGroup}>
-                                    <label className={styles.label}>Enable AI Guardian</label>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.5rem' }}>
-                                        <button
-                                            className={`${styles.tabItem} ${settings.ai.enabled ? styles.activeTab : ''}`}
-                                            onClick={() => updateNestedSetting('ai', { enabled: true })}
-                                            style={{ padding: '4px 12px', fontSize: '0.8rem' }}
-                                        >
-                                            Enabled
-                                        </button>
-                                        <button
-                                            className={`${styles.tabItem} ${!settings.ai.enabled ? styles.activeTab : ''}`}
-                                            onClick={() => updateNestedSetting('ai', { enabled: false })}
-                                            style={{ padding: '4px 12px', fontSize: '0.8rem' }}
-                                        >
-                                            Disabled
-                                        </button>
-                                    </div>
-                                </div>
-                                <div className={styles.settingGroup}>
-                                    <label className={styles.label}>Simli API Key</label>
-                                    <input
-                                        type="password"
-                                        className={styles.input}
-                                        placeholder="Enter Simli API Key"
-                                        value={settings.ai.simliApiKey}
-                                        onChange={(e) => updateNestedSetting('ai', { simliApiKey: e.target.value.trim() })}
-                                    />
-                                </div>
-                                <div className={styles.settingGroup}>
-                                    <label className={styles.label}>Gemini API Key</label>
-                                    <input
-                                        type="password"
-                                        className={styles.input}
-                                        placeholder="Enter Gemini API Key"
-                                        value={settings.ai.geminiApiKey}
-                                        onChange={(e) => updateNestedSetting('ai', { geminiApiKey: e.target.value.trim() })}
-                                    />
-                                </div>
-                                <div className={styles.settingGroup}>
-                                    <label className={styles.label}>OpenAI API Key (Required for Lip-Sync)</label>
-                                    <input
-                                        type="password"
-                                        className={styles.input}
-                                        placeholder="Enter OpenAI API Key"
-                                        value={settings.ai.openaiApiKey}
-                                        onChange={(e) => updateNestedSetting('ai', { openaiApiKey: e.target.value.trim() })}
-                                    />
-                                </div>
-                                <div className={styles.settingGroup}>
-                                    <label className={styles.label}>Simli Face ID</label>
-                                    <input
-                                        type="text"
-                                        className={styles.input}
-                                        placeholder="Face ID (e.g. e6fcd...)"
-                                        value={settings.ai.faceId}
-                                        onChange={(e) => updateNestedSetting('ai', { faceId: e.target.value.trim() })}
-                                    />
-                                </div>
-                            </div>
-                            <p style={{ fontSize: '0.75rem', color: '#778da9', marginTop: '1rem' }}>
-                                The AI Guardian uses Simli for the talking avatar and Gemini for the brain.
-                                Lagertha will monitor your reef and respond based on live data.
-                            </p>
                         </div>
                     </div>
                 )}

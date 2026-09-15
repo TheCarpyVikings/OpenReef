@@ -169,7 +169,6 @@ test("phone touch targets clear the finger threshold", async () => {
   });
   assert(sized("\\.coral-swatch", 32), "coral swatches rendered at 26px — below a fingertip");
   assert(sized("\\.inline-btn", 32), "inline Go buttons rendered 104x22");
-  assert(sized("\\.or-buddy-close", 32), "the buddy's dismiss was a 22px target");
 });
 
 // --- the full-screen diagram ----------------------------------------------
