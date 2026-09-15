@@ -2033,6 +2033,11 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     raw_salt = mix_cfg.get("salt") if isinstance(mix_cfg.get("salt"), dict) else {}
     brand = str(raw_salt.get("brand") or "nyos_pure")
     salinity_unit = str(raw_salt.get("unit") or "ppt")
+    # The keeper's measure (doc §33): a jug, a beaker, a scoop — theirs to
+    # name and size; the grams per level measure weighed once (0 = estimate).
+    raw_measure = raw_salt.get("measure") if isinstance(raw_salt.get("measure"), dict) else {}
+    measure_mode = str(raw_measure.get("mode") or "grams")
+    measure_label = str(raw_measure.get("label") or "").strip()[:mixing_engine.SALT_MEASURE_LABEL_MAX]
     mix_cfg["salt"] = {
         "brand": brand if brand in mixing_engine.brand_ids() else "nyos_pure",
         "targetPpt": round(_awc_num(raw_salt.get("targetPpt"), 35.0,
@@ -2040,6 +2045,14 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "unit": salinity_unit if salinity_unit in mixing_engine.SALINITY_UNITS else "ppt",
         "mixHours": round(_awc_num(raw_salt.get("mixHours"), 0, 0, MIXING_MIX_HOURS_MAX), 1),
         "customGPerL": round(_awc_num(raw_salt.get("customGPerL"), 0, 0, 100), 1),
+        "measure": {
+            "mode": measure_mode if measure_mode in mixing_engine.SALT_MEASURE_MODES else "grams",
+            "label": measure_label or "jug",
+            "ml": int(_awc_num(raw_measure.get("ml"), 1000,
+                               mixing_engine.SALT_MEASURE_ML_MIN, mixing_engine.SALT_MEASURE_ML_MAX)),
+            "gramsPerMeasure": round(_awc_num(raw_measure.get("gramsPerMeasure"), 0, 0,
+                                              mixing_engine.SALT_MEASURE_G_MAX), 1),
+        },
     }
     # Salt on hand (V3, 2026-09-05): a server-owned ledger — debited when a
     # batch is salted, edited only through openreef/mixing_salt_stock — so
@@ -18728,6 +18741,9 @@ async def websocket_mixing_log_salinity(
         correction = mixing_engine.salinity_correction(
             ppt, salt_cfg.get("targetPpt"), mixing_engine.mix_vessel_litres(cfg),
             salt_cfg.get("brand"), salt_cfg.get("customGPerL"))
+        # The keeper's measure (doc §33): grams to add, said in jugs too.
+        correction["addMeasure"] = mixing_engine.salt_in_measures(
+            correction.get("addGrams"), mixing_engine.salt_measure_info(salt_cfg))
         now = datetime.now(timezone.utc)
         batch["loggedPpt"] = round(ppt, 2)
         if correction.get("status") == "pass":

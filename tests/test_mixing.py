@@ -2624,6 +2624,131 @@ def test_stopping_heat_on_a_top_up_run_keeps_the_fresh_litres():
     assert mix_v["contents"] == "empty" and mix_v["estimatedLitres"] == 0 and mix_v["freshLitres"] == 0
 
 
+# ---------------------------------------------------------------- §33 the keeper's measure (0.7.188)
+
+# (grams, label, ml, gramsPerMeasure) → the words. The panel suite runs the
+# SAME rows through its JS mirror, so the two can never disagree.
+MEASURE_TABLE = [
+    (1205, "jug", 1000, 1100, "1 level jug + about 100 ml"),
+    (1365, "jug", 1000, 1100, "1 level jug + about 240 ml"),
+    (2200, "jug", 1000, 1100, "2 level jugs"),
+    (47, "jug", 1000, 1100, "about 40 ml in your jug"),
+    (3, "jug", 1000, 1100, "under 10 ml in your jug"),
+    (1099, "jug", 1000, 1100, "1 level jug"),            # 999 ml rounds over into a whole jug
+    (580, "beaker", 250, 290, "2 level beakers"),
+    (600, "beaker", 250, 290, "2 level beakers + about 20 ml"),
+    (1450, "glass", 250, 290, "5 level glasses"),
+    (300, "box", 250, 290, "1 level box + about 10 ml"),
+]
+
+
+def test_salt_measure_info_weighed_or_estimated():
+    assert mixing.salt_measure_info({"measure": {"mode": "grams"}}) is None
+    assert mixing.salt_measure_info({}) is None
+    est = mixing.salt_measure_info({"measure": {"mode": "measure", "label": "jug",
+                                                "ml": 1000, "gramsPerMeasure": 0}})
+    assert est == {"label": "jug", "ml": 1000.0, "gramsPerMeasure": 1100.0,
+                   "gPerMl": 1.1, "estimated": True}
+    weighed = mixing.salt_measure_info({"measure": {"mode": "measure", "label": "beaker",
+                                                    "ml": 250, "gramsPerMeasure": 290}})
+    assert weighed["gramsPerMeasure"] == 290.0 and weighed["estimated"] is False
+    assert weighed["gPerMl"] == 1.16
+    assert mixing.salt_measure_info({"measure": {"mode": "measure", "ml": 0}}) is None
+    assert mixing.salt_measure_info({"measure": {"mode": "measure", "ml": 500,
+                                                 "label": "  "}})["label"] == "measure"
+
+
+def test_salt_in_measures_speaks_level_measures_and_millilitres():
+    for grams, label, ml, g_each, text in MEASURE_TABLE:
+        out = mixing.salt_in_measures(grams, {"label": label, "ml": ml,
+                                              "gramsPerMeasure": g_each, "estimated": False})
+        assert out["text"] == text, (grams, label, ml, g_each, out)
+    out = mixing.salt_in_measures(1365, {"label": "jug", "ml": 1000, "gramsPerMeasure": 1100,
+                                         "estimated": True})
+    assert out["wholes"] == 1 and out["remainderMl"] == 240 and out["totalMl"] == 1241
+    assert out["estimated"] is True
+    # Nothing to say without grams or a measure.
+    assert mixing.salt_in_measures(None, {"ml": 1000, "gramsPerMeasure": 1100}) is None
+    assert mixing.salt_in_measures(0, {"ml": 1000, "gramsPerMeasure": 1100}) is None
+    assert mixing.salt_in_measures(100, None) is None
+    assert mixing.salt_in_measures(100, {"ml": 1000, "gramsPerMeasure": 0}) is None
+    assert mixing.plural_measure("jug", 1) == "jug" and mixing.plural_measure("jug", 2) == "jugs"
+    assert mixing.plural_measure("glass", 3) == "glasses" and mixing.plural_measure("dish", 2) == "dishes"
+
+
+def test_summary_hands_every_dose_its_measure():
+    cfg = _cfg()
+    cfg["salt"]["measure"] = {"mode": "measure", "label": "jug", "ml": 1000, "gramsPerMeasure": 1100}
+    cfg["vessels"]["mix"].update({"volumeLitres": 50, "estimatedLitres": 15, "contents": "salt"})
+    cfg["batch"] = {"state": "ready", "litres": 15}
+    s = mixing.summary(cfg, NOW)
+    assert s["saltMeasure"] == {"label": "jug", "ml": 1000.0, "gramsPerMeasure": 1100.0,
+                                "gPerMl": 1.1, "estimated": False}
+    full = s["doseGuide"]["full"]
+    assert full["grams"] == 1950 and full["measure"]["text"] == "1 level jug + about 770 ml"
+    assert s["doseGuide"]["topUp"]["measure"]["text"] == "1 level jug + about 240 ml"
+    assert s["dose"]["measure"]["text"] == "about 530 ml in your jug"     # 15 L → 585 g
+    # The fresh and run stories carry it too.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 50, "freshLitres": 35})
+    cfg["batch"] = {"state": "idle"}
+    assert mixing.summary(cfg, NOW)["doseGuide"]["fresh"]["measure"]["text"] == "1 level jug + about 240 ml"
+    cfg["batch"] = {"state": "salting", "litres": 50, "doseLitres": 35, "stageAt": _iso(NOW)}
+    assert mixing.summary(cfg, NOW)["doseGuide"]["run"]["measure"]["text"] == "1 level jug + about 240 ml"
+    # Grams keepers: no measure key anywhere — old readers and old equality hold.
+    del cfg["salt"]["measure"]
+    s = mixing.summary(cfg, NOW)
+    assert s["saltMeasure"] is None
+    assert "measure" not in s["doseGuide"]["full"] and "measure" not in s["dose"]
+    # A custom brand with no g/L: no grams, so no measure either — never a guess.
+    cfg["salt"].update({"brand": "custom", "customGPerL": 0,
+                        "measure": {"mode": "measure", "label": "jug", "ml": 1000}})
+    s = mixing.summary(cfg, NOW)
+    assert s["doseGuide"]["full"]["available"] is False and s["doseGuide"]["full"]["measure"] is None
+    assert s["saltMeasure"]["estimated"] is True
+
+
+def test_normalise_salt_measure_block():
+    raw = _station_cfg()
+    raw["salt"]["measure"] = {"mode": "measure", "label": "  Big jug of doom, very long indeed  ",
+                              "ml": "750", "gramsPerMeasure": -5}
+    m = integration._normalise_core_config({"mixingStation": raw})["mixingStation"]["salt"]["measure"]
+    assert m["mode"] == "measure" and m["ml"] == 750 and m["gramsPerMeasure"] == 0
+    assert m["label"] == "Big jug of doom, very lo" and len(m["label"]) == 24
+    bare = integration._normalise_core_config({"mixingStation": _station_cfg()})["mixingStation"]
+    assert bare["salt"]["measure"] == {"mode": "grams", "label": "jug", "ml": 1000, "gramsPerMeasure": 0}
+    raw["salt"]["measure"] = {"mode": "cups", "ml": 999999, "gramsPerMeasure": "290.26"}
+    m = integration._normalise_core_config({"mixingStation": raw})["mixingStation"]["salt"]["measure"]
+    assert m["mode"] == "grams" and m["ml"] == 5000 and m["gramsPerMeasure"] == 290.3
+    # Idempotent.
+    cfg = integration._normalise_core_config({"mixingStation": raw})["mixingStation"]
+    again = integration._normalise_core_config({"mixingStation": copy.deepcopy(cfg)})["mixingStation"]
+    assert again["salt"] == cfg["salt"]
+
+
+def test_correction_reply_speaks_the_measure():
+    install_scheduler(integration)
+    salt = {"brand": "nyos_pure", "targetPpt": 35.0, "mixHours": 0, "customGPerL": 0,
+            "measure": {"mode": "measure", "label": "jug", "ml": 1000, "gramsPerMeasure": 1100}}
+    hass, entry = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                      "stageAt": _iso(NOW)}, "salt": salt})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 33.0}))
+    c = conn.results[-1].payload["correction"]
+    assert c["addGrams"] == 89.0
+    assert c["addMeasure"]["text"] == "about 80 ml in your jug"
+    assert conn.results[-1].payload["summary"]["saltMeasure"]["label"] == "jug"
+    # Too salty: dilution needs no salt, so no measure.
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 2, "ppt": 37.0}))
+    c = conn.results[-1].payload["correction"]
+    assert c["status"] == "high" and c["addMeasure"] is None
+    # A grams keeper gets the key, empty — the panel reads it as nothing.
+    hass2, entry2 = _station({"batch": {"state": "salting", "type": "salt", "litres": 40,
+                                        "stageAt": _iso(NOW)}})
+    conn2 = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass2, conn2, {"id": 1, "ppt": 33.0}))
+    assert conn2.results[-1].payload["correction"]["addMeasure"] is None
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

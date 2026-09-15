@@ -743,3 +743,53 @@ retest re-mix no longer double-debits; level corrections scale; stopping heat ke
 litres) and `test_panel_mixing.mjs` (the button words, the stop selector, the remembered
 destination, the top-up note, Salt & mix on standing saltwater, the run and fresh stories, the
 live fill-to-full line, the settings field).
+
+## §33 The keeper's measure — jugs, beakers and scoops (0.7.188)
+
+Reece: "some users don't use grams for salt — they use beakers or jugs. Is it possible to
+make salt requirement calculations better for them also?"
+
+The guide spoke grams because the brands do. A jug keeper had to convert in their head, and
+many own no scales at all. Now the measure is theirs to name and size, and every grams figure
+carries its measure beside it. The salinity test stays the referee, whatever the salt was
+measured with.
+
+- **Config** `salt.measure = {mode: grams | measure, label ≤ 24, ml 10–5000, gramsPerMeasure
+  0–10000}`, defaults grams / "jug" / 1000 / 0. A keeper's setting — in the salt block of
+  the station's Settings ("Dose salt by"), the three fields appearing only in measure mode.
+- **Honest grams per measure, two ways.** Weigh one LEVEL measure once on kitchen scales and
+  type it: `gramsPerMeasure > 0`, `estimated: false`. Until then the engine estimates it from
+  `SALT_BULK_DENSITY_G_PER_ML = 1.1` (a typical loose bulk density for dry reef salt) and SAYS
+  so: the dose card's caveat reads "One level jug is estimated at 1100 g from a typical salt
+  density — weigh one on kitchen scales and set it in settings to make the figures honest";
+  weighed, it reads "one level jug holds 1150 g, as you weighed it". Both say "level, not
+  heaped". The estimate is a labelled estimate in the levels tradition, never a silent
+  guess — and it is the only way a keeper with no scales gets a figure at all.
+- **Engine.** `salt_measure_info(salt_cfg)` → `{label, ml, gramsPerMeasure, gPerMl,
+  estimated}` or None for a grams keeper. `salt_in_measures(grams, measure)` → whole LEVEL
+  measures first, then the remainder to the nearest 10 ml (what a smaller graduated vessel
+  takes): "1 level jug + about 240 ml"; under one measure "about 40 ml in your jug"; a few
+  grams "under 10 ml in your jug"; a remainder that rounds to the full measure rolls over
+  ("1 level jug", never "0 jugs + 1000 ml"). `plural_measure` does jugs/glasses. Rounding is
+  half-UP (`_half_up`, the JS `Math.round`) so the Python and the panel's mirror can never
+  disagree on a .5 — Python's own `round()` is banker's.
+- **Summary.** `saltMeasure` at the top (None for grams keepers); every dose blob — `full`,
+  `topUp`, `standingRodi`, `run`, `fresh`, the legacy `dose` — gains `measure` ({wholes,
+  remainderMl, totalMl, text, estimated}, or None when the dose itself is unavailable). Grams
+  keepers get NO `measure` key, so old readers and the old equality tests are untouched.
+- **The correction.** `log_salinity`'s reply carries `addMeasure` beside `addGrams`; the panel
+  says "Low — add about 89 g of salt (about 80 ml in your jug), let it dissolve, retest."
+  Dilution needs no salt, so `addMeasure` is None on a high reading.
+- **Panel.** The dose lines append " (≈ 1 level jug + about 240 ml)" — the backend's own text,
+  escaped. The one place the panel must compute is the live what-if row: `_mixingMeasure(g,
+  measure)` mirrors the engine word for word, and the panel suite runs the SAME table
+  (`MEASURE_TABLE`, read out of test_mixing.py so the two files cannot drift) through both,
+  plus `_mixingMeasureEstimateG` pinned to the Python density constant (the SG-anchor
+  pattern). `data-scope="mixing-salt-measure"` writes the nested block.
+
+Not done, worth doing next: learning the grams per measure WITHOUT scales from the salinity
+test itself — the keeper logs how many measures went in, the test says what salinity that
+made, and the brand's g/L turns that into grams per measure (weighted across batches, the
+cooling-offset ledger pattern). That would make the estimate go honest for keepers who own no
+scales at all, which is most jug keepers. Top-up runs complicate it (the standing water's own
+salt must be subtracted), so it wants its own slice.

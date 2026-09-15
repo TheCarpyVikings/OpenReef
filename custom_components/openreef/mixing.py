@@ -21,6 +21,7 @@ batch.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -109,6 +110,88 @@ def mix_hours(brand: Any, override_hours: Any = 0) -> float:
         return override
     default = _f(brand_info(brand)["mixHoursDefault"])
     return default if default > 0 else 2.0
+
+
+# ---------------------------------------------------------------- the keeper's measure
+# Doc §33: not every keeper owns scales — many dose by a jug, a beaker or a
+# scoop. The measure is theirs to name and size; the grams one level measure
+# holds are weighed once (honest) or, until then, estimated from a typical
+# loose bulk density for dry reef salt and SAID to be an estimate. Every dose
+# figure then reads in measures beside the grams. The salinity test stays the
+# referee, whatever the salt was measured with.
+SALT_BULK_DENSITY_G_PER_ML = 1.1
+SALT_MEASURE_MODES = ("grams", "measure")
+SALT_MEASURE_LABEL_MAX = 24
+SALT_MEASURE_ML_MIN = 10
+SALT_MEASURE_ML_MAX = 5000
+SALT_MEASURE_G_MAX = 10000
+
+
+def _half_up(value: float) -> int:
+    """Round half UP (0.5 → 1): the panel's Math.round, so the Python and the
+    JS mirror can never disagree on a .5 — Python's own round() is banker's."""
+    return int(math.floor(value + 0.5))
+
+
+def plural_measure(label: str, count: int) -> str:
+    """'jug' → 'jugs', 'glass' → 'glasses'; one of anything keeps its name.
+    The panel mirrors this rule exactly (pinned by the panel suite)."""
+    if count == 1:
+        return label
+    if label.endswith(("s", "x", "z", "sh", "ch")):
+        return label + "es"
+    return label + "s"
+
+
+def salt_measure_info(salt_cfg: Any) -> dict[str, Any] | None:
+    """The keeper's own measure (doc §33), or None when they dose by grams:
+    its label, its level volume, the grams one level measure holds — weighed
+    once, or the bulk-density ESTIMATE, flagged — and g/ml for live maths."""
+    salt_cfg = salt_cfg if isinstance(salt_cfg, dict) else {}
+    measure = salt_cfg.get("measure") if isinstance(salt_cfg.get("measure"), dict) else {}
+    if str(measure.get("mode") or "grams") != "measure":
+        return None
+    ml = _f(measure.get("ml"))
+    if ml <= 0:
+        return None
+    label = (str(measure.get("label") or "").strip() or "measure")[:SALT_MEASURE_LABEL_MAX]
+    weighed = _f(measure.get("gramsPerMeasure"))
+    estimated = weighed <= 0
+    grams = float(_half_up(ml * SALT_BULK_DENSITY_G_PER_ML)) if estimated else weighed
+    return {"label": label, "ml": round(ml, 1), "gramsPerMeasure": round(grams, 1),
+            "gPerMl": round(grams / ml, 3), "estimated": estimated}
+
+
+def salt_in_measures(grams: Any, measure: Any) -> dict[str, Any] | None:
+    """Grams as the keeper's measure (doc §33): whole LEVEL measures first,
+    then the remainder in millilitres — what a smaller graduated vessel takes
+    — to the nearest 10 ml: "1 level jug + about 240 ml"; under one measure,
+    "about 40 ml in your jug". None without a measure or without grams. The
+    panel mirrors the words exactly for its live what-if row."""
+    if not isinstance(measure, dict) or grams is None:
+        return None
+    g = _f(grams)
+    g_each = _f(measure.get("gramsPerMeasure"))
+    ml = _f(measure.get("ml"))
+    if g <= 0 or g_each <= 0 or ml <= 0:
+        return None
+    wholes = int(math.floor(g / g_each))
+    rem_g = g - wholes * g_each
+    rem_ml = _half_up(rem_g * ml / g_each / 10.0) * 10
+    if rem_ml >= ml:          # the rounding rolled over into a whole measure
+        wholes += 1
+        rem_ml = 0
+    label = str(measure.get("label") or "measure")
+    if wholes == 0:
+        text = (f"about {rem_ml} ml in your {label}" if rem_ml > 0
+                else f"under 10 ml in your {label}")
+    elif rem_ml == 0:
+        text = f"{wholes} level {plural_measure(label, wholes)}"
+    else:
+        text = f"{wholes} level {plural_measure(label, wholes)} + about {rem_ml} ml"
+    return {"wholes": wholes, "remainderMl": rem_ml,
+            "totalMl": _half_up(g * ml / g_each), "text": text,
+            "estimated": bool(measure.get("estimated"))}
 
 
 # ---------------------------------------------------------------- dose maths
@@ -772,9 +855,16 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
     # frozen. The second line follows what the vessel holds right now:
     # top-up salt for standing saltwater, a straight dose for standing RODI,
     # the run's own dose while a mix is under way.
+    # The keeper's measure (doc §33): when set, every dose blob carries its
+    # grams AS measures too. Grams keepers get the blob unchanged — no key.
+    measure = salt_measure_info(salt_cfg)
+
     def _dose(for_litres: float) -> dict[str, Any]:
-        return salt_dose(salt_cfg.get("brand"), for_litres,
-                         salt_cfg.get("targetPpt"), salt_cfg.get("customGPerL"))
+        d = salt_dose(salt_cfg.get("brand"), for_litres,
+                      salt_cfg.get("targetPpt"), salt_cfg.get("customGPerL"))
+        if measure is not None:
+            d["measure"] = salt_in_measures(d.get("grams"), measure) if d.get("available") else None
+        return d
 
     vol_l = _f((cfg.get("vessels") or {}).get("mix", {}).get("volumeLitres"))
     held_l = mix_vessel_litres(cfg)
@@ -815,9 +905,10 @@ def summary(cfg: Any, now: datetime) -> dict[str, Any]:
         "layout": str(cfg.get("layout") or "dual"),
         "batch": state,
         "levels": vessel_levels(cfg),
-        "dose": salt_dose(salt_cfg.get("brand"), litres,
-                          salt_cfg.get("targetPpt"), salt_cfg.get("customGPerL")),
+        "dose": _dose(litres),
         "doseGuide": guide,
+        # The keeper's measure, or None for a grams keeper (doc §33).
+        "saltMeasure": measure,
         "mixHours": mix_hours(salt_cfg.get("brand"), salt_cfg.get("mixHours")),
         "brand": brand_info(salt_cfg.get("brand")),
         "brands": [dict(b) for b in SALT_BRANDS],

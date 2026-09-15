@@ -2089,6 +2089,13 @@ class OpenReefPanel extends HTMLElement {
             ? `That's more than the vessel has room for — about ${this._format(free, 0)} L free.`
             : "";
         }
+        // The jug keeper's live figure (doc §33) — the panel's mirror of the
+        // engine's measure maths, pinned by the suite.
+        const mSpan = this.shadowRoot.querySelector("[data-mixing-dose-whatif-measure]");
+        if (mSpan) {
+          const m = this._mixingMeasure(litres * gPerL, this._mixingSummary?.saltMeasure);
+          mSpan.textContent = m ? `(≈ ${m.text})` : "";
+        }
         return;
       }
 
@@ -2661,6 +2668,13 @@ class OpenReefPanel extends HTMLElement {
         if (stage) {
           stage[field] = (target.type === "number") ? Math.max(0, Number(value) || 0) : value;
         }
+      }
+      if (scope === "mixing-salt-measure") {
+        // The keeper's own salt measure (doc §33): a jug, a beaker, a scoop.
+        const m = this._config.mixingStation = this._config.mixingStation || {};
+        const salt = m.salt = m.salt || {};
+        const measure = salt.measure = salt.measure || {};
+        measure[field] = (target.type === "number") ? Math.max(0, Number(value) || 0) : String(value || "");
       }
       if (["mixing-rodi", "mixing-salt", "mixing-heat", "mixing-storage", "mixing-integrations"].includes(scope)) {
         const m = this._config.mixingStation = this._config.mixingStation || {};
@@ -3473,6 +3487,36 @@ class OpenReefPanel extends HTMLElement {
     if (raw === "" || raw == null || !Number.isFinite(v) || v < 0) return null;
     const ml = unit === "ml" ? Math.round(v) : Math.round(v * 1000);
     return { litres: ml / 1000, ml };
+  }
+
+  // Grams as the keeper's own measure (doc §33) — the mirror of
+  // mixing.salt_in_measures(): whole LEVEL measures, then the remainder to
+  // the nearest 10 ml ("1 level jug + about 240 ml"; under one measure,
+  // "about 40 ml in your jug"). Same words, same rounding (Math.round is the
+  // Python's half-up), pinned against the Python by the panel suite. Used
+  // only where the panel must compute live (the what-if row); every other
+  // figure is the backend's own text.
+  _mixingMeasure(grams, measure) {
+    const g = Number(grams);
+    const gEach = Number(measure?.gramsPerMeasure);
+    const ml = Number(measure?.ml);
+    if (!measure || !Number.isFinite(g) || g <= 0 || !(gEach > 0) || !(ml > 0)) return null;
+    let wholes = Math.floor(g / gEach);
+    const remG = g - wholes * gEach;
+    let remMl = Math.round(remG * ml / gEach / 10) * 10;
+    if (remMl >= ml) { wholes += 1; remMl = 0; }
+    const label = String(measure.label || "measure");
+    const plural = (n) => (n === 1 ? label : (/(s|x|z|sh|ch)$/.test(label) ? `${label}es` : `${label}s`));
+    const text = wholes === 0
+      ? (remMl > 0 ? `about ${remMl} ml in your ${label}` : `under 10 ml in your ${label}`)
+      : remMl === 0 ? `${wholes} level ${plural(wholes)}` : `${wholes} level ${plural(wholes)} + about ${remMl} ml`;
+    return { wholes, remainderMl: remMl, totalMl: Math.round(g * ml / gEach), text, estimated: !!measure.estimated };
+  }
+
+  // The settings hint's estimate before a summary lands: mirrors
+  // SALT_BULK_DENSITY_G_PER_ML in mixing.py (pinned by the panel suite).
+  _mixingMeasureEstimateG(ml) {
+    return Math.round((Number(ml) || 0) * 1.1);
   }
 
   // Minutes for a sentence: "under a minute", "about 45 min", "about 3 h 21 min".
@@ -26194,9 +26238,11 @@ const rigSteps = [
       }
       const c = result?.correction;
       if (c && c.status && c.status !== "pass") {
+        // The jug keeper hears the grams in jugs too (doc §33) — the backend's words.
+        const inMeasure = c.addMeasure?.text ? ` (${c.addMeasure.text})` : "";
         this._mixingMessage = c.status === "low"
           ? (c.addGrams
-            ? `Low — add about ${c.addGrams} g of salt, let it dissolve, retest.`
+            ? `Low — add about ${c.addGrams} g of salt${inMeasure}, let it dissolve, retest.`
             : "Low — add salt gradually and retest.")
           : `High — dilute with about ${c.diluteLitres} L of RODI and retest.`;
       }
@@ -26282,29 +26328,37 @@ const rigSteps = [
     // the vessel holds right now — how much MORE salt a top-up needs, a
     // straight dose for standing RODI, or the live run's own figure.
     const guide = sum?.doseGuide || null;
+    // The jug keeper (doc §33): every grams figure carries the backend's own
+    // "≈ 1 level jug + about 240 ml" beside it; grams keepers see no change.
+    const sm = sum?.saltMeasure || null;
+    const inMeasure = (d) => (d?.measure?.text ? ` (≈ ${this._escape(d.measure.text)})` : "");
+    const measureCaveat = sm ? `
+        <small class="awc-hint">${sm.estimated
+          ? `Measures are level, not heaped. One level ${this._escape(sm.label)} is estimated at ${this._format(sm.gramsPerMeasure, 0)} g from a typical salt density — weigh one on kitchen scales and set it in settings to make the figures honest.`
+          : `Measures are level, not heaped — one level ${this._escape(sm.label)} holds ${this._format(sm.gramsPerMeasure, 0)} g, as you weighed it.`}</small>` : "";
     let doseBody;
     if (guide && guide.full?.available) {
-      const lines = [`<p class="muted"><strong>Fresh full batch:</strong> ${this._format(guide.fullLitres, 0)} L from empty needs roughly <strong>${this._format(guide.full.grams, 0)} g</strong> (${this._format(guide.full.gPerL, 1)} g/L).</p>`];
+      const lines = [`<p class="muted"><strong>Fresh full batch:</strong> ${this._format(guide.fullLitres, 0)} L from empty needs roughly <strong>${this._format(guide.full.grams, 0)} g</strong> (${this._format(guide.full.gPerL, 1)} g/L${guide.full.measure?.text ? `; ≈ ${this._escape(guide.full.measure.text)}` : ""}).</p>`];
       const running = status === "heating" || status === "salting";
       if (guide.run?.available) {
         // A top-up re-salt (doc §32) dosed only the fresh litres — say which.
         lines.push(guide.runTopUp
-          ? `<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong> — the salt for the ${this._format(guide.runDoseLitres, 0)} L of fresh RODI topped up; the water already standing kept its own.</p>`
-          : `<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong>.</p>`);
+          ? `<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong>${inMeasure(guide.run)} — the salt for the ${this._format(guide.runDoseLitres, 0)} L of fresh RODI topped up; the water already standing kept its own.</p>`
+          : `<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong>${inMeasure(guide.run)}.</p>`);
       } else if (running && guide.runTopUp && Number(guide.runLitres) > 0) {
         lines.push(`<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now needed no new salt — it already carried its own; test it once the window is done.</p>`);
       } else {
         // Fresh RODI already on the old batch is owed its salt BEFORE any
         // further top-up is planned (doc §32) — the two lines stack.
         if (guide.fresh?.available) {
-          lines.push(`<p class="muted"><strong>Salt the top-up:</strong> ${this._format(guide.freshLitres, 0)} L of fresh RODI has gone onto the standing batch — Salt &amp; mix brings the vessel back to target with roughly <strong>${this._format(guide.fresh.grams, 0)} g</strong>.</p>`);
+          lines.push(`<p class="muted"><strong>Salt the top-up:</strong> ${this._format(guide.freshLitres, 0)} L of fresh RODI has gone onto the standing batch — Salt &amp; mix brings the vessel back to target with roughly <strong>${this._format(guide.fresh.grams, 0)} g</strong>${inMeasure(guide.fresh)}.</p>`);
         }
         if (guide.topUp?.available) {
           lines.push(guide.fresh?.available
-            ? `<p class="muted"><strong>Top the rest up:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L — adding the last ${this._format(guide.topUpLitres, 0)} L of fresh RODI would need roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong> more.</p>`
-            : `<p class="muted"><strong>Top back up to full:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L of saltwater — adding ${this._format(guide.topUpLitres, 0)} L of fresh RODI needs roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong> more salt. The water already standing keeps its own.</p>`);
+            ? `<p class="muted"><strong>Top the rest up:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L — adding the last ${this._format(guide.topUpLitres, 0)} L of fresh RODI would need roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong>${inMeasure(guide.topUp)} more.</p>`
+            : `<p class="muted"><strong>Top back up to full:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L of saltwater — adding ${this._format(guide.topUpLitres, 0)} L of fresh RODI needs roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong>${inMeasure(guide.topUp)} more salt. The water already standing keeps its own.</p>`);
         } else if (guide.standingRodi?.available) {
-          lines.push(`<p class="muted"><strong>Salting what's on hand:</strong> the ${this._format(guide.heldLitres, 0)} L of RODI standing in the vessel needs roughly <strong>${this._format(guide.standingRodi.grams, 0)} g</strong>.</p>`);
+          lines.push(`<p class="muted"><strong>Salting what's on hand:</strong> the ${this._format(guide.heldLitres, 0)} L of RODI standing in the vessel needs roughly <strong>${this._format(guide.standingRodi.grams, 0)} g</strong>${inMeasure(guide.standingRodi)}.</p>`);
         }
       }
       // The what-if row: standing saltwater + any litres the keeper fancies
@@ -26320,13 +26374,14 @@ const rigSteps = [
           <span class="muted">L of fresh RODI needs roughly</span>
           <strong data-mixing-dose-whatif-g>${this._format(whatIfL * (Number(guide.full.gPerL) || 0), 0)} g</strong>
           <span class="muted">more salt.</span>
+          <span class="muted" data-mixing-dose-whatif-measure>${(() => { const m = this._mixingMeasure(whatIfL * (Number(guide.full.gPerL) || 0), sm); return m ? `(≈ ${this._escape(m.text)})` : ""; })()}</span>
         </div>
         <small class="awc-hint" data-mixing-dose-whatif-room>${whatIfL > free + 0.05 ? `That's more than the vessel has room for — about ${this._format(free, 0)} L free.` : ""}</small>`);
       }
       doseBody = `${lines.join("")}
-        <small class="awc-hint">A guide from the brand's own dosing, not a promise — your salinity test has the final word${guide.topUp?.available || contents === "salt" ? "; the top-up figures assume the standing water tested at target" : ""}.</small>`;
+        <small class="awc-hint">A guide from the brand's own dosing, not a promise — your salinity test has the final word${guide.topUp?.available || contents === "salt" ? "; the top-up figures assume the standing water tested at target" : ""}.</small>${measureCaveat}`;
     } else if (dose.available) {
-      doseBody = `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong> (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>`;
+      doseBody = `<p class="muted">Roughly <strong>${this._format(dose.grams, 0)} g</strong>${inMeasure(dose)} (${this._format(dose.gPerL, 1)} g/L) for a full batch — a guide from the brand's own dosing, not a promise. Your own salinity test has the final word.</p>${measureCaveat}`;
     } else {
       doseBody = `<p class="muted">No dose figure yet — pick a salt brand (or give your custom blend a g/L) in settings and the guide fills in.</p>`;
     }
@@ -27185,7 +27240,20 @@ const rigSteps = [
           : `<label>Target salinity (ppt)<input type="number" min="20" max="45" step="0.1" data-scope="mixing-salt" data-field="targetPpt" value="${Number(salt.targetPpt) || 35}"></label>`}
         <label>Mix window (h, 0 = brand default)<input type="number" min="0" max="72" step="0.5" data-scope="mixing-salt" data-field="mixHours" value="${Number(salt.mixHours) || 0}"></label>
         ${(salt.brand || "") === "custom" ? `<label>Custom salt g/L @35 ppt<input type="number" min="0" max="100" step="0.1" data-scope="mixing-salt" data-field="customGPerL" value="${Number(salt.customGPerL) || 0}"></label>` : ""}
+        <label>Dose salt by<select data-scope="mixing-salt-measure" data-field="mode">
+          <option value="grams" ${salt.measure?.mode === "measure" ? "" : "selected"}>Grams — kitchen scales</option>
+          <option value="measure" ${salt.measure?.mode === "measure" ? "selected" : ""}>A measure of my own — jug, beaker, scoop</option>
+        </select></label>
       </div>
+      ${salt.measure?.mode === "measure" ? `
+      <div class="mini-grid">
+        <label>What you call it<input type="text" maxlength="24" data-scope="mixing-salt-measure" data-field="label" value="${this._escape(salt.measure.label || "jug")}" placeholder="jug, beaker, scoop"></label>
+        <label>Level volume (ml)<input type="number" min="10" max="5000" step="10" data-scope="mixing-salt-measure" data-field="ml" value="${Number(salt.measure.ml) || 1000}"></label>
+        <label>Salt per level measure (g, 0 = estimate)<input type="number" min="0" max="10000" step="1" data-scope="mixing-salt-measure" data-field="gramsPerMeasure" value="${Number(salt.measure.gramsPerMeasure) || 0}"></label>
+      </div>
+      <small class="awc-hint">${Number(salt.measure.gramsPerMeasure) > 0
+        ? `One level ${this._escape(salt.measure.label || "jug")} holds ${Number(salt.measure.gramsPerMeasure)} g, as you weighed it — every dose on the tab reads in your measure beside the grams.`
+        : `Until you weigh one, a level ${this._escape(salt.measure.label || "jug")} is estimated at ~${this._mixingMeasureEstimateG(Number(salt.measure.ml) || 1000)} g from a typical salt density. Fill it level, weigh it once on kitchen scales, type the grams here, and the figures go honest — your salinity test stays the referee either way.`}</small>` : ""}
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="mixing-heat" data-field="enabled" ${heat.enabled ? "checked" : ""}>
         <span><strong>Heat before salting</strong><small>Brands want the water at temperature before the salt goes in — and salinity reads true only at temp. Skip it if you mix at ambient.</small></span>

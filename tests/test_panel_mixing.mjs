@@ -1223,4 +1223,139 @@ test("a live fill to full says it stops itself; settings carries the stored stop
   assert(/value="float"[^>]*selected/.test(floatBody), "an unset stop must default to the float valve in settings");
 });
 
+// --- §33 the keeper's measure — jugs, beakers, scoops (0.7.188) ------------------
+
+// The same rows as MEASURE_TABLE in test_mixing.py: the JS mirror and the Python
+// must say the same words for the same grams.
+const MEASURE_TABLE = [
+  [1205, "jug", 1000, 1100, "1 level jug + about 100 ml"],
+  [1365, "jug", 1000, 1100, "1 level jug + about 240 ml"],
+  [2200, "jug", 1000, 1100, "2 level jugs"],
+  [47, "jug", 1000, 1100, "about 40 ml in your jug"],
+  [3, "jug", 1000, 1100, "under 10 ml in your jug"],
+  [1099, "jug", 1000, 1100, "1 level jug"],
+  [580, "beaker", 250, 290, "2 level beakers"],
+  [600, "beaker", 250, 290, "2 level beakers + about 20 ml"],
+  [1450, "glass", 250, 290, "5 level glasses"],
+  [300, "box", 250, 290, "1 level box + about 10 ml"],
+];
+
+test("the panel's measure maths cannot drift from mixing.py — same rows, same words", async () => {
+  const panel = await mixingPanel();
+  for (const [grams, label, ml, gEach, text] of MEASURE_TABLE) {
+    const out = panel._mixingMeasure(grams, { label, ml, gramsPerMeasure: gEach, estimated: false });
+    assert(out && out.text === text, `${grams} g in a ${ml} ml ${label}: expected "${text}", got "${out && out.text}"`);
+  }
+  const py = fs.readFileSync(path.join(ROOT, "custom_components", "openreef", "mixing.py"), "utf8");
+  const pyRows = [...py.matchAll(/\((\d+), "(\w+)", (\d+), (\d+), "([^"]+)"\)/g)]
+    .map((m) => [Number(m[1]), m[2], Number(m[3]), Number(m[4]), m[5]]);
+  // The Python suite keeps its table in test_mixing.py — read it there.
+  const pyTest = fs.readFileSync(path.join(ROOT, "tests", "test_mixing.py"), "utf8");
+  const rows = [...pyTest.matchAll(/\((\d+), "(\w+)", (\d+), (\d+), "([^"]+)"\)/g)]
+    .map((m) => [Number(m[1]), m[2], Number(m[3]), Number(m[4]), m[5]]);
+  assert(rows.length === MEASURE_TABLE.length, `the Python table has ${rows.length} rows, this one ${MEASURE_TABLE.length}`);
+  rows.forEach((row, i) => assert(row.join("|") === MEASURE_TABLE[i].join("|"), `row ${i} differs from the Python table: ${row}`));
+  assert(pyRows.length === 0, "mixing.py must not carry test rows");
+  const density = Number(py.match(/SALT_BULK_DENSITY_G_PER_ML\s*=\s*([\d.]+)/)?.[1]);
+  assert(density > 0.8 && density < 1.5, `could not read SALT_BULK_DENSITY_G_PER_ML: ${density}`);
+  assert(panel._mixingMeasureEstimateG(1000) === Math.round(1000 * density)
+    && panel._mixingMeasureEstimateG(250) === Math.round(250 * density),
+    "the panel's density estimate drifted from the Python");
+  assert(panel._mixingMeasure(0, { label: "jug", ml: 1000, gramsPerMeasure: 1100 }) === null
+    && panel._mixingMeasure(100, null) === null
+    && panel._mixingMeasure(100, { label: "jug", ml: 1000, gramsPerMeasure: 0 }) === null,
+    "no grams or no measure must say nothing");
+  assert(panel._mixingMeasure(1365, { label: "jug", ml: 1000, gramsPerMeasure: 1100, estimated: true }).estimated === true,
+    "the estimate flag must ride along");
+});
+
+test("a jug keeper reads every dose in jugs — and is told when the jug is an estimate", async () => {
+  const measure = { label: "jug", ml: 1000, gramsPerMeasure: 1100, gPerMl: 1.1, estimated: true };
+  const withM = (grams, text) => ({ available: true, grams, gPerL: 39.0,
+    measure: { text, wholes: 0, remainderMl: 0, totalMl: 0, estimated: true } });
+  const blob = summaryBlob({ batch: { status: "ready", contents: "salt", litres: 15, remainingLitres: 15, loggedPpt: 35 } });
+  blob.saltMeasure = measure;
+  blob.doseGuide = { full: withM(1950, "1 level jug + about 770 ml"), fullLitres: 50, heldLitres: 15,
+    topUp: withM(1365, "1 level jug + about 240 ml"), topUpLitres: 35, standingRodi: null,
+    run: null, runLitres: 0, runDoseLitres: 0, runTopUp: false, fresh: null, freshLitres: 0 };
+  const saltCfg = (gEach) => ({ brand: "nyos_pure", targetPpt: 35, mixHours: 0, customGPerL: 0,
+    measure: { mode: "measure", label: "jug", ml: 1000, gramsPerMeasure: gEach } });
+  const panel = await mixingPanel({ batch: { state: "ready" }, salt: saltCfg(0) }, blob);
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes("1950 g</strong> (39.0 g/L; ≈ 1 level jug + about 770 ml)"), "the full batch must read in jugs");
+  assert(html.includes("1365 g</strong> (≈ 1 level jug + about 240 ml) more salt"), "the top-up must read in jugs");
+  assert(html.includes("estimated at 1100 g") && html.includes("weigh one on kitchen scales"),
+    "an estimated jug must say so and ask to be weighed");
+  assert(html.includes("level, not heaped"), "measures must be said to be level");
+  // The what-if row prices the default 10 L live in jugs too: 390 g → about 350 ml.
+  assert(html.includes("data-mixing-dose-whatif-measure") && html.includes("(≈ about 350 ml in your jug)"),
+    "the what-if row must speak the jug");
+  noPlaceholders(html, "jug keeper tab");
+  // Weighed: the caveat flips to the keeper's own figure.
+  blob.saltMeasure = { ...measure, gramsPerMeasure: 1150, estimated: false };
+  const weighed = await mixingPanel({ batch: { state: "ready" }, salt: saltCfg(1150) }, blob);
+  weighed._activeTab = "mixing";
+  const weighedHtml = weighed._mixingTab();
+  assert(weighedHtml.includes("holds 1150 g, as you weighed it") && !weighedHtml.includes("estimated at"),
+    "a weighed jug must be credited, not estimated");
+  // The run and fresh stories carry it; the legacy dose line too.
+  const runBlob = summaryBlob({ batch: { status: "salting", contents: "salt", litres: 50, remainingLitres: 50,
+    mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } } });
+  runBlob.saltMeasure = measure;
+  runBlob.doseGuide = { ...blob.doseGuide, run: withM(1365, "1 level jug + about 240 ml"), runLitres: 50, runDoseLitres: 35, runTopUp: true };
+  const runPanel = await mixingPanel({ batch: { state: "salting", litres: 50 }, salt: saltCfg(0) }, runBlob);
+  runPanel._activeTab = "mixing";
+  assert(runPanel._mixingTab().includes("1365 g</strong> (≈ 1 level jug + about 240 ml) — the salt for the 35 L"),
+    "the run story must read in jugs");
+  const legacy = summaryBlob({ batch: { status: "idle" } });
+  legacy.saltMeasure = measure;
+  legacy.dose = withM(1950, "1 level jug + about 770 ml");
+  delete legacy.doseGuide;
+  const legacyPanel = await mixingPanel({ salt: saltCfg(0) }, legacy);
+  legacyPanel._activeTab = "mixing";
+  assert(legacyPanel._mixingTab().includes("1950 g</strong> (≈ 1 level jug + about 770 ml) (39.0 g/L)"),
+    "an old summary's one dose line must read in jugs too");
+  // Grams keepers: nothing changes.
+  const plainBlob = summaryBlob({ batch: { status: "ready", contents: "salt", litres: 15, remainingLitres: 15, loggedPpt: 35 } });
+  plainBlob.saltMeasure = null;
+  plainBlob.doseGuide = { ...blob.doseGuide, full: { available: true, grams: 1950, gPerL: 39.0 },
+    topUp: { available: true, grams: 1365, gPerL: 39.0 } };
+  const plain = await mixingPanel({ batch: { state: "ready" } }, plainBlob);
+  plain._activeTab = "mixing";
+  const plainHtml = plain._mixingTab();
+  assert(!plainHtml.includes("level jug") && !plainHtml.includes("not heaped") && !plainHtml.includes("≈"),
+    "a grams keeper must see no measures");
+  noPlaceholders(plainHtml, "grams keeper tab");
+});
+
+test("settings offers the measure, and the correction speaks it", async () => {
+  const panel = await mixingPanel();
+  let body = panel._mixingSettingsBody(mixConfig());
+  assert(body.includes('data-field="mode"') && /value="grams"[^>]*selected/.test(body), "grams must be the default dose unit");
+  assert(!body.includes('data-field="gramsPerMeasure"'), "the measure fields hide in grams mode");
+  const salt = (measure) => ({ brand: "nyos_pure", targetPpt: 35, mixHours: 0, customGPerL: 0, measure });
+  body = panel._mixingSettingsBody(mixConfig({ salt: salt({ mode: "measure", label: "beaker", ml: 250, gramsPerMeasure: 0 }) }));
+  assert(body.includes('data-field="label"') && body.includes('data-field="ml"') && body.includes('data-field="gramsPerMeasure"'),
+    "measure mode must offer its three fields");
+  assert(/value="measure"[^>]*selected/.test(body), "the stored mode must be selected");
+  assert(body.includes('value="beaker"') && body.includes('value="250"'), "the stored measure must fill the fields");
+  assert(body.includes("estimated at ~275 g") && body.includes("weigh it once"), "the hint must show the beaker's estimate and how to fix it");
+  body = panel._mixingSettingsBody(mixConfig({ salt: salt({ mode: "measure", label: "beaker", ml: 250, gramsPerMeasure: 290 }) }));
+  assert(body.includes("holds 290 g, as you weighed it"), "a weighed beaker must be credited in settings");
+  noPlaceholders(body, "measure settings");
+  // The correction message carries the backend's own words for the measure.
+  const p = await mixingPanel();
+  p._render = () => {};
+  p._callWS = async () => ({ correction: { status: "low", addGrams: 89, diluteLitres: null, addMeasure: { text: "about 80 ml in your jug" } } });
+  await p._mixingAction({ type: "openreef/mixing_log_salinity", ppt: 33 });
+  assert(p._mixingMessage === "Low — add about 89 g of salt (about 80 ml in your jug), let it dissolve, retest.", p._mixingMessage);
+  p._callWS = async () => ({ correction: { status: "low", addGrams: 89, diluteLitres: null, addMeasure: null } });
+  await p._mixingAction({ type: "openreef/mixing_log_salinity", ppt: 33 });
+  assert(p._mixingMessage === "Low — add about 89 g of salt, let it dissolve, retest.", p._mixingMessage);
+  p._callWS = async () => ({ correction: { status: "high", addGrams: null, diluteLitres: 2.3, addMeasure: null } });
+  await p._mixingAction({ type: "openreef/mixing_log_salinity", ppt: 37 });
+  assert(p._mixingMessage === "High — dilute with about 2.3 L of RODI and retest.", p._mixingMessage);
+});
+
 runTests();
