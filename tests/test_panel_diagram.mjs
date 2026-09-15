@@ -751,15 +751,24 @@ test("the new species know their zones and every species has real art", async ()
   assert(slots[layout["coral:fav"]].kinds.includes("lps"), "favia holds mid-rock");
   assert(slots[layout["coral:pav"]].kinds.includes("sps"), "pavona climbs high");
   assertEqual((panel._pulseDiagramSvg().match(/class="dg-coral/g) || []).length, 6, "all six drawn");
-  // Every listed species must produce substantial art — no species may
-  // silently fall back to the zoa default glyph.
+  // 0.7.193: the catalogue is a hundred species drawing with the 36 original
+  // glyphs. Every species resolves to a REAL glyph (never the silent zoa
+  // fallback of an unknown id), and every glyph but zoa's is its own art.
+  const GLYPHS = ["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona", "torch", "hammer", "frogspawn", "bubble",
+    "duncan", "candycane", "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone", "zoa", "mushroom", "ricordea",
+    "xenia", "gsp", "kenyatree", "toadstool", "acan", "trachy", "cynarina", "elegance", "fungia", "scoly", "suncoral", "clam", "gorgonian"];
   const zoaArt = panel._diagCoralArt("zoa", 0, 0, panel._coralPalette("purple"), 0);
-  for (const s of panel._coralSpeciesList()) {
-    const art = panel._diagCoralArt(s, 0, 0, panel._coralPalette("purple"), 0);
-    assert(art.length > 200, `${s} has art`);
-    if (s !== "zoa") assert(art !== zoaArt, `${s} has its OWN art, not the zoa fallback`);
+  for (const g of GLYPHS) {
+    const art = panel._diagCoralArt(g, 0, 0, panel._coralPalette("purple"), 0);
+    assert(art.length > 200, `${g} has art`);
+    if (g !== "zoa") assert(art !== zoaArt, `${g} has its OWN art, not the zoa fallback`);
   }
-  assertEqual(panel._coralSpeciesList().length, 36, "thirty-six species in the kit");
+  for (const s of panel._coralSpeciesList()) assert(GLYPHS.includes(panel._coralArtOf(s)), `${s} draws with a real glyph`);
+  assertEqual(panel._coralArtOf("not-a-species"), "zoa", "an unknown id falls back to zoa");
+  assertEqual(panel._coralSpeciesList().length, 100, "a hundred species in the kit");
+  assertEqual(panel._coralZone("pocillopora"), "sps", "a pocillopora takes the crest like the birdsnest it draws as");
+  assertEqual(panel._coralZone("gorgonian_fan"), "fan");
+  for (const nps of ["tubastraea", "dendronephthya", "gorgonian_easy", "cerianthus", "seaapple"]) assert(panel._coralSpeciesList().includes(nps), `${nps} is in the picker`);
 });
 
 test("scapes move the rock and the slots, but placements survive the switch", async () => {

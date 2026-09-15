@@ -16,17 +16,44 @@ CORE_SCHEMA_VERSION = 59
 # pick its fluorescence palette. The panel owns the art; the backend only
 # keeps entries well-formed.
 CORAL_SPECIES = (
-    "staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona",
-    "torch", "hammer", "frogspawn", "bubble", "duncan", "candycane",
-    "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone",
-    "zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree",
-    "toadstool", "acan", "trachy", "cynarina", "elegance", "fungia",
-    "scoly", "suncoral", "clam",
-    "gorgonian",
+    # 0.7.193: the picker is a grouped catalogue; each id draws with one of the
+    # 36 original glyphs (the panel's _coralArtOf). The NPS rows ARE the NPS
+    # library ids (nps.SPECIES_LIBRARY) — picking one registers the animal for
+    # the feed plan. Ids are config keys: never rename one.
+    # SPS
+    "staghorn", "millepora", "tenuis", "table", "birdsnest", "pocillopora",
+    "digitata", "setosa", "plate", "leptoseris", "stylophora", "hydnophora",
+    "pavona", "psammocora", "porites", "cyphastrea",
+    # Euphyllia & friends
+    "torch", "hammer", "frogspawn", "octospawn", "bubble", "physogyra",
+    "foxcoral", "elegance",
+    # LPS — regular feeders
+    "acan", "blasto", "favia", "leptastrea", "brain", "platygyra",
+    "chalice", "pectinia", "duncan", "candycane", "goniopora", "alveopora",
+    "galaxea", "turbinaria", "symphyllia",
+    # LPS — meaty, weekly
+    "scoly", "trachy", "cynarina", "acanthophyllia", "lobo", "fungia",
+    "tongue",
+    # Soft corals & polyps
+    "zoa", "palythoa", "mushroom", "rhodactis", "ricordea", "yuma",
+    "xenia", "anthelia", "cespitularia", "gsp", "clove", "pipeorgan",
+    "kenyatree", "sinularia", "nephthea", "toadstool", "lobophytum", "cabbage",
+    "gorgonian_photo",
+    # Anemones
+    "anemone", "rfa", "carpet", "lta", "magnifica",
+    # Clams
+    "clam", "crocea", "derasa", "squamosa",
+    # NPS — non-photosynthetic
+    "tubastraea", "tubastraea_black", "dendrophyllia", "rhizotrochus", "chili", "dendronephthya",
+    "chironephthya", "studeriotes", "seapen", "lacecoral", "gorgonian_easy", "gorgonian_hard",
+    "gorgonian_atlantic", "gorgonian_purple", "gorgonian_whip", "gorgonian_fan", "blueberry", "crinoid",
+    "basketstar", "cerianthus", "featherduster", "tubeworm", "seaapple", "filterfeeders",
+    # legacy art ids (valid, not offered by the picker)
+    "suncoral", "gorgonian",
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.192"
+INTEGRATION_VERSION = "0.7.193"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.

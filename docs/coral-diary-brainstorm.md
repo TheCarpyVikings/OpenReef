@@ -397,3 +397,16 @@ tests/test_panel_corals.mjs against tests/test_livestock.py's numbers.
 **Not built yet (stages D/E remainder):** camera frame grab at check-in, before/after
 slider, water-week context on the card, placement/sweeper insights, ICP context, vision zone
 visits, Coral CV share card, frag ledger UI (the `source` field takes "frag of X" as text).
+
+## 11. The catalogue — v0.7.193 (2026-09-15)
+
+Reece: "add all the NPS corals to the coral picker, and expand on other species." The picker
+is now a **grouped catalogue of 100 species** (SPS 16 · Euphyllia 8 · LPS regular feeders 15 ·
+LPS meaty 7 · soft 19 · anemones 5 · clams 4 · **NPS 24 = the whole NPS library**) drawing with
+the 36 original glyphs (`_coralArtOf`; the rock zone follows the glyph). An NPS tile's species id
+IS the library id, so picking one sets `npsId` and ticks the species for the feed plan; the
+migration now stores the library id as the species too. `const.CORAL_SPECIES`,
+`livestock.SPECIES_GROUP` and the panel's `_coralCatalogue()` are LOCKSTEP — an id added to one
+is added to all three (test_livestock pins every CORAL_SPECIES has a group; test_panel_diagram
+pins every catalogue id draws with a real glyph). "suncoral" / "gorgonian" stay valid legacy ids
+outside the picker. The diary's Species select is grouped the same way and carries `npsId` along.

@@ -227,7 +227,8 @@ test("NPS tick-list lives in the registry: derived, added on tick, removed only 
   assertEqual(panel._npsSelectedSpecies(), ["tubastraea"], "a lost NPS coral is not a ticked species");
   panel._npsToggleSpecies("dendrophyllia", true);
   const added = Object.values(panel._config.livestock.corals).find((c) => c.npsId === "dendrophyllia");
-  assert(added && added.species === "suncoral" && added.name === "Dendrophyllia", "ticking registers a colony drawn by family");
+  assert(added && added.species === "dendrophyllia" && added.name === "Dendrophyllia", "ticking registers the catalogue species");
+  assertEqual(panel._coralArtOf("dendrophyllia"), "suncoral", "drawn as a sun coral");
   panel._npsToggleSpecies("dendrophyllia", false);
   assert(!Object.values(panel._config.livestock.corals).some((c) => c.npsId === "dendrophyllia"), "unticking removes a colony with no diary");
   panel._config.livestock.checkins = { s: [look(1)] };

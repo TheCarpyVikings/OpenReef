@@ -1541,7 +1541,7 @@ def _normalise_livestock(config: dict[str, Any]) -> None:
                 n += 1
             corals[cid] = {
                 "name": str(sp.get("name") or sid)[:48],
-                "species": livestock_engine.NPS_ART_SPECIES.get(str(sp.get("group")), "gorgonian"),
+                "species": sid if sid in CORAL_SPECIES else livestock_engine.NPS_ART_SPECIES.get(str(sp.get("group")), "gorgonian"),
                 "colour": "orange", "addedAt": "", "notes": "", "photoUrl": "",
                 "taxon": "", "npsId": sid, "source": "", "paid": None, "dipped": False, "quarantined": False,
                 "status": "active", "statusAt": "", "statusNote": "",

@@ -101,15 +101,20 @@ GROUPS: dict[str, dict[str, Any]] = {
             "feedNote": "The NPS feed plan owns this animal's feeds — the shelf, the pumps and the feeding log already count them."},
 }
 SPECIES_GROUP: dict[str, str] = {
-    **{s: "sps" for s in ("staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona")},
-    **{s: "euphyllia" for s in ("torch", "hammer", "frogspawn", "bubble", "elegance")},
-    **{s: "lps_feeder" for s in ("acan", "blasto", "favia", "brain", "chalice", "duncan", "candycane", "goniopora")},
-    **{s: "lps_meaty" for s in ("scoly", "trachy", "cynarina", "lobo", "fungia")},
-    **{s: "soft" for s in ("zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree", "toadstool")},
-    "anemone": "anemone", "clam": "clam",
+    # 0.7.193: one row per catalogue id — mirrored by the panel's _coralCatalogue().
+    **{s: "sps" for s in ("staghorn", "millepora", "tenuis", "table", "birdsnest", "pocillopora", "digitata", "setosa", "plate", "leptoseris", "stylophora", "hydnophora", "pavona", "psammocora", "porites", "cyphastrea")},
+    **{s: "euphyllia" for s in ("torch", "hammer", "frogspawn", "octospawn", "bubble", "physogyra", "foxcoral", "elegance")},
+    **{s: "lps_feeder" for s in ("acan", "blasto", "favia", "leptastrea", "brain", "platygyra", "chalice", "pectinia", "duncan", "candycane", "goniopora", "alveopora", "galaxea", "turbinaria", "symphyllia")},
+    **{s: "lps_meaty" for s in ("scoly", "trachy", "cynarina", "acanthophyllia", "lobo", "fungia", "tongue")},
+    **{s: "soft" for s in ("zoa", "palythoa", "mushroom", "rhodactis", "ricordea", "yuma", "xenia", "anthelia", "cespitularia", "gsp", "clove", "pipeorgan", "kenyatree", "sinularia", "nephthea", "toadstool", "lobophytum", "cabbage", "gorgonian_photo")},
+    **{s: "anemone" for s in ("anemone", "rfa", "carpet", "lta", "magnifica")},
+    **{s: "clam" for s in ("clam", "crocea", "derasa", "squamosa")},
+    **{s: "nps" for s in ("tubastraea", "tubastraea_black", "dendrophyllia", "rhizotrochus", "chili", "dendronephthya", "chironephthya", "studeriotes", "seapen", "lacecoral", "gorgonian_easy", "gorgonian_hard", "gorgonian_atlantic", "gorgonian_purple", "gorgonian_whip", "gorgonian_fan", "blueberry", "crinoid", "basketstar", "cerianthus", "featherduster", "tubeworm", "seaapple", "filterfeeders")},
     "suncoral": "nps", "gorgonian": "nps",
 }
-# An NPS library id drawn on the rock (the migration's art pick, by family).
+# An NPS library id drawn on the rock (the migration's art pick, by family) —
+# kept for a config whose species id predates the catalogue (0.7.193 stores
+# the library id itself as the species).
 NPS_ART_SPECIES = {"stony": "suncoral", "gorgonian": "gorgonian", "soft": "kenyatree", "filter": "clam"}
 
 DEFAULT_SETTINGS: dict[str, Any] = {

@@ -808,7 +808,8 @@ def test_livestock_migrates_the_nps_tick_list_once_and_derives_it_after():
     corals = config["livestock"]["corals"]
     assert {c["npsId"] for c in corals.values()} == {"tubastraea", "gorgonian_easy"}
     sun = corals["nps_tubastraea"]
-    assert sun["species"] == "suncoral" and sun["name"].startswith("Sun coral") and sun["status"] == "active"
+    # 0.7.193: the library id is itself a catalogue species (drawn as a sun coral).
+    assert sun["species"] == "tubastraea" and sun["name"].startswith("Sun coral") and sun["status"] == "active"
     assert config["nps"]["species"] == ["tubastraea", "gorgonian_easy"]
     assert config["livestock"]["npsMigrated"] is True
     # Idempotent: a second pass adds nothing.

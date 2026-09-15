@@ -1402,7 +1402,9 @@ class OpenReefPanel extends HTMLElement {
       if (action === "coral-add") {
         const name = (this.shadowRoot.getElementById("or-coral-name")?.value || "").trim();
         this._coralPickName = "";
-        this._addCoral(name, this._coralPickSpecies || "zoa", this._coralPickColour || "purple");
+        const pickId = this._coralPickSpecies || "zoa";
+        const entry = this._coralCatalogueIndex()[pickId] || {};
+        this._addCoral(name, pickId, this._coralPickColour || "purple", entry.group === "nps" && pickId !== "suncoral" && pickId !== "gorgonian" ? { npsId: pickId } : {});
       }
       if (action === "coral-pick-species" || action === "coral-pick-colour") {
         // Re-rendering would wipe a half-typed name — stash it first.
@@ -19333,15 +19335,7 @@ const rigSteps = [
 
   _coralGroupId(c) {
     if (c?.npsId) return "nps";
-    const sp = String(c?.species || "");
-    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona"].includes(sp)) return "sps";
-    if (["torch", "hammer", "frogspawn", "bubble", "elegance"].includes(sp)) return "euphyllia";
-    if (["acan", "blasto", "favia", "brain", "chalice", "duncan", "candycane", "goniopora"].includes(sp)) return "lps_feeder";
-    if (["scoly", "trachy", "cynarina", "lobo", "fungia"].includes(sp)) return "lps_meaty";
-    if (sp === "anemone") return "anemone";
-    if (sp === "clam") return "clam";
-    if (sp === "suncoral" || sp === "gorgonian") return "nps";
-    return "soft";
+    return this._coralCatalogueIndex()[String(c?.species || "")]?.group || "soft";
   }
 
   _coralSettings() {
@@ -19557,7 +19551,7 @@ const rigSteps = [
     const mine = Object.entries(corals).filter(([, c]) => c && c.npsId === sid && (c.status || "active") === "active");
     if (on && !mine.length) {
       const sp = ((this._nps?.summary?.speciesLibrary) || []).find((x) => x.id === sid) || {};
-      const art = { stony: "suncoral", gorgonian: "gorgonian", soft: "kenyatree", filter: "clam" }[sp.group] || "gorgonian";
+      const art = this._coralCatalogueIndex()[sid] ? sid : ({ stony: "suncoral", gorgonian: "gorgonian", soft: "kenyatree", filter: "clam" }[sp.group] || "gorgonian");
       this._addCoral(String(sp.name || sid).slice(0, 48), art, "orange", { npsId: sid });
       return;
     }
@@ -19578,7 +19572,14 @@ const rigSteps = [
     else if (field === "source") coral.source = text(value, 80);
     else if (field === "notes") coral.notes = text(value, 500);
     else if (field === "addedAt") coral.addedAt = text(value, 32);
-    else if (field === "species") coral.species = this._coralSpeciesList().includes(value) ? value : coral.species;
+    else if (field === "species") {
+      if (this._coralSpeciesList().includes(value)) {
+        coral.species = value;
+        const entry = this._coralCatalogueIndex()[value] || {};
+        if (entry.group === "nps" && value !== "suncoral" && value !== "gorgonian") coral.npsId = value;
+        else if (coral.npsId && !this._coralCatalogueIndex()[coral.npsId]) coral.npsId = "";
+      }
+    }
     else if (field === "colour") coral.colour = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].includes(value) ? value : coral.colour;
     else if (field === "npsId") coral.npsId = text(value, 40);
     else if (field === "paid") { const n = Number(value); coral.paid = value === "" || !Number.isFinite(n) ? null : Math.max(0, n); }
@@ -20043,7 +20044,7 @@ const rigSteps = [
           <div class="mini-grid">
             ${field("Name", "name", c.name, 'maxlength="48"')}
             ${field("Taxon", "taxon", c.taxon, 'maxlength="80" placeholder="Euphyllia glabrescens ‘Gold’"')}
-            <label>Drawn as<select data-coral-field="${this._escape(cid)}" data-field="species">${this._coralSpeciesList().map((s) => `<option value="${s}" ${c.species === s ? "selected" : ""}>${this._escape(this._coralSpeciesLabel(s))}</option>`).join("")}</select></label>
+            <label>Species<select data-coral-field="${this._escape(cid)}" data-field="species">${this._coralCatalogue().map((g) => `<optgroup label="${this._escape(g.label)}">${g.species.map((s) => `<option value="${s.id}" ${c.species === s.id ? "selected" : ""}>${this._escape(s.label)}</option>`).join("")}</optgroup>`).join("")}${["suncoral", "gorgonian"].includes(c.species) ? `<option value="${c.species}" selected>${this._escape(this._coralSpeciesLabel(c.species))}</option>` : ""}</select></label>
             <label>Colour<select data-coral-field="${this._escape(cid)}" data-field="colour">${["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].map((col) => `<option value="${col}" ${c.colour === col ? "selected" : ""}>${col}</option>`).join("")}</select></label>
             ${field("In the tank since", "addedAt", c.addedAt, "", "date")}
             ${field("Source", "source", c.source, 'maxlength="80" placeholder="shop, a frag from Dave, wild"')}
@@ -20132,36 +20133,161 @@ const rigSteps = [
   }
 
   _coralZone(species) {
-    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona"].includes(species)) return "sps";
-    if (["torch", "hammer", "frogspawn", "bubble", "duncan", "candycane", "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone"].includes(species)) return "lps";
-    if (species === "gorgonian") return "fan";
+    // The rock zone follows the GLYPH (0.7.193): a Pocillopora drawn as a
+    // birdsnest takes the crest like one.
+    const art = this._coralArtOf(species);
+    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona"].includes(art)) return "sps";
+    if (["torch", "hammer", "frogspawn", "bubble", "duncan", "candycane", "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone"].includes(art)) return "lps";
+    if (art === "gorgonian") return "fan";
     return "soft";
   }
 
+  // The catalogue (0.7.193): every species the picker offers, filed by the
+  // diary's groups. `art` is the glyph it draws with (one of the 36 original
+  // drawings); an NPS row's id IS the NPS library id, so picking one registers
+  // the animal for the feed plan (npsId). LOCKSTEP with const.CORAL_SPECIES
+  // and livestock.SPECIES_GROUP — an id added here is added there.
+  _coralCatalogue() {
+    return [
+      { id: "sps", label: "SPS", species: [
+        { id: "staghorn", label: "Staghorn acropora", art: "staghorn" },
+        { id: "millepora", label: "Acropora millepora", art: "staghorn" },
+        { id: "tenuis", label: "Acropora tenuis", art: "table" },
+        { id: "table", label: "Table acropora", art: "table" },
+        { id: "birdsnest", label: "Birdsnest (Seriatopora)", art: "birdsnest" },
+        { id: "pocillopora", label: "Pocillopora", art: "birdsnest" },
+        { id: "digitata", label: "Montipora digitata", art: "digitata" },
+        { id: "setosa", label: "Montipora setosa", art: "digitata" },
+        { id: "plate", label: "Plating montipora", art: "plate" },
+        { id: "leptoseris", label: "Leptoseris", art: "plate" },
+        { id: "stylophora", label: "Stylophora", art: "stylophora" },
+        { id: "hydnophora", label: "Hydnophora", art: "stylophora" },
+        { id: "pavona", label: "Pavona (cactus coral)", art: "pavona" },
+        { id: "psammocora", label: "Psammocora", art: "pavona" },
+        { id: "porites", label: "Porites", art: "digitata" },
+        { id: "cyphastrea", label: "Cyphastrea", art: "chalice" }
+      ] },
+      { id: "euphyllia", label: "Euphyllia & friends", species: [
+        { id: "torch", label: "Torch coral", art: "torch" },
+        { id: "hammer", label: "Hammer coral", art: "hammer" },
+        { id: "frogspawn", label: "Frogspawn", art: "frogspawn" },
+        { id: "octospawn", label: "Octospawn", art: "frogspawn" },
+        { id: "bubble", label: "Bubble coral (Plerogyra)", art: "bubble" },
+        { id: "physogyra", label: "Pearl bubble (Physogyra)", art: "bubble" },
+        { id: "foxcoral", label: "Fox coral (Nemenzophyllia)", art: "bubble" },
+        { id: "elegance", label: "Elegance coral", art: "elegance" }
+      ] },
+      { id: "lps_feeder", label: "LPS — regular feeders", species: [
+        { id: "acan", label: "Acan / Micromussa", art: "acan" },
+        { id: "blasto", label: "Blastomussa", art: "blasto" },
+        { id: "favia", label: "Favia / Favites", art: "favia" },
+        { id: "leptastrea", label: "Leptastrea", art: "favia" },
+        { id: "brain", label: "Brain coral", art: "brain" },
+        { id: "platygyra", label: "Maze brain (Platygyra)", art: "brain" },
+        { id: "chalice", label: "Chalice (Echinophyllia)", art: "chalice" },
+        { id: "pectinia", label: "Pectinia", art: "chalice" },
+        { id: "duncan", label: "Duncan coral", art: "duncan" },
+        { id: "candycane", label: "Candy cane coral", art: "candycane" },
+        { id: "goniopora", label: "Goniopora", art: "goniopora" },
+        { id: "alveopora", label: "Alveopora", art: "goniopora" },
+        { id: "galaxea", label: "Galaxea", art: "goniopora" },
+        { id: "turbinaria", label: "Scroll / pagoda (Turbinaria)", art: "plate" },
+        { id: "symphyllia", label: "Symphyllia", art: "lobo" }
+      ] },
+      { id: "lps_meaty", label: "LPS — meaty, weekly", species: [
+        { id: "scoly", label: "Scolymia", art: "scoly" },
+        { id: "trachy", label: "Trachyphyllia", art: "trachy" },
+        { id: "cynarina", label: "Cynarina (button coral)", art: "cynarina" },
+        { id: "acanthophyllia", label: "Acanthophyllia", art: "cynarina" },
+        { id: "lobo", label: "Lobophyllia", art: "lobo" },
+        { id: "fungia", label: "Fungia plate", art: "fungia" },
+        { id: "tongue", label: "Tongue coral (Herpolitha)", art: "fungia" }
+      ] },
+      { id: "soft", label: "Soft corals & polyps", species: [
+        { id: "zoa", label: "Zoanthid colony", art: "zoa" },
+        { id: "palythoa", label: "Palythoa", art: "zoa" },
+        { id: "mushroom", label: "Mushroom corals (Discosoma)", art: "mushroom" },
+        { id: "rhodactis", label: "Bounce mushroom (Rhodactis)", art: "mushroom" },
+        { id: "ricordea", label: "Ricordea florida", art: "ricordea" },
+        { id: "yuma", label: "Ricordea yuma", art: "ricordea" },
+        { id: "xenia", label: "Pulsing xenia", art: "xenia" },
+        { id: "anthelia", label: "Anthelia", art: "xenia" },
+        { id: "cespitularia", label: "Cespitularia", art: "xenia" },
+        { id: "gsp", label: "Green star polyps", art: "gsp" },
+        { id: "clove", label: "Clove polyps (Clavularia)", art: "gsp" },
+        { id: "pipeorgan", label: "Pipe organ (Tubipora)", art: "gsp" },
+        { id: "kenyatree", label: "Kenya tree", art: "kenyatree" },
+        { id: "sinularia", label: "Finger leather (Sinularia)", art: "kenyatree" },
+        { id: "nephthea", label: "Nephthea", art: "kenyatree" },
+        { id: "toadstool", label: "Toadstool leather", art: "toadstool" },
+        { id: "lobophytum", label: "Devil's hand (Lobophytum)", art: "toadstool" },
+        { id: "cabbage", label: "Cabbage leather", art: "toadstool" },
+        { id: "gorgonian_photo", label: "Photosynthetic gorgonian", art: "gorgonian" }
+      ] },
+      { id: "anemone", label: "Anemones", species: [
+        { id: "anemone", label: "Bubble-tip anemone", art: "anemone" },
+        { id: "rfa", label: "Rock flower anemone", art: "anemone" },
+        { id: "carpet", label: "Carpet anemone", art: "anemone" },
+        { id: "lta", label: "Long tentacle anemone", art: "anemone" },
+        { id: "magnifica", label: "Magnificent anemone", art: "anemone" }
+      ] },
+      { id: "clam", label: "Clams", species: [
+        { id: "clam", label: "Maxima clam", art: "clam" },
+        { id: "crocea", label: "Crocea clam", art: "clam" },
+        { id: "derasa", label: "Derasa clam", art: "clam" },
+        { id: "squamosa", label: "Squamosa clam", art: "clam" }
+      ] },
+      { id: "nps", label: "NPS — non-photosynthetic", species: [
+        { id: "tubastraea", label: "Sun coral (Tubastraea)", art: "suncoral" },
+        { id: "tubastraea_black", label: "Black sun coral", art: "suncoral" },
+        { id: "dendrophyllia", label: "Dendrophyllia / Balanophyllia", art: "suncoral" },
+        { id: "rhizotrochus", label: "Rhizotrochus typus", art: "cynarina" },
+        { id: "chili", label: "Chili coral", art: "kenyatree" },
+        { id: "dendronephthya", label: "Carnation (Dendronephthya)", art: "kenyatree" },
+        { id: "chironephthya", label: "Chironephthya / Siphonogorgia", art: "kenyatree" },
+        { id: "studeriotes", label: "Christmas tree coral", art: "kenyatree" },
+        { id: "seapen", label: "Sea pen", art: "xenia" },
+        { id: "lacecoral", label: "Lace coral (Distichopora)", art: "birdsnest" },
+        { id: "gorgonian_easy", label: "Gorgonian — Menella, Swiftia, Diodogorgia", art: "gorgonian" },
+        { id: "gorgonian_hard", label: "Gorgonian — Euplexaura, Guaiagorgia", art: "gorgonian" },
+        { id: "gorgonian_atlantic", label: "Atlantic sea whip", art: "gorgonian" },
+        { id: "gorgonian_purple", label: "Purple & red gorgonian", art: "gorgonian" },
+        { id: "gorgonian_whip", label: "Sea whip", art: "gorgonian" },
+        { id: "gorgonian_fan", label: "Sea fan", art: "gorgonian" },
+        { id: "blueberry", label: "Blueberry gorgonian", art: "gorgonian" },
+        { id: "crinoid", label: "Feather star (crinoid)", art: "gorgonian" },
+        { id: "basketstar", label: "Basket star", art: "gorgonian" },
+        { id: "cerianthus", label: "Tube anemone (Cerianthus)", art: "anemone" },
+        { id: "featherduster", label: "Feather duster", art: "anemone" },
+        { id: "tubeworm", label: "Christmas tree worm", art: "anemone" },
+        { id: "seaapple", label: "Sea apple", art: "mushroom" },
+        { id: "filterfeeders", label: "Sponge / tunicate / flame scallop", art: "clam" }
+      ] }
+    ];
+  }
+
+  _coralCatalogueIndex() {
+    if (!this._coralCatalogueCache) {
+      const index = {};
+      for (const g of this._coralCatalogue()) for (const sp of g.species) index[sp.id] = { ...sp, group: g.id };
+      // Legacy art ids: valid in a stored config, not offered by the picker.
+      index.suncoral = index.suncoral || { id: "suncoral", label: "Sun coral", art: "suncoral", group: "nps" };
+      index.gorgonian = index.gorgonian || { id: "gorgonian", label: "Gorgonian fan", art: "gorgonian", group: "nps" };
+      this._coralCatalogueCache = index;
+    }
+    return this._coralCatalogueCache;
+  }
+
   _coralSpeciesList() {
-    return ["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona",
-      "torch", "hammer", "frogspawn", "bubble", "duncan", "candycane",
-      "goniopora", "chalice", "brain", "favia", "lobo", "blasto", "anemone",
-      "zoa", "mushroom", "ricordea", "xenia", "gsp", "kenyatree",
-      "toadstool", "acan", "trachy", "cynarina", "elegance", "fungia",
-      "scoly", "suncoral", "clam", "gorgonian"];
+    return Object.keys(this._coralCatalogueIndex());
   }
 
   _coralSpeciesLabel(species) {
-    return {
-      staghorn: "Staghorn acropora", plate: "Plating montipora", table: "Table acropora",
-      birdsnest: "Birdsnest coral", digitata: "Montipora digitata", stylophora: "Stylophora",
-      pavona: "Pavona (cactus coral)", torch: "Torch coral", hammer: "Hammer coral",
-      frogspawn: "Frogspawn", bubble: "Bubble coral", duncan: "Duncan coral",
-      candycane: "Candy cane coral", goniopora: "Goniopora", chalice: "Chalice coral",
-      brain: "Brain coral", favia: "Favia colony", lobo: "Lobophyllia",
-      blasto: "Blastomussa", anemone: "Bubble-tip anemone", zoa: "Zoanthid colony",
-      mushroom: "Mushroom corals", ricordea: "Ricordea", xenia: "Pulsing xenia",
-      gsp: "Green star polyps", kenyatree: "Kenya tree", toadstool: "Toadstool leather",
-      acan: "Acan colony", trachy: "Trachyphyllia", cynarina: "Cynarina (button coral)",
-      elegance: "Elegance coral", fungia: "Fungia plate", scoly: "Scolymia",
-      suncoral: "Sun coral", clam: "Maxima clam", gorgonian: "Gorgonian fan",
-    }[species] || "Coral";
+    return this._coralCatalogueIndex()[species]?.label || "Coral";
+  }
+
+  _coralArtOf(species) {
+    return this._coralCatalogueIndex()[species]?.art || "zoa";
   }
 
   // Rockwork preset. Same coral-slot ids across scapes, so a stored layout
@@ -20367,6 +20493,7 @@ const rigSteps = [
   }
 
   _diagCoralArt(species, x, y, pal, seed) {
+    species = this._coralArtOf(species);
     const d0 = -((seed * 0.7) % 3.4);
     const dot = (dx, dy, r, k) =>
       `<circle class="dg-cpolyp" cx="${x + dx}" cy="${y + dy}" r="${r}" fill="${pal.dot}" style="animation-delay:${(d0 - k * 0.6).toFixed(2)}s"></circle>`;
@@ -21085,11 +21212,16 @@ const rigSteps = [
     const palPick = this._coralPalette(pickCol);
     // The picker IS the art kit: every tile renders the species' real glyph
     // in the currently selected colour, so what you pick is what the rock gets.
-    const tiles = this._coralSpeciesList().map((s) => `
-      <button type="button" class="coral-tile ${s === pick ? "selected" : ""}" data-action="coral-pick-species" data-id="${s}" title="${this._escape(this._coralSpeciesLabel(s))}">
-        <svg viewBox="-52 -100 104 108" aria-hidden="true">${this._diagCoralArt(s, 0, 0, palPick, 0)}</svg>
-        <small>${this._escape(this._coralSpeciesLabel(s))}</small>
-      </button>`).join("");
+    const tile = (s) => `
+      <button type="button" class="coral-tile ${s.id === pick ? "selected" : ""}" data-action="coral-pick-species" data-id="${s.id}" title="${this._escape(s.label)}">
+        <svg viewBox="-52 -100 104 108" aria-hidden="true">${this._diagCoralArt(s.art, 0, 0, palPick, 0)}</svg>
+        <small>${this._escape(s.label)}</small>
+      </button>`;
+    // Grouped by the diary's families (0.7.193); the NPS group registers the
+    // animal for the feed plan as well as drawing it.
+    const tiles = this._coralCatalogue().map((g) => `
+      <p class="eyebrow coral-group-head">${this._escape(g.label)}${g.id === "nps" ? ` <small class="muted">— also ticks the species for the NPS feed plan</small>` : ""}</p>
+      <div class="coral-species-grid">${g.species.map(tile).join("")}</div>`).join("");
     const swatches = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].map((col) => {
       const p = this._coralPalette(col);
       return `<button type="button" class="coral-swatch ${col === pickCol ? "selected" : ""}" style="background:${p.bright};color:${p.bright}" data-action="coral-pick-colour" data-id="${col}" title="${col}"></button>`;
@@ -21115,7 +21247,7 @@ const rigSteps = [
             <h4>Your corals, drawn on the rockwork</h4>
           </div>
         </div>
-        <div class="coral-species-grid">${tiles}</div>
+        ${tiles}
         <div class="coral-swatches">${swatches}</div>
         <div class="quick-add coral-add">
           <input id="or-coral-name" placeholder="Name it (e.g. Golden torch)" value="${this._escape(this._coralPickName || "")}">
@@ -32611,7 +32743,8 @@ ${parts.buttons}
         .coral-notes-label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; font-size: .9rem; }
         .coral-notes { resize: vertical; min-height: 64px; }
         .coral-upload { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 10px; }
-        .coral-species-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+        .coral-species-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; margin: 4px 0 12px; }
+        .coral-group-head { margin: 10px 0 2px; }
         .coral-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 10px; background: transparent; cursor: pointer; color: inherit; }
         .coral-tile svg { width: 62px; height: 58px; display: block; }
         .coral-tile small { font-size: 10.5px; line-height: 1.15; text-align: center; color: var(--openreef-muted, #9fc7e0); }
