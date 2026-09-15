@@ -693,7 +693,13 @@ def test_pulse_backdrop_accepts_diagram():
 
 def test_livestock_defaults_injected():
     config = normalise({})
-    assert config["livestock"] == {"corals": {}}
+    live = config["livestock"]
+    assert live["corals"] == {} and live["checkins"] == {} and live["feeds"] == {}
+    # The coral diary's knobs (0.7.192) come clamped, and the one-shot NPS
+    # tick-list migration is marked done on an empty config.
+    assert live["settings"] == {"remind": True, "feedRemind": True, "arrivalDays": 30,
+                                "arrivalCadenceDays": 3, "photoCap": 24}
+    assert live["npsMigrated"] is True
 
 
 def test_livestock_entries_kept_and_coerced():
@@ -703,10 +709,17 @@ def test_livestock_entries_kept_and_coerced():
         "mystery": {"name": "X" * 90, "species": "kraken", "colour": "octarine", "addedAt": 12345},
     }}})
     corals = config["livestock"]["corals"]
-    assert corals["torchy"] == {
+    torchy = corals["torchy"]
+    assert {k: torchy[k] for k in ("name", "species", "colour", "addedAt", "notes", "photoUrl")} == {
         "name": "Golden torch", "species": "torch", "colour": "gold", "addedAt": "2026-07-06",
         "notes": "", "photoUrl": "",
     }
+    # The diary fields (0.7.192) arrive with their honest defaults: active,
+    # no override on either cadence, no baseline until the first look.
+    assert torchy["status"] == "active" and torchy["npsId"] == "" and torchy["taxon"] == ""
+    assert torchy["checkCadenceDays"] is None and torchy["feedCadenceDays"] is None
+    assert torchy["baseline"] == {"colour": None, "extension": None, "notes": ""}
+    assert torchy["photos"] == [] and torchy["paid"] is None
     assert corals["mystery"]["species"] == "zoa"          # unknown species -> default
     assert corals["mystery"]["colour"] == "purple"        # unknown colour -> default
     assert len(corals["mystery"]["name"]) == 48           # name truncated
@@ -733,7 +746,7 @@ def test_livestock_new_species_and_notes_photo():
 def test_livestock_garbage_dropped():
     """Corrupt shapes and hostile ids never crash and never survive."""
     config = normalise({"livestock": "corrupt"})
-    assert config["livestock"] == {"corals": {}}
+    assert config["livestock"]["corals"] == {}
     config = normalise({"livestock": {"corals": {
         "<script>": {"species": "zoa"},                   # bad id out
         "ok": "not-a-dict",                               # non-dict entry out
@@ -744,10 +757,71 @@ def test_livestock_garbage_dropped():
     assert corals["fine"]["species"] == "brain"
 
 
-def test_livestock_capped_at_sixteen():
-    raw = {f"c{i}": {"species": "zoa"} for i in range(30)}
+def test_livestock_capped_at_sixty():
+    """The registry (the diary) holds 60; the rockwork still draws 16 —
+    that cap is the panel's (_diagramCorals), pinned in test_panel_corals."""
+    raw = {f"c{i}": {"species": "zoa"} for i in range(80)}
     config = normalise({"livestock": {"corals": raw}})
-    assert len(config["livestock"]["corals"]) == 16
+    assert len(config["livestock"]["corals"]) == 60
+
+
+def test_livestock_diary_fields_clamped_and_ledgers_follow_their_coral():
+    """Status words, cadence overrides, the baseline and both ledgers are
+    clamped; a ledger whose coral is gone goes with it (0.7.192)."""
+    config = normalise({"livestock": {
+        "corals": {
+            "sc": {"species": "scoly", "status": "lost", "statusAt": "2026-09-01T10:00:00+00:00",
+                   "statusNote": "N" * 400, "checkCadenceDays": "9", "feedCadenceDays": 0,
+                   "baseline": {"colour": 9, "extension": 2, "notes": "x"}, "paid": "45.5",
+                   "npsId": "not-a-species", "taxon": "T" * 100},
+            "bad": {"species": "zoa", "status": "eaten", "checkCadenceDays": "lots"},
+        },
+        "checkins": {
+            "sc": [{"at": "2026-09-10T12:00:00+00:00", "extension": 7, "tissue": "melting", "colour": 3,
+                    "pests": "confirmed", "neighbours": ["stung", "bogus"], "sizeMm": "40", "score": 250},
+                   {"at": "not a stamp"}, "junk"],
+            "ghost": [{"at": "2026-09-10T12:00:00+00:00"}],
+        },
+        "feeds": {"sc": [{"at": "2026-09-11T18:00:00+00:00", "ml": "2", "response": "took", "food": "mysis"}]},
+    }})
+    live = config["livestock"]
+    sc = live["corals"]["sc"]
+    assert sc["status"] == "lost" and sc["statusAt"] == "2026-09-01T10:00:00+00:00" and len(sc["statusNote"]) == 300
+    assert sc["checkCadenceDays"] == 9 and sc["feedCadenceDays"] == 0
+    assert sc["baseline"] == {"colour": None, "extension": 2, "notes": "x"}
+    assert sc["paid"] == 45.5 and sc["npsId"] == "" and len(sc["taxon"]) == 80
+    assert live["corals"]["bad"]["status"] == "active" and live["corals"]["bad"]["checkCadenceDays"] is None
+    assert list(live["checkins"]) == ["sc"] and len(live["checkins"]["sc"]) == 1
+    row = live["checkins"]["sc"][0]
+    assert row["extension"] is None and row["tissue"] == "intact" and row["colour"] == 3
+    assert row["pests"] == "confirmed" and row["neighbours"] == ["stung"] and row["sizeMm"] == 40.0 and row["score"] is None
+    assert live["feeds"]["sc"][0] == {"at": "2026-09-11T18:00:00+00:00", "productId": "", "food": "mysis",
+                                      "ml": 2.0, "response": "took", "undoneAt": None}
+    assert "ghost" not in live["checkins"]
+
+
+def test_livestock_migrates_the_nps_tick_list_once_and_derives_it_after():
+    """The NPS species tick-list becomes one diary entry per id (npsId), once;
+    from then on nps.species is READ from the registry — removing the coral
+    unticks the species, and a stale list can never resurrect it."""
+    config = normalise({"nps": {"enabled": True, "species": ["tubastraea", "gorgonian_easy", "nope"]}})
+    corals = config["livestock"]["corals"]
+    assert {c["npsId"] for c in corals.values()} == {"tubastraea", "gorgonian_easy"}
+    sun = corals["nps_tubastraea"]
+    assert sun["species"] == "suncoral" and sun["name"].startswith("Sun coral") and sun["status"] == "active"
+    assert config["nps"]["species"] == ["tubastraea", "gorgonian_easy"]
+    assert config["livestock"]["npsMigrated"] is True
+    # Idempotent: a second pass adds nothing.
+    again = normalise(config)
+    assert set(again["livestock"]["corals"]) == set(corals)
+    # Remove the sun coral: the species is gone, and the stale list stays gone.
+    del again["livestock"]["corals"]["nps_tubastraea"]
+    third = normalise(again)
+    assert third["nps"]["species"] == ["gorgonian_easy"]
+    assert "nps_tubastraea" not in third["livestock"]["corals"]
+    # A lost coral is no longer a ticked species either.
+    third["livestock"]["corals"]["nps_gorgonian_easy"]["status"] = "lost"
+    assert normalise(third)["nps"]["species"] == []
 
 
 # --- tiny standalone runner (so this works without pytest installed) ---

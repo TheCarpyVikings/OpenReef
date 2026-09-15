@@ -147,12 +147,25 @@ def test_coral_photo_upload_saves_and_pins_url():
         ))
         assert not conn.errors, conn.errors
         url = conn.results[0].payload["url"]
-        assert url.startswith(f"{integration.CAPTURES_STATIC_URL}/corals/torchy.jpg?v=")
-        saved = os.path.join(tmp, integration.CAPTURES_DIR_NAME, "corals", "torchy.jpg")
+        # 0.7.192: a stamped file per photo (the timeline), never a replace.
+        assert url.startswith(f"{integration.CAPTURES_STATIC_URL}/corals/torchy_") and url.endswith(".jpg")
+        saved = os.path.join(tmp, integration.CAPTURES_DIR_NAME, "corals", url.rsplit("/", 1)[-1])
         with open(saved, "rb") as fh:
             assert fh.read() == jpeg
-        persisted = conn.results[0].payload["config"]["livestock"]["corals"]["torchy"]["photoUrl"]
-        assert persisted == url, "URL must survive the normaliser round-trip"
+        coral = conn.results[0].payload["config"]["livestock"]["corals"]["torchy"]
+        assert coral["photoUrl"] == url, "URL must survive the normaliser round-trip"
+        assert [p["url"] for p in coral["photos"]] == [url]
+        # The cap evicts the oldest file. Three photos on a cap of two.
+        entry.options[CONF_SETTINGS]["livestock"]["settings"]["photoCap"] = 2
+        for i in range(2):
+            run(integration.websocket_coral_photo_upload(
+                hass, conn, {"id": 2 + i, "type": "openreef/coral_photo_upload", "coralId": "torchy",
+                             "image": image, "note": f"look {i}"}
+            ))
+        coral = conn.results[-1].payload["config"]["livestock"]["corals"]["torchy"]
+        assert len(coral["photos"]) == 2 and coral["photos"][0]["note"] == "look 1"
+        assert coral["photoUrl"] == coral["photos"][0]["url"]
+        assert not os.path.exists(saved), "the first photo's file was evicted"
     finally:
         integration._async_register_captures_path = original
 

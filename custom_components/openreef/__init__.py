@@ -221,6 +221,7 @@ from . import dosing as dosing_engine
 from . import icp
 from . import mixing as mixing_engine
 from . import cultures as cultures_engine
+from . import livestock as livestock_engine
 from . import cooling as cooling_engine
 from . import nps as nps_engine
 from . import spawning
@@ -1385,6 +1386,183 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
     }
 
 
+def _livestock_checkin_row(raw: Any) -> dict[str, Any] | None:
+    """One check-in row, every field present and clamped; junk → None."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("at"), str) or _parse_datetime(raw.get("at")) is None:
+        return None
+    ext = raw.get("extension")
+    ext = int(ext) if isinstance(ext, (int, float)) and not isinstance(ext, bool) and 0 <= int(ext) <= 3 else None
+    colour = raw.get("colour")
+    colour = int(colour) if isinstance(colour, (int, float)) and not isinstance(colour, bool) and 1 <= int(colour) <= 6 else None
+    size = raw.get("sizeMm")
+    try:
+        size = round(float(size), 1) if size not in (None, "") and 0 <= float(size) <= 5000 else None
+    except (TypeError, ValueError):
+        size = None
+    score = raw.get("score")
+    score = int(score) if isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= int(score) <= 100 else None
+    undone = raw.get("undoneAt")
+    photo = str(raw.get("photoUrl") or "")[:300]
+    if photo and not (photo.startswith("/") or photo.startswith("http://") or photo.startswith("https://")):
+        photo = ""
+    return {
+        "at": raw["at"][:40],
+        "extension": ext,
+        "tissue": raw.get("tissue") if raw.get("tissue") in livestock_engine.TISSUE else "intact",
+        "colour": colour,
+        "fluor": raw.get("fluor") if raw.get("fluor") in livestock_engine.FLUOR else "same",
+        "feeding": raw.get("feeding") if raw.get("feeding") in livestock_engine.FEEDING else "",
+        "pests": raw.get("pests") if raw.get("pests") in livestock_engine.PESTS else "none",
+        "neighbours": [n for n in (raw.get("neighbours") if isinstance(raw.get("neighbours"), list) else [])
+                       if n in livestock_engine.NEIGHBOURS][:3],
+        "sizeMm": size,
+        "note": str(raw.get("note") or "")[:500],
+        "photoUrl": photo,
+        "score": score,
+        "undoneAt": undone[:40] if isinstance(undone, str) and _parse_datetime(undone) is not None else None,
+    }
+
+
+def _livestock_feed_row(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) or not isinstance(raw.get("at"), str) or _parse_datetime(raw.get("at")) is None:
+        return None
+    ml = raw.get("ml")
+    try:
+        ml = round(float(ml), 2) if ml not in (None, "") and 0 < float(ml) <= 1000 else None
+    except (TypeError, ValueError):
+        ml = None
+    undone = raw.get("undoneAt")
+    return {
+        "at": raw["at"][:40],
+        "productId": str(raw.get("productId") or "")[:40],
+        "food": str(raw.get("food") or "")[:60],
+        "ml": ml,
+        "response": raw.get("response") if raw.get("response") in ("took", "ignored") else "",
+        "undoneAt": undone[:40] if isinstance(undone, str) and _parse_datetime(undone) is not None else None,
+    }
+
+
+def _livestock_cap_days(value: Any, lo: int, hi: int) -> int | None:
+    """A cadence override: None (or blank) = the recommendation; a number is
+    the keeper's own, clamped."""
+    if value in (None, ""):
+        return None
+    try:
+        return int(max(lo, min(hi, int(float(value)))))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_livestock(config: dict[str, Any]) -> None:
+    """The Reef Layer registry grown into the coral diary (0.7.192): every
+    coral keeps its art fields (species/colour gate the rockwork drawing) and
+    gains identity, status, the keeper's cadence overrides and its baseline;
+    the check-in and feed ledgers are keyed by coral id and dropped with it.
+    Unknown species/colours coerce to safe defaults rather than crash the
+    scene; the panel resolves slot placement (diagram.layout coral:<id>).
+
+    One-shot migration: the NPS species tick-list (nps.species) becomes one
+    diary entry per ticked id (npsId) — one animal, one record — after which
+    nps.species is DERIVED from the registry (see _normalise_nps_config)."""
+    livestock = config.setdefault("livestock", {})
+    if not isinstance(livestock, dict):
+        config["livestock"] = deepcopy(DEFAULT_CORE_CONFIG["livestock"])
+        livestock = config["livestock"]
+    raw_corals = livestock.get("corals")
+    corals: dict = {}
+    valid_nps = set(nps_engine.species_ids())
+    if isinstance(raw_corals, dict):
+        for coral_id, entry in list(raw_corals.items())[:livestock_engine.CORALS_MAX]:
+            if not (
+                isinstance(coral_id, str)
+                and isinstance(entry, dict)
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", coral_id)
+            ):
+                continue
+            photo = str(entry.get("photoUrl") or "")[:300]
+            if photo and not (photo.startswith("/") or photo.startswith("http://") or photo.startswith("https://")):
+                photo = ""
+            paid = entry.get("paid")
+            try:
+                paid = round(float(paid), 2) if paid not in (None, "") and 0 <= float(paid) <= 100000 else None
+            except (TypeError, ValueError):
+                paid = None
+            raw_base = entry.get("baseline") if isinstance(entry.get("baseline"), dict) else {}
+            base_colour = raw_base.get("colour")
+            base_ext = raw_base.get("extension")
+            photos = []
+            for item in (entry.get("photos") if isinstance(entry.get("photos"), list) else [])[:livestock_engine.PHOTOS_MAX_CEILING]:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "")[:300]
+                if not url.startswith("/"):
+                    continue
+                photos.append({"url": url, "at": str(item.get("at") or "")[:40], "note": str(item.get("note") or "")[:120]})
+            status_at = entry.get("statusAt")
+            corals[coral_id] = {
+                "name": str(entry.get("name") or "")[:48],
+                "species": entry.get("species") if entry.get("species") in CORAL_SPECIES else "zoa",
+                "colour": entry.get("colour") if entry.get("colour") in CORAL_COLOURS else "purple",
+                "addedAt": str(entry.get("addedAt") or "")[:32],
+                "notes": str(entry.get("notes") or "")[:500],
+                "photoUrl": photo,
+                # The diary (0.7.192)
+                "taxon": str(entry.get("taxon") or "")[:80],
+                "npsId": entry.get("npsId") if entry.get("npsId") in valid_nps else "",
+                "source": str(entry.get("source") or "")[:80],
+                "paid": paid,
+                "dipped": bool(entry.get("dipped", False)),
+                "quarantined": bool(entry.get("quarantined", False)),
+                "status": entry.get("status") if entry.get("status") in livestock_engine.CORAL_STATUSES else "active",
+                "statusAt": status_at[:40] if isinstance(status_at, str) and _parse_datetime(status_at) is not None else "",
+                "statusNote": str(entry.get("statusNote") or "")[:300],
+                "checkCadenceDays": _livestock_cap_days(entry.get("checkCadenceDays"), 1, 365),
+                "feedCadenceDays": _livestock_cap_days(entry.get("feedCadenceDays"), 0, 365),
+                "foods": [str(f)[:40] for f in (entry.get("foods") if isinstance(entry.get("foods"), list) else [])
+                          if isinstance(f, str) and f][:12],
+                "baseline": {
+                    "colour": int(base_colour) if isinstance(base_colour, (int, float)) and not isinstance(base_colour, bool) and 1 <= int(base_colour) <= 6 else None,
+                    "extension": int(base_ext) if isinstance(base_ext, (int, float)) and not isinstance(base_ext, bool) and 0 <= int(base_ext) <= 3 else None,
+                    "notes": str(raw_base.get("notes") or "")[:200],
+                },
+                "photos": photos,
+            }
+    if not livestock.get("npsMigrated"):
+        nps_raw = config.get("nps") if isinstance(config.get("nps"), dict) else {}
+        ticked = nps_raw.get("species") if isinstance(nps_raw.get("species"), list) else []
+        for sid in dict.fromkeys(str(x) for x in ticked if str(x) in valid_nps):
+            if any(c["npsId"] == sid for c in corals.values()) or len(corals) >= livestock_engine.CORALS_MAX:
+                continue
+            sp = nps_engine._SPECIES_BY_ID[sid]
+            cid = f"nps_{sid}"[:32]
+            n = 2
+            while cid in corals:
+                cid = f"nps_{sid}_{n}"[:32]
+                n += 1
+            corals[cid] = {
+                "name": str(sp.get("name") or sid)[:48],
+                "species": livestock_engine.NPS_ART_SPECIES.get(str(sp.get("group")), "gorgonian"),
+                "colour": "orange", "addedAt": "", "notes": "", "photoUrl": "",
+                "taxon": "", "npsId": sid, "source": "", "paid": None, "dipped": False, "quarantined": False,
+                "status": "active", "statusAt": "", "statusNote": "",
+                "checkCadenceDays": None, "feedCadenceDays": None, "foods": [],
+                "baseline": {"colour": None, "extension": None, "notes": ""}, "photos": [],
+            }
+        livestock["npsMigrated"] = True
+    livestock["corals"] = corals
+    for key, sanitise, cap in (("checkins", _livestock_checkin_row, livestock_engine.CHECKINS_MAX),
+                               ("feeds", _livestock_feed_row, livestock_engine.FEEDS_MAX)):
+        raw_ledger = livestock.get(key) if isinstance(livestock.get(key), dict) else {}
+        ledger: dict[str, list[dict[str, Any]]] = {}
+        for cid in corals:
+            rows = raw_ledger.get(cid)
+            clean = [row for row in (sanitise(r) for r in (rows if isinstance(rows, list) else [])) if row is not None]
+            if clean:
+                ledger[cid] = clean[:cap]
+        livestock[key] = ledger
+    livestock["settings"] = livestock_engine.settings_view(livestock.get("settings"))
+
+
 def _normalise_nps_config(config: dict[str, Any]) -> None:
     """Clamp/validate the Automated NPS system gate and the system-wide
     consumables (bottle) registry in place. Products are user-created like
@@ -1418,8 +1596,18 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             "pausedAt": _awc_str(raw_p.get("pausedAt"), 40),
             "history": [h for h in history if h["at"] and h["until"]][-nps_engine.TRUCE_HISTORY_MAX:],
         }
-    raw_species = nps_cfg.get("species") if isinstance(nps_cfg.get("species"), list) else []
+    # 0.7.192: the species list is DERIVED from the coral diary — one animal,
+    # one record. An NPS coral (npsId) that is still in the tank is a ticked
+    # species; the tick-list itself migrated into the registry once
+    # (_normalise_livestock). A config whose livestock block has not been
+    # normalised yet (never, in the core path) falls back to the raw list.
     valid_species = set(nps_engine.species_ids())
+    live_corals = (config.get("livestock") or {}).get("corals") if isinstance(config.get("livestock"), dict) else None
+    if isinstance(live_corals, dict) and (config.get("livestock") or {}).get("npsMigrated"):
+        raw_species = [c.get("npsId") for c in live_corals.values()
+                       if isinstance(c, dict) and c.get("npsId") and str(c.get("status") or "active") == "active"]
+    else:
+        raw_species = nps_cfg.get("species") if isinstance(nps_cfg.get("species"), list) else []
     config["nps"] = {
         "enabled": bool(nps_cfg.get("enabled", False)),
         "species": list(dict.fromkeys(
@@ -3391,35 +3579,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
                 diagram_layout[slot_key] = slot_value
     diagram["layout"] = diagram_layout
 
-    # Reef Layer livestock — registered corals drawn on the diagram rockwork.
-    # Unknown species/colours coerce to safe defaults rather than crash the
-    # scene; the panel resolves slot placement (diagram.layout coral:<id>).
-    livestock = config.setdefault("livestock", {})
-    if not isinstance(livestock, dict):
-        config["livestock"] = deepcopy(DEFAULT_CORE_CONFIG["livestock"])
-        livestock = config["livestock"]
-    raw_corals = livestock.get("corals")
-    corals: dict = {}
-    if isinstance(raw_corals, dict):
-        for coral_id, entry in list(raw_corals.items())[:16]:
-            if not (
-                isinstance(coral_id, str)
-                and isinstance(entry, dict)
-                and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", coral_id)
-            ):
-                continue
-            photo = str(entry.get("photoUrl") or "")[:300]
-            if photo and not (photo.startswith("/") or photo.startswith("http://") or photo.startswith("https://")):
-                photo = ""
-            corals[coral_id] = {
-                "name": str(entry.get("name") or "")[:48],
-                "species": entry.get("species") if entry.get("species") in CORAL_SPECIES else "zoa",
-                "colour": entry.get("colour") if entry.get("colour") in CORAL_COLOURS else "purple",
-                "addedAt": str(entry.get("addedAt") or "")[:32],
-                "notes": str(entry.get("notes") or "")[:500],
-                "photoUrl": photo,
-            }
-    livestock["corals"] = corals
+    # Reef Layer livestock + the coral diary (0.7.192): the registry, its
+    # ledgers and the one-shot NPS tick-list migration live in one place.
+    _normalise_livestock(config)
 
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
@@ -5592,14 +5754,16 @@ async def _async_fire_maintenance_reminder(
     # slice, 2026-09-05): one line a day, never a push of their own.
     shelf_nags = _maintenance_shelf_nags(latest_config, now)
     salt_nags = _maintenance_salt_nag(latest_config, now)
+    # The coral diary (0.7.192): check-ins and target feeds due, one line each.
+    coral_nags = _maintenance_coral_nags(latest_config, now)
     last_store = hass.data.setdefault(DOMAIN, {}).setdefault(
         MAINTENANCE_REMINDER_LAST, {}
     )
     previous_ids = last_store.get(entry.entry_id, set())
     current_ids = ({item["id"] for item in push_items} | {nag["id"] for nag in shelf_nags}
-                   | {nag["id"] for nag in salt_nags})
+                   | {nag["id"] for nag in salt_nags} | {nag["id"] for nag in coral_nags})
     last_store[entry.entry_id] = current_ids
-    if not push_items and not shelf_nags and not salt_nags:
+    if not push_items and not shelf_nags and not salt_nags and not coral_nags:
         return
     labels = ", ".join(item["label"] for item in push_items)
     shelf_line = ", ".join(f"{nag['label']} ({nag['detail']})" for nag in shelf_nags[:6])
@@ -5627,11 +5791,15 @@ async def _async_fire_maintenance_reminder(
             bits.append(f"{len(shelf_nags)} bottle{'s' if len(shelf_nags) != 1 else ''} to check")
         if salt_nags:
             bits.append("salt is out" if salt_nags[0]["severity"] == "critical" else "salt running low")
+        for nag in coral_nags:
+            bits.append(nag["detail"].split(" — ", 1)[0] + (" coral check-ins" if nag["id"] == "coral_check" else " target feeds"))
         parts = [labels]
         if shelf_line:
             parts.append(f"Bottles: {shelf_line}")
         if salt_nags:
             parts.append(f"Salt: {salt_nags[0]['detail']}")
+        for nag in coral_nags:
+            parts.append(f"{nag['label']}: {nag['detail']}")
         message = " · ".join(part for part in parts if part)
         # Buttons for the first two tasks, overdue first (doc §8.11 #9): the
         # phone is for tapping. A bottles-only digest has nothing to tap.
@@ -5661,6 +5829,9 @@ async def _async_fire_maintenance_reminder(
                 _append_activity(latest_config,
                                  f"Salt {'is out' if nag['severity'] == 'critical' else 'running low'}: {nag['detail']}",
                                  "warning" if nag["severity"] == "critical" else "info")
+        for nag in coral_nags:
+            if nag["id"] in new_ids:
+                _append_activity(latest_config, f"{nag['label']}: {nag['detail']}", "info")
         # Automation hooks (V3): one event per task newly due, one per bottle
         # (or the salt bucket) newly low — only on the day they first appear.
         for item in push_items:
@@ -7957,6 +8128,41 @@ def _calibration_newer_in_stored(src: Any, dst: Any, stamp_key: str) -> bool:
     return incoming_stamp is None or stored_stamp > incoming_stamp
 
 
+def _livestock_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
+    """Carry the coral diary's server-owned ledgers through a whole-config
+    save, in place on ``incoming``: the check-in and feed ledgers (written
+    only by the coral_* WS actions), each coral's photo timeline (the upload
+    handler's), and a status the WS stamped AFTER the client's snapshot (a
+    stale wall must not resurrect a colony marked lost). Names, species,
+    cadences, foods, notes and the baseline stay the client's; a baseline
+    the first check-in wrote is kept only when the client has none."""
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    src = stored.get("livestock")
+    if not isinstance(src, dict):
+        return
+    dst = incoming.get("livestock")
+    if not isinstance(dst, dict):
+        incoming["livestock"] = deepcopy(src)
+        return
+    _copy_runtime_fields(src, dst, ("checkins", "feeds", "npsMigrated"))
+    src_corals = src.get("corals") if isinstance(src.get("corals"), dict) else {}
+    dst_corals = dst.get("corals") if isinstance(dst.get("corals"), dict) else {}
+    for cid, sc in src_corals.items():
+        ic = dst_corals.get(cid)
+        if not isinstance(sc, dict) or not isinstance(ic, dict):
+            continue   # the client removed it — its call
+        if isinstance(sc.get("photos"), list):
+            ic["photos"] = deepcopy(sc["photos"])
+        if _calibration_newer_in_stored(sc, ic, "statusAt"):
+            for key in ("status", "statusAt", "statusNote"):
+                ic[key] = deepcopy(sc.get(key))
+        sb, ib = sc.get("baseline"), ic.get("baseline")
+        if isinstance(sb, dict) and any(sb.get(k) is not None for k in ("colour", "extension")) \
+                and not (isinstance(ib, dict) and any(ib.get(k) is not None for k in ("colour", "extension"))):
+            ic["baseline"] = deepcopy(sb)
+
+
 def _mixing_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
     """Carry the mixing station's server-owned ledger through a whole-config
     save, in place on ``incoming``.
@@ -10112,6 +10318,7 @@ async def websocket_save_config(
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["config"])
     _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
+    _livestock_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     _merge_activity(entry.options.get(CONF_SETTINGS), msg["config"])
     # A hatch-clock change here has to reach the batch already incubating and
     # the reminders hanging off it, or the page contradicts itself (0.7.80).
@@ -10164,6 +10371,7 @@ async def websocket_update_config_alias(
     _preserve_runtime_mode(entry.options.get(CONF_SETTINGS), msg["settings"])
     _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
     _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
+    _livestock_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
     _merge_activity(entry.options.get(CONF_SETTINGS), msg["settings"])
     config = await _async_save_config(hass, entry, msg["settings"])
     connection.send_result(
@@ -10185,6 +10393,7 @@ async def websocket_update_config_alias(
         vol.Required("type"): "openreef/coral_photo_upload",
         vol.Required("coralId"): str,
         vol.Required("image"): str,
+        vol.Optional("note"): str,
     }
 )
 @websocket_api.require_admin
@@ -10229,18 +10438,381 @@ async def websocket_coral_photo_upload(
         return
     await _async_register_captures_path(hass)
     corals_dir = _captures_dir(hass) / "corals"
-    filename = f"{coral_id}.{ext}"
+    # 0.7.192: a photo TIMELINE per coral — stamped filenames, newest first,
+    # the keeper's cap (livestock.settings.photoCap) evicting the oldest
+    # file. photoUrl stays the hero (the latest). Only files this handler
+    # named (slug_stamp.ext) are ever unlinked.
+    now = datetime.now(timezone.utc)
+    filename = f"{coral_id}_{now.strftime('%Y%m%dT%H%M%S')}.{ext}"
+    cap = livestock_engine.settings_view((config.get("livestock") or {}).get("settings"))["photoCap"]
+    photos = corals[coral_id].get("photos") if isinstance(corals[coral_id].get("photos"), list) else []
+    keep, evicted = photos[:cap - 1], photos[cap - 1:]
+    stale_files = []
+    for item in evicted:
+        base = str(item.get("url") or "").split("?", 1)[0].rsplit("/", 1)[-1]
+        if re.fullmatch(r"[A-Za-z0-9_-]{1,32}_\d{8}T\d{6}\.(jpg|png)", base):
+            stale_files.append(base)
 
     def _write() -> None:
         corals_dir.mkdir(parents=True, exist_ok=True)
         (corals_dir / filename).write_bytes(blob)
+        for base in stale_files:
+            try:
+                (corals_dir / base).unlink()
+            except OSError:
+                pass
 
     await hass.async_add_executor_job(_write)
-    # Stable filename per coral; the ?v= stamp busts the browser cache on replace.
-    url = f"{CAPTURES_STATIC_URL}/corals/{filename}?v={int(datetime.now(timezone.utc).timestamp())}"
+    url = f"{CAPTURES_STATIC_URL}/corals/{filename}"
+    corals[coral_id]["photos"] = [{"url": url, "at": now.isoformat(), "note": str(msg.get("note") or "")[:120]}] + keep
     corals[coral_id]["photoUrl"] = url
     saved = await _async_save_config(hass, entry, config)
     connection.send_result(msg["id"], {"success": True, "url": url, "config": saved})
+
+
+# --------------------------------------------------------------------------- #
+# The coral diary (0.7.192) — docs/coral-diary-brainstorm.md. The maths live
+# in livestock.py (pure); these are the ledgers' only writers, so the
+# stale-save guard carries what they write (_livestock_preserve_runtime).
+# --------------------------------------------------------------------------- #
+def _livestock_cfg(config: dict[str, Any]) -> dict[str, Any]:
+    _normalise_livestock(config)
+    return config["livestock"]
+
+
+def _livestock_summary_payload(config: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
+    """The diary as the panel and the digest read it: every colony's state,
+    the strip counts, the due lists, the shelf filtered to each mouth."""
+    now = now or datetime.now(timezone.utc)
+    live = _livestock_cfg(config)
+    products = ((config.get("consumables") or {}).get("products") or {})
+    payload = livestock_engine.summary(live, now)
+    payload["foods"] = {cid: livestock_engine.foods_on_shelf(coral, products) for cid, coral in live["corals"].items()}
+    payload["mouths"] = {cid: livestock_engine.mouth(coral) for cid, coral in live["corals"].items()}
+    payload["groups"] = {gid: {**g, "foods": list(g["foods"])} for gid, g in livestock_engine.GROUPS.items()}
+    payload["speciesGroup"] = dict(livestock_engine.SPECIES_GROUP)
+    payload["maxCorals"] = livestock_engine.CORALS_MAX
+    payload["maxDrawn"] = livestock_engine.CORALS_DRAWN_MAX
+    return payload
+
+
+def _livestock_coral_for_msg(
+    connection: websocket_api.ActiveConnection, msg: dict[str, Any], live: dict[str, Any],
+    key: str = "coralId", active_only: bool = True,
+) -> tuple[str, dict[str, Any]] | None:
+    cid = str(msg.get(key) or "")
+    coral = live["corals"].get(cid)
+    if not isinstance(coral, dict):
+        connection.send_error(msg["id"], "unknown_coral", "No such coral in the registry")
+        return None
+    if active_only and coral.get("status") != "active":
+        connection.send_error(msg["id"], "not_active", f"{coral.get('name') or cid} is no longer in the tank")
+        return None
+    return cid, coral
+
+
+def _livestock_stamp_for_msg(
+    connection: websocket_api.ActiveConnection, msg: dict[str, Any], now: datetime
+) -> datetime | None:
+    """A late row (≤ 24 h back, never in the future) — the feed log's rule."""
+    if not msg.get("at"):
+        return now
+    stamped = _parse_datetime(msg["at"])
+    if stamped is None or stamped > now or (now - stamped) > timedelta(hours=livestock_engine.LATE_HOURS):
+        connection.send_error(msg["id"], "bad_stamp", "A late entry can only be logged within the last 24 hours")
+        return None
+    return stamped
+
+
+def _livestock_name(coral: dict[str, Any], cid: str) -> str:
+    return str(coral.get("name") or coral.get("taxon") or cid)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/livestock_summary"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_livestock_summary(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    connection.send_result(msg["id"], _livestock_summary_payload(_config_from_entry(entry)))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/coral_checkin",
+    vol.Required("coralId"): str,
+    vol.Optional("at"): cv.string,
+    vol.Optional("extension"): vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=0, max=3))),
+    vol.Optional("tissue"): vol.In(livestock_engine.TISSUE),
+    vol.Optional("colour"): vol.Any(None, vol.All(vol.Coerce(int), vol.Range(min=1, max=6))),
+    vol.Optional("fluor"): vol.In(livestock_engine.FLUOR),
+    vol.Optional("feeding"): vol.In(livestock_engine.FEEDING),
+    vol.Optional("pests"): vol.In(livestock_engine.PESTS),
+    vol.Optional("neighbours"): [vol.In(livestock_engine.NEIGHBOURS)],
+    vol.Optional("sizeMm"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0, max=5000))),
+    vol.Optional("note"): cv.string,
+    vol.Optional("photoUrl"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_coral_checkin(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """One look at one colony: the tap rows, a note, a photo. The row is
+    scored on the way in (the panel mirrors the maths) and the FIRST look
+    becomes the colony's baseline when the keeper set none — the next look
+    is judged against it."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    live = _livestock_cfg(config)
+    found = _livestock_coral_for_msg(connection, msg, live)
+    if found is None:
+        return
+    cid, coral = found
+    now = datetime.now(timezone.utc)
+    at = _livestock_stamp_for_msg(connection, msg, now)
+    if at is None:
+        return
+    row = _livestock_checkin_row({
+        "at": at.isoformat(),
+        "extension": msg.get("extension"), "tissue": msg.get("tissue", "intact"),
+        "colour": msg.get("colour"), "fluor": msg.get("fluor", "same"),
+        "feeding": msg.get("feeding", ""), "pests": msg.get("pests", "none"),
+        "neighbours": msg.get("neighbours") or [], "sizeMm": msg.get("sizeMm"),
+        "note": msg.get("note") or "", "photoUrl": msg.get("photoUrl") or "",
+    })
+    baseline = coral.get("baseline") if isinstance(coral.get("baseline"), dict) else {}
+    rows = live["checkins"].setdefault(cid, [])
+    if not any(not r.get("undoneAt") for r in rows) and baseline.get("colour") is None and baseline.get("extension") is None:
+        coral["baseline"] = {"colour": row["colour"], "extension": row["extension"], "notes": baseline.get("notes") or ""}
+    scored = livestock_engine.score_checkin(row, coral.get("baseline"), livestock_engine.group_id(coral))
+    row["score"] = scored["score"]
+    rows.insert(0, row)
+    del rows[livestock_engine.CHECKINS_MAX:]
+    state = livestock_engine.coral_state(coral, rows, live["feeds"].get(cid), now, live["settings"])
+    word = {"fine": "fine", "watch": "worth watching", "needs": "needs you", "unchecked": ""}[state["word"]]
+    _append_activity(config, f"Checked in on {_livestock_name(coral, cid)} — {scored['score']}/100, {word}"
+                     + (f" ({row['note'][:80]})" if row["note"] else ""),
+                     "warning" if state["word"] == "needs" else "info")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/coral_checkin_undo",
+    vol.Required("coralId"): str,
+    vol.Required("at"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_coral_checkin_undo(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Take back a look within a day: the row stays as a tombstone (a log
+    that hides its reversals is not a log) and stops counting."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    live = _livestock_cfg(config)
+    found = _livestock_coral_for_msg(connection, msg, live, active_only=False)
+    if found is None:
+        return
+    cid, coral = found
+    now = datetime.now(timezone.utc)
+    error = _livestock_tombstone(live["checkins"].get(cid) or [], str(msg["at"]), now)
+    if error is not None:
+        connection.send_error(msg["id"], *error)
+        return
+    _append_activity(config, f"Took back a check-in on {_livestock_name(coral, cid)}", "info")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
+
+
+def _livestock_tombstone(rows: list[dict[str, Any]], stamp: str, now: datetime) -> tuple[str, str] | None:
+    for row in rows:
+        if str(row.get("at")) != stamp:
+            continue
+        if row.get("undoneAt"):
+            return ("nothing_to_undo", "That entry was already taken back")
+        at = _parse_datetime(row.get("at"))
+        if at is None or (now - at) > timedelta(hours=livestock_engine.UNDO_HOURS):
+            return ("nothing_to_undo", "Only the last day's entries can be taken back")
+        row["undoneAt"] = now.isoformat()
+        return None
+    return ("nothing_to_undo", "No such entry")
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/coral_feed",
+    vol.Required("coralIds"): [str],
+    vol.Optional("at"): cv.string,
+    vol.Optional("productId"): cv.string,
+    vol.Optional("food"): cv.string,
+    vol.Optional("ml"): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0.1, max=1000))),
+    vol.Optional("response"): vol.In(("", "took", "ignored")),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_coral_feed(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """A target feed for one or more colonies: a row on each coral's feed
+    ledger. A pinch is not a millilitre — the shelf bottle is debited only
+    when the keeper gives an amount (``ml`` with a ``productId``), and that
+    debit is a tank feed the feeding log counts like any other."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    live = _livestock_cfg(config)
+    ids = list(dict.fromkeys(str(c) for c in msg.get("coralIds") or []))
+    targets = []
+    for cid in ids:
+        coral = live["corals"].get(cid)
+        if not isinstance(coral, dict) or coral.get("status") != "active":
+            connection.send_error(msg["id"], "unknown_coral", f"No active coral '{cid}' in the registry")
+            return
+        targets.append((cid, coral))
+    if not targets:
+        connection.send_error(msg["id"], "no_corals", "Pick at least one coral")
+        return
+    now = datetime.now(timezone.utc)
+    at = _livestock_stamp_for_msg(connection, msg, now)
+    if at is None:
+        return
+    products = ((config.get("consumables") or {}).get("products") or {})
+    pid = str(msg.get("productId") or "")
+    product = products.get(pid) if pid else None
+    if pid and not isinstance(product, dict):
+        connection.send_error(msg["id"], "unknown_product", "No such bottle on the shelf")
+        return
+    food = str(msg.get("food") or (product.get("name") if isinstance(product, dict) else "") or "")[:60]
+    ml = msg.get("ml")
+    ml = float(ml) if ml not in (None, "") else None
+    for cid, coral in targets:
+        rows = live["feeds"].setdefault(cid, [])
+        rows.insert(0, {"at": at.isoformat(), "productId": pid, "food": food,
+                        "ml": round(ml / len(targets), 2) if ml else None,
+                        "response": msg.get("response") or "", "undoneAt": None})
+        del rows[livestock_engine.FEEDS_MAX:]
+    if isinstance(product, dict) and ml:
+        _consumable_debit(product, ml, "dose", at, to="tank")
+        previous = _parse_datetime(product.get("lastDosedAt"))
+        if previous is None or at > previous:
+            product["lastDosedAt"] = at.isoformat()
+    names = ", ".join(_livestock_name(c, cid) for cid, c in targets[:4]) + (f" +{len(targets) - 4}" if len(targets) > 4 else "")
+    _append_activity(config, f"Target-fed {names}" + (f" — {food}" if food else "") + (f", {ml:g} ml" if ml else ""), "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/coral_feed_undo",
+    vol.Required("coralId"): str,
+    vol.Required("at"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_coral_feed_undo(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Take back a feed row within a day (tombstone). A shelf debit the feed
+    made stands — take that back on the shelf, where the bottle is."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    live = _livestock_cfg(config)
+    found = _livestock_coral_for_msg(connection, msg, live, active_only=False)
+    if found is None:
+        return
+    cid, coral = found
+    now = datetime.now(timezone.utc)
+    error = _livestock_tombstone(live["feeds"].get(cid) or [], str(msg["at"]), now)
+    if error is not None:
+        connection.send_error(msg["id"], *error)
+        return
+    _append_activity(config, f"Took back a feed on {_livestock_name(coral, cid)}", "info")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/coral_status",
+    vol.Required("coralId"): str,
+    vol.Required("status"): vol.In(livestock_engine.CORAL_STATUSES),
+    vol.Optional("note"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_coral_status(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Lost, fragged out, rehomed — or back in the tank. The record stays
+    (losing the record is losing the lesson); the rockwork drops it."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    live = _livestock_cfg(config)
+    found = _livestock_coral_for_msg(connection, msg, live, active_only=False)
+    if found is None:
+        return
+    cid, coral = found
+    now = datetime.now(timezone.utc)
+    status = str(msg["status"])
+    coral["status"] = status
+    coral["statusAt"] = now.isoformat()
+    coral["statusNote"] = str(msg.get("note") or "")[:300]
+    if status != "active":
+        layout = (config.get("diagram") or {}).get("layout")
+        if isinstance(layout, dict):
+            layout.pop(f"coral:{cid}", None)
+    words = {"active": "back in the tank", "fragged": "fragged out", "rehomed": "rehomed", "lost": "lost"}
+    _append_activity(config, f"{_livestock_name(coral, cid)} marked {words[status]}"
+                     + (f" — {coral['statusNote'][:120]}" if coral["statusNote"] else ""),
+                     "warning" if status == "lost" else "info")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
+
+
+def _maintenance_coral_nags(config: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    """The diary's two lines in the daily digest (docs §3.5): check-ins due
+    and target feeds due — one nag each, never one per coral. Off with the
+    diary's own reminder switches."""
+    live = config.get("livestock") if isinstance(config.get("livestock"), dict) else {}
+    if not (live.get("corals") if isinstance(live.get("corals"), dict) else {}):
+        return []
+    settings = livestock_engine.settings_view(live.get("settings"))
+    summary = livestock_engine.summary(live, now, settings)
+
+    def _names(items: list[dict[str, Any]]) -> str:
+        line = ", ".join(str(d["name"]) for d in items[:4])
+        return line + (f" +{len(items) - 4}" if len(items) > 4 else "")
+
+    nags: list[dict[str, Any]] = []
+    checks = summary["dueChecks"]
+    if settings["remind"] and checks:
+        n = len(checks)
+        nags.append({"id": "coral_check", "label": "Coral check-ins",
+                     "detail": f"{n} due — {_names(checks)}",
+                     "severity": "critical" if any(d["overdue"] for d in checks) else "warning"})
+    feeds = summary["dueFeeds"]
+    if settings["feedRemind"] and feeds:
+        nags.append({"id": "coral_feed", "label": "Target feeds",
+                     "detail": f"{len(feeds)} due — {_names(feeds)}", "severity": "warning"})
+    return nags
 
 
 @websocket_api.websocket_command(
@@ -22504,6 +23076,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_save_config)
     websocket_api.async_register_command(hass, websocket_update_config_alias)
     websocket_api.async_register_command(hass, websocket_coral_photo_upload)
+    websocket_api.async_register_command(hass, websocket_livestock_summary)
+    websocket_api.async_register_command(hass, websocket_coral_checkin)
+    websocket_api.async_register_command(hass, websocket_coral_checkin_undo)
+    websocket_api.async_register_command(hass, websocket_coral_feed)
+    websocket_api.async_register_command(hass, websocket_coral_feed_undo)
+    websocket_api.async_register_command(hass, websocket_coral_status)
     websocket_api.async_register_command(hass, websocket_search_entities)
     websocket_api.async_register_command(hass, websocket_validate_config)
     websocket_api.async_register_command(hass, websocket_validate_mappings_alias)

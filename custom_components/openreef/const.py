@@ -9,7 +9,7 @@ PANEL_URL = "openreef"
 PANEL_STATIC_URL = "/openreef_static"
 
 CONF_SETTINGS = "settings"
-CORE_SCHEMA_VERSION = 58
+CORE_SCHEMA_VERSION = 59
 
 # Reef Layer vocabulary — species decide which rock zone a coral may occupy
 # (SPS crest / LPS mid-rock / softies low / gorgonian at the back), colours
@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.191"
+INTEGRATION_VERSION = "0.7.192"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
@@ -1441,6 +1441,20 @@ DEFAULT_CORE_CONFIG = {
     # draggable node; species gates which zone slots are valid.
     "livestock": {
         "corals": {},
+        # The coral diary (0.7.192, docs/coral-diary-brainstorm.md): the
+        # check-in and target-feed ledgers are server-written (WS actions)
+        # and ride the stale-save guard; the settings are the keeper's.
+        "checkins": {},
+        "feeds": {},
+        "settings": {
+            "remind": True,
+            "feedRemind": True,
+            "arrivalDays": 30,
+            "arrivalCadenceDays": 3,
+            "photoCap": 24,
+        },
+        # One-shot: the NPS species tick-list became diary entries (npsId).
+        "npsMigrated": False,
     },
     "dosing": {
         "enabled": True,

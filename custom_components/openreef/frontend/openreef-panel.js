@@ -1224,6 +1224,18 @@ class OpenReefPanel extends HTMLElement {
         this._awcPumpsDialogOpen = false;
         this._systemCheckDialogOpen = false;
         this._coralDialogOpen = false;
+        // The coral diary (0.7.192): which colony's record is open, the
+        // check-in and feed drafts, the round's queue and the tab's filter.
+        this._coralDiaryOpen = null;
+        this._coralCheckinOpen = null;
+        this._coralCheckinDraft = {};
+        this._coralRound = null;
+        this._coralFeedOpen = false;
+        this._coralFeedDraft = {};
+        this._coralsFilter = "active";
+        this._coralsMsg = "";
+        this._coralsErr = "";
+        this._livestock = { summary: null, at: 0, loading: false, error: "", loadError: "" };
         this._npsLibraryDialogOpen = false;
         this._maintenanceTasksDialogOpen = false;
         this._cameraFocus = null;
@@ -1401,6 +1413,36 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "coral-remove") this._removeCoral(id);
       if (action === "coral-starter") this._addStarterReef();
+      // The coral diary (0.7.192)
+      if (action === "corals-filter") { this._coralsFilter = id || "active"; this._render(); }
+      if (action === "coral-diary-open") { this._coralDiaryOpen = id; this._coralFocus = null; this._render(); }
+      if (action === "coral-diary-close") { this._coralDiaryOpen = null; this._render(); }
+      if (action === "coral-checkin-open") this._coralCheckinStart(id, false);
+      if (action === "coral-round-start") this._coralCheckinStart(null, true);
+      if (action === "coral-checkin-close") { this._coralCheckinOpen = null; this._coralRound = null; this._render(); }
+      if (action === "coral-checkin-pick") {
+        const [field, value] = String(id || "").split("=");
+        this._coralCheckinPick(field, value);
+      }
+      if (action === "coral-checkin-save") this._coralSubmitCheckin(false);
+      if (action === "coral-checkin-next") this._coralSubmitCheckin(true);
+      if (action === "coral-checkin-skip") this._coralRoundAdvance();
+      if (action === "coral-feed-open") this._coralFeedStart(id);
+      if (action === "coral-feed-close") { this._coralFeedOpen = false; this._render(); }
+      if (action === "coral-feed-toggle") this._coralFeedToggle(id);
+      if (action === "coral-feed-save") this._coralSubmitFeed();
+      if (action === "coral-status") {
+        const [cid, status] = String(id || "").split("=");
+        this._coralSetStatus(cid, status);
+      }
+      if (action === "coral-undo-checkin") {
+        const [cid, at] = String(id || "").split("|");
+        this._coralUndo("openreef/coral_checkin_undo", cid, at, "Check-in taken back.");
+      }
+      if (action === "coral-undo-feed") {
+        const [cid, at] = String(id || "").split("|");
+        this._coralUndo("openreef/coral_feed_undo", cid, at, "Feed taken back.");
+      }
       if (action === "pulse-unfocus") this._closePulseFocus();
       if (action === "pulse-focus-range") this._setPulseFocusRange(id);
       if (action === "pulse-share") this._sharePulseCard();
@@ -2118,6 +2160,35 @@ class OpenReefPanel extends HTMLElement {
         }
         return;
       }
+      if (target.dataset.coralField != null) {
+        // The diary's own fields (0.7.192): saved with the settings bar.
+        const coral = this._config.livestock?.corals?.[target.dataset.coralField];
+        if (coral) {
+          this._coralApplyField(coral, target.dataset.field, target.type === "checkbox" ? target.checked : target.value);
+          this._setDirty(true);
+          if (event.type === "change" && ["species", "colour", "npsId", "status"].includes(target.dataset.field)) this._render();
+        }
+        return;
+      }
+      if (target.dataset.checkinField != null) {
+        const draft = this._coralCheckinDraft || (this._coralCheckinDraft = {});
+        draft[target.dataset.checkinField] = target.value;
+        return;
+      }
+      if (target.dataset.feedField != null) {
+        const draft = this._coralFeedDraft || (this._coralFeedDraft = {});
+        draft[target.dataset.feedField] = target.value;
+        if (event.type === "change" && target.dataset.feedField === "productId") this._render();
+        return;
+      }
+      if (target.dataset.coralSetting != null) {
+        const live = this._config.livestock = this._config.livestock || {};
+        const settings = live.settings = live.settings || {};
+        const field = target.dataset.coralSetting;
+        settings[field] = target.type === "checkbox" ? target.checked : Number(target.value);
+        this._setDirty(true);
+        return;
+      }
       if (target.dataset.coralName != null) {
         const coral = this._config.livestock?.corals?.[target.dataset.coralName];
         if (coral) {
@@ -2137,7 +2208,7 @@ class OpenReefPanel extends HTMLElement {
       }
       if (target.dataset.coralUpload != null) {
         const file = target.files && target.files[0];
-        if (file) this._uploadCoralPhoto(target.dataset.coralUpload, file);
+        if (file) this._uploadCoralPhoto(target.dataset.coralUpload, file, target.dataset.checkin != null);
         target.value = "";
         return;
       }
@@ -2811,11 +2882,11 @@ class OpenReefPanel extends HTMLElement {
         else enrich[field] = Math.max(0.5, Number(value) || 0);
       }
       if (scope === "nps-species") {
-        const npsCfg = this._config.nps = this._config.nps || {};
-        const list = npsCfg.species = Array.isArray(npsCfg.species) ? npsCfg.species : [];
-        const idx = list.indexOf(id);
-        if (value && idx < 0) list.push(id);
-        if (!value && idx >= 0) list.splice(idx, 1);
+        // 0.7.192: the tick-list IS the coral diary — one animal, one record.
+        // Ticking registers a colony (npsId); unticking removes the ones that
+        // have no diary yet, and leaves a colony with a history to its own
+        // status on the Corals tab.
+        this._npsToggleSpecies(id, !!value);
       }
       if (scope === "consumable") {
         const block = this._config.consumables = this._config.consumables || {};
@@ -4454,6 +4525,7 @@ class OpenReefPanel extends HTMLElement {
       dosing: saved.dosing === true || (hasDosingParameters && saved.dosing !== false),
       cameras: saved.cameras === true || (this._cameraList().some(([, c]) => c.entity_id) && saved.cameras !== false),
       maintenance: saved.maintenance === true || (this._maintenanceConfig().enabled && this._maintenanceTaskList().some(([id]) => this._maintenanceTask(id).enabled) && saved.maintenance !== false),
+      corals: saved.corals === true || (Object.keys(this._config?.livestock?.corals || {}).length > 0 && saved.corals !== false),
     };
   }
 
@@ -4467,6 +4539,7 @@ class OpenReefPanel extends HTMLElement {
       ["controls", "Controls", "Show armed equipment status in Mission Control."],
       ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
       ["maintenance", "Maintenance", "Show how many maintenance tasks are due or overdue."],
+      ["corals", "Corals", "Show the coral diary: colonies that need you, check-ins and feeds due."],
     ];
   }
 
@@ -7231,6 +7304,9 @@ class OpenReefPanel extends HTMLElement {
         ${this._awcPumpsDialogOpen ? this._awcPumpsDialog() : ""}
         ${this._systemCheckDialogOpen ? this._systemCheckDialog() : ""}
         ${this._coralDialogOpen ? this._coralDialog() : ""}
+        ${this._coralDiaryOpen ? this._coralDiaryDialog() : ""}
+        ${this._coralCheckinOpen ? this._coralCheckinDialog() : ""}
+        ${this._coralFeedOpen ? this._coralFeedDialog() : ""}
         ${this._npsLibraryDialogOpen ? this._npsLibraryDialog() : ""}
         ${this._maintenanceTasksDialogOpen ? this._maintenanceTasksDialog() : ""}
         ${this._modeConfirm ? this._modeConfirmModal() : ""}
@@ -14061,7 +14137,7 @@ const rigSteps = [
     // on the shelf feeds it. Every sentence is the backend compiler's
     // (nps.compile_feed_plan); this only lays the rows out. Food on its way
     // (doc §14) is the ⏳ row, a target-fed animal the 🖐 one.
-    const selectedSpecies = (this._config && this._config.nps && this._config.nps.species) || [];
+    const selectedSpecies = this._npsSelectedSpecies();
     const plan = (st.summary && st.summary.speciesPlan) || {};
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const planBits = [];
@@ -14124,7 +14200,7 @@ const rigSteps = [
   _navGroups() {
     return [
       { id: "home", label: "Home", icon: "⌂",
-        pages: [["mission", "Mission Control"], ["diagram", "Diagram"], ["log", "Log"]] },
+        pages: [["mission", "Mission Control"], ["diagram", "Diagram"], ["corals", "Corals"], ["log", "Log"]] },
       { id: "water", label: "Water", icon: "💧",
         pages: [
           ["awc", "Water Change"],
@@ -14318,6 +14394,7 @@ const rigSteps = [
 
   _activeContent() {
     if (this._activeTab === "diagram") return this._diagramTab();
+    if (this._activeTab === "corals") return this._coralsTab();
     if (this._activeTab === "log") return this._logTab();
     if (this._activeTab === "live") return this._liveStats();
     if (this._activeTab === "manual") return this._manualTests();
@@ -19226,15 +19303,832 @@ const rigSteps = [
     return `<g class="dg-scrubcloud">${out}</g>`;
   }
 
+
+  // --- The coral diary (0.7.192) — docs/coral-diary-brainstorm.md ---------
+  // A LOCKSTEP mirror of livestock.py: the group table, the cadences, the
+  // score's losses and caps, the confidence clock. Pinned by the same
+  // fixtures in tests/test_panel_corals.mjs and tests/test_livestock.py —
+  // change a number here, change it there.
+
+  _coralGroups() {
+    return {
+      sps: { label: "SPS", checkDays: 7, feedDays: 0, foods: ["zooPrepared", "amino"], lo: 5, hi: 300,
+        feedNote: "Broadcast only — fine zooplankton and aminos for the whole tank. No per-colony feed." },
+      euphyllia: { label: "Euphyllia & friends", checkDays: 7, feedDays: 7, foods: ["zooPrepared", "blend"], lo: 300, hi: 3000,
+        feedNote: "Light target feeding, small particles, about weekly. Never force large items; sweepers reach 10–15 cm." },
+      lps_feeder: { label: "LPS (regular feeder)", checkDays: 7, feedDays: 3, foods: ["zooPrepared", "blend"], lo: 500, hi: 5000,
+        feedNote: "Target feed two or three times a week in the evening when the polyps are open — mysis, pellets, a blend." },
+      lps_meaty: { label: "LPS (meaty, weekly)", checkDays: 7, feedDays: 5, foods: ["zooPrepared"], lo: 1000, hi: 20000,
+        feedNote: "One or two modest meaty feeds a week — mysis, chopped seafood. Too much rots unswallowed." },
+      soft: { label: "Soft corals & polyps", checkDays: 14, feedDays: 0, foods: [], lo: 0, hi: 0,
+        feedNote: "No target feeding needed — they take what the tank offers." },
+      anemone: { label: "Anemone", checkDays: 7, feedDays: 5, foods: ["zooPrepared"], lo: 2000, hi: 20000,
+        feedNote: "A meaty chunk once or twice a week — mysis, a piece of silverside — never bigger than the mouth." },
+      clam: { label: "Clam", checkDays: 14, feedDays: 0, foods: ["phyto"], lo: 1, hi: 20,
+        feedNote: "Light does the feeding; live phyto helps a small clam. No target feed reminder." },
+      nps: { label: "NPS (non-photosynthetic)", checkDays: 7, feedDays: 0, foods: [], lo: 0, hi: 0,
+        feedNote: "The NPS feed plan owns this animal's feeds — the shelf, the pumps and the feeding log already count them." },
+    };
+  }
+
+  _coralGroupId(c) {
+    if (c?.npsId) return "nps";
+    const sp = String(c?.species || "");
+    if (["staghorn", "plate", "table", "birdsnest", "digitata", "stylophora", "pavona"].includes(sp)) return "sps";
+    if (["torch", "hammer", "frogspawn", "bubble", "elegance"].includes(sp)) return "euphyllia";
+    if (["acan", "blasto", "favia", "brain", "chalice", "duncan", "candycane", "goniopora"].includes(sp)) return "lps_feeder";
+    if (["scoly", "trachy", "cynarina", "lobo", "fungia"].includes(sp)) return "lps_meaty";
+    if (sp === "anemone") return "anemone";
+    if (sp === "clam") return "clam";
+    if (sp === "suncoral" || sp === "gorgonian") return "nps";
+    return "soft";
+  }
+
+  _coralSettings() {
+    const raw = this._config?.livestock?.settings || {};
+    const num = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.trunc(n))) || d : d; };
+    return {
+      remind: raw.remind !== false, feedRemind: raw.feedRemind !== false,
+      arrivalDays: Math.max(0, Math.min(90, Math.trunc(Number(raw.arrivalDays ?? 30)) || 0)),
+      arrivalCadenceDays: num(raw.arrivalCadenceDays ?? 3, 1, 14, 3),
+      photoCap: num(raw.photoCap ?? 24, 1, 96, 24),
+    };
+  }
+
+  _coralStamp(v) {
+    const t = Date.parse(v || "");
+    return Number.isFinite(t) ? t : null;
+  }
+
+  _coralCheckCadence(c, now = Date.now()) {
+    const own = Number(c?.checkCadenceDays);
+    if (Number.isFinite(own) && own > 0) return { days: Math.max(1, Math.min(365, Math.trunc(own))), reason: "own" };
+    const s = this._coralSettings();
+    const arrived = this._coralStamp(c?.addedAt);
+    if (arrived != null && s.arrivalDays > 0) {
+      const days = (now - arrived) / 86400000;
+      if (days >= 0 && days < s.arrivalDays) return { days: s.arrivalCadenceDays, reason: "arrival" };
+    }
+    return { days: this._coralGroups()[this._coralGroupId(c)].checkDays, reason: "group" };
+  }
+
+  _coralFeedCadence(c) {
+    const raw = c?.feedCadenceDays;
+    if (raw !== null && raw !== undefined && raw !== "") {
+      const n = Number(raw);
+      return { days: Number.isFinite(n) ? Math.max(0, Math.min(365, Math.trunc(n))) : 0, reason: "own" };
+    }
+    return { days: this._coralGroups()[this._coralGroupId(c)].feedDays, reason: "group" };
+  }
+
+  _coralScoreCheckin(row, baseline, gid) {
+    const LOSS = { extension: { 1: 10, 0: 25 }, tissue: { stalled: 8, receding: 20, stn: 30, rtn: 40 },
+      colour: { 1: 6, 2: 15 }, fluor: { fading: 8 }, feeding: { ignored: 8 }, pests: { suspected: 12, confirmed: 20 }, neighbour: 8 };
+    const CAP = { receding: 40, stn: 20, rtn: 10, pests_confirmed: 60, bleaching: 50 };
+    const TISSUE_WORDS = { intact: "tissue intact", stalled: "recession stopped (algae-dusted edge)", receding: "active recession (white edge)", stn: "slow tissue necrosis", rtn: "rapid tissue necrosis" };
+    const EXT_WORDS = { 0: "Polyps retracted", 1: "Partial extension", 2: "Normal extension", 3: "Full extension" };
+    const cap1 = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+    const losses = [];
+    const caps = [];
+    const loss = (points, label, status = "warning") => losses.push({ points, label, status });
+    const cap = (limit, label) => caps.push({ limit, label, status: "critical" });
+    const groups = this._coralGroups();
+    const ext = Number.isInteger(row?.extension) ? row.extension : null;
+    if (ext !== null && LOSS.extension[ext] !== undefined) loss(LOSS.extension[ext], EXT_WORDS[ext], ext === 0 ? "critical" : "warning");
+    const tissue = String(row?.tissue || "intact");
+    if (LOSS.tissue[tissue] !== undefined) loss(LOSS.tissue[tissue], cap1(TISSUE_WORDS[tissue]), tissue !== "stalled" ? "critical" : "warning");
+    if (["receding", "stn", "rtn"].includes(tissue)) cap(CAP[tissue], `${cap1(TISSUE_WORDS[tissue])} — the score cannot read above ${CAP[tissue]} until the edge stops`);
+    const colour = Number.isInteger(row?.colour) && row.colour >= 1 && row.colour <= 6 ? row.colour : null;
+    if (colour !== null) {
+      const b = Number.isInteger(baseline?.colour) && baseline.colour >= 1 && baseline.colour <= 6 ? baseline.colour : 4;
+      const steps = b - colour;
+      if (steps >= 2) loss(LOSS.colour[2], `Colour ${steps} steps paler than usual (chart ${colour} vs ${b})`);
+      else if (steps === 1) loss(LOSS.colour[1], `A step paler than usual (chart ${colour} vs ${b})`);
+      if (colour <= 2) cap(CAP.bleaching, `Chart colour ${colour} — bleaching territory`);
+    }
+    if (String(row?.fluor || "") === "fading") loss(LOSS.fluor.fading, "Fluorescence fading under the blues");
+    const fed = groups[gid]?.feedDays > 0 || gid === "nps";
+    if (String(row?.feeding || "") === "ignored" && fed) loss(LOSS.feeding.ignored, "Ignored food");
+    const pests = String(row?.pests || "none");
+    if (LOSS.pests[pests] !== undefined) loss(LOSS.pests[pests], pests === "confirmed" ? "Pests confirmed" : "Pests suspected", pests === "confirmed" ? "critical" : "warning");
+    if (pests === "confirmed") cap(CAP.pests_confirmed, "Confirmed pests — the score cannot read above 60 until they are gone");
+    const words = { stung: "Stung by a neighbour", shaded: "Shaded by a neighbour", nipped: "Nipped by a fish" };
+    (Array.isArray(row?.neighbours) ? row.neighbours : []).filter((n) => words[n]).slice(0, 2).forEach((n) => loss(LOSS.neighbour, words[n]));
+    let score = 100 - losses.reduce((sum, l) => sum + l.points, 0);
+    for (const c of caps) score = Math.min(score, c.limit);
+    return { score: Math.max(0, Math.min(100, score)), losses, caps };
+  }
+
+  _coralLiveRows(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .filter((r) => r && typeof r === "object" && !r.undoneAt && this._coralStamp(r.at) != null)
+      .sort((a, b) => this._coralStamp(b.at) - this._coralStamp(a.at));
+  }
+
+  _coralGrade(score) {
+    if (score == null) return "—";
+    return score >= 90 ? "A" : score >= 75 ? "B" : score >= 60 ? "C" : score >= 40 ? "D" : "E";
+  }
+
+  _coralState(cid, now = Date.now()) {
+    const live = this._config?.livestock || {};
+    const c = (live.corals || {})[cid];
+    if (!c) return { word: "unchecked", score: null, grade: "—", insights: [], caps: [], losses: [], checkDue: false, feedDue: false };
+    const gid = this._coralGroupId(c);
+    const groups = this._coralGroups();
+    const status = c.status || "active";
+    const rows = this._coralLiveRows((live.checkins || {})[cid]);
+    const latest = rows[0] || null;
+    const previous = rows[1] || null;
+    const baseline = c.baseline && typeof c.baseline === "object" ? c.baseline : {};
+    const cadence = this._coralCheckCadence(c, now);
+    const insights = [];
+    const scored = latest ? this._coralScoreCheckin(latest, baseline, gid) : null;
+    let score = scored ? scored.score : null;
+    const prevScore = previous ? this._coralScoreCheckin(previous, baseline, gid).score : null;
+    const caps = scored ? [...scored.caps] : [];
+    const losses = scored ? [...scored.losses] : [];
+    const lastAt = latest ? this._coralStamp(latest.at) : null;
+    const anchor = lastAt ?? this._coralStamp(c.addedAt);
+    const daysSince = lastAt != null ? (now - lastAt) / 86400000 : null;
+    const nextCheck = anchor != null ? anchor + cadence.days * 86400000 : null;
+    const checkDue = anchor == null || (nextCheck != null && now >= nextCheck);
+    const checkOverdue = anchor == null || now >= anchor + cadence.days * 2 * 86400000;
+    const stale = lastAt != null && daysSince >= cadence.days * 2;
+    if (stale && score != null) {
+      if (score > 70) { caps.push({ limit: 70, label: `Not looked at for ${Math.trunc(daysSince)} days`, status: "warning" }); score = 70; }
+      insights.push({ status: "warning", label: `Not looked at for ${Math.trunc(daysSince)} days`, detail: "The score cannot read above 70 until you check in — a colony nobody looks at cannot grade A." });
+    }
+    if (!latest) insights.push({ status: "context", label: "No check-in yet", detail: "Log a first look and the diary has a baseline to judge the next one against." });
+    const word = score == null ? "unchecked" : (score < 60 || caps.some((x) => x.limit <= 40)) ? "needs" : score < 75 ? "watch" : "fine";
+    let trend = null;
+    if (score != null && prevScore != null && !stale) {
+      const delta = score - prevScore;
+      trend = { delta, word: delta > 3 ? "up" : delta < -3 ? "down" : "steady" };
+    }
+    const fcad = this._coralFeedCadence(c);
+    const feedRows = this._coralLiveRows((live.feeds || {})[cid]);
+    const lastFeed = feedRows[0] ? this._coralStamp(feedRows[0].at) : null;
+    const feedAnchor = lastFeed ?? this._coralStamp(c.addedAt);
+    const feedOn = fcad.days > 0 && status === "active" && gid !== "nps";
+    const nextFeed = feedOn && feedAnchor != null ? feedAnchor + fcad.days * 86400000 : null;
+    const feedDue = feedOn && (feedAnchor == null || (nextFeed != null && now >= nextFeed));
+    losses.forEach((l) => insights.push({ status: l.status, label: l.label, detail: `−${l.points} points at the last check-in.` }));
+    caps.forEach((x) => { if (!insights.some((i) => i.label === x.label)) insights.push({ status: x.status, label: x.label, detail: `Capped at ${x.limit}.` }); });
+    return {
+      group: gid, groupLabel: groups[gid].label, status, score, grade: this._coralGrade(score), word, stale, trend,
+      lastCheckAt: latest ? latest.at : null, daysSinceCheck: daysSince, checkins: rows.length,
+      cadenceDays: cadence.days, cadenceReason: cadence.reason, nextCheckAt: nextCheck,
+      checkDue: checkDue && status === "active", checkOverdue: checkOverdue && status === "active",
+      feedDays: feedOn ? fcad.days : 0, feedReason: fcad.reason, lastFeedAt: feedRows[0] ? feedRows[0].at : null,
+      nextFeedAt: nextFeed, feedDue, caps, losses, insights, latest, feedRows,
+    };
+  }
+
+  _coralsSummary(now = Date.now()) {
+    const corals = this._config?.livestock?.corals || {};
+    const counts = { active: 0, fine: 0, watch: 0, needs: 0, unchecked: 0, lost: 0, gone: 0 };
+    const states = {};
+    const dueChecks = [];
+    const dueFeeds = [];
+    for (const [cid, c] of Object.entries(corals)) {
+      if (!c || typeof c !== "object") continue;
+      const st = this._coralState(cid, now);
+      states[cid] = st;
+      if (st.status !== "active") { counts[st.status === "lost" ? "lost" : "gone"] += 1; continue; }
+      counts.active += 1;
+      counts[st.word] += 1;
+      if (st.checkDue) dueChecks.push({ id: cid, name: this._coralName(cid), overdue: st.checkOverdue, days: st.daysSinceCheck });
+      if (st.feedDue) dueFeeds.push({ id: cid, name: this._coralName(cid), days: st.feedDays });
+    }
+    dueChecks.sort((a, b) => (a.overdue === b.overdue ? (b.days ?? 9999) - (a.days ?? 9999) : a.overdue ? -1 : 1));
+    return { states, counts, dueChecks, dueFeeds };
+  }
+
+  _coralName(cid) {
+    const c = (this._config?.livestock?.corals || {})[cid] || {};
+    return c.name || c.taxon || this._coralSpeciesLabel(c.species);
+  }
+
+  _coralWordText(word) {
+    return { fine: "fine", watch: "worth watching", needs: "needs you", unchecked: "not checked yet" }[word] || word;
+  }
+
+  _coralStateLine(cid) {
+    const st = this._coralState(cid);
+    if (st.score == null) return "No check-in yet — the diary has nothing to judge it by.";
+    const trend = st.trend ? (st.trend.word === "up" ? ` ↑${st.trend.delta}` : st.trend.word === "down" ? ` ↓${Math.abs(st.trend.delta)}` : " →") : "";
+    const when = st.daysSinceCheck != null ? (st.daysSinceCheck < 1 ? "today" : `${Math.trunc(st.daysSinceCheck)} d ago`) : "";
+    return `${st.score}/100 · ${st.grade}${trend} · ${this._coralWordText(st.word)}${when ? ` · looked ${when}` : ""}`;
+  }
+
+  _coralFoodsOnShelf(c) {
+    // The shelf filtered to this mouth (livestock.foods_on_shelf): right
+    // category and an overlapping particle window; a bottle with no window
+    // is judged on category alone.
+    const products = this._config?.consumables?.products || {};
+    const g = this._coralGroups()[this._coralGroupId(c)];
+    let foods = g.foods; let lo = g.lo; let hi = g.hi;
+    if (c?.npsId) {
+      const sp = ((this._nps?.summary?.speciesLibrary) || []).find((x) => x.id === c.npsId);
+      if (sp) { foods = sp.foods || []; lo = Number(sp.particleUmMin) || 0; hi = Number(sp.particleUmMax) || 0; }
+      else foods = ["zooPrepared", "zooLive", "blend", "phyto"];
+    }
+    const out = [];
+    for (const [pid, p] of Object.entries(products)) {
+      if (!p || !foods.includes(String(p.category || ""))) continue;
+      const pl = Number(p.particleUmMin) || 0; const ph = Number(p.particleUmMax) || 0;
+      let fits = true;
+      if (pl || ph) fits = Math.max(pl, lo) <= Math.min(ph || pl, hi || 1e9);
+      out.push({ id: pid, name: p.name || pid, category: p.category, fits });
+    }
+    return out.sort((a, b) => (a.fits === b.fits ? a.name.localeCompare(b.name) : a.fits ? -1 : 1));
+  }
+
+  _npsSelectedSpecies() {
+    // Derived from the diary (0.7.192): an NPS coral still in the tank.
+    const corals = this._config?.livestock?.corals || {};
+    return [...new Set(Object.values(corals).filter((c) => c && c.npsId && (c.status || "active") === "active").map((c) => c.npsId))];
+  }
+
+  _npsToggleSpecies(sid, on) {
+    const live = this._config.livestock = this._config.livestock || {};
+    const corals = live.corals = live.corals || {};
+    const mine = Object.entries(corals).filter(([, c]) => c && c.npsId === sid && (c.status || "active") === "active");
+    if (on && !mine.length) {
+      const sp = ((this._nps?.summary?.speciesLibrary) || []).find((x) => x.id === sid) || {};
+      const art = { stony: "suncoral", gorgonian: "gorgonian", soft: "kenyatree", filter: "clam" }[sp.group] || "gorgonian";
+      this._addCoral(String(sp.name || sid).slice(0, 48), art, "orange", { npsId: sid });
+      return;
+    }
+    if (!on) {
+      const withDiary = mine.filter(([cid]) => (live.checkins?.[cid] || []).length || (live.feeds?.[cid] || []).length);
+      mine.forEach(([cid]) => { if (!withDiary.some(([w]) => w === cid)) this._removeCoral(cid); });
+      if (withDiary.length) {
+        this._coralsMsg = `${withDiary.map(([cid]) => this._coralName(cid)).join(", ")} has a diary — mark it lost, fragged or rehomed on the Corals tab instead.`;
+        this._render();
+      }
+    }
+  }
+
+  _coralApplyField(coral, field, value) {
+    const text = (v, n) => String(v ?? "").slice(0, n);
+    if (["name"].includes(field)) coral.name = text(value, 48);
+    else if (field === "taxon") coral.taxon = text(value, 80);
+    else if (field === "source") coral.source = text(value, 80);
+    else if (field === "notes") coral.notes = text(value, 500);
+    else if (field === "addedAt") coral.addedAt = text(value, 32);
+    else if (field === "species") coral.species = this._coralSpeciesList().includes(value) ? value : coral.species;
+    else if (field === "colour") coral.colour = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].includes(value) ? value : coral.colour;
+    else if (field === "npsId") coral.npsId = text(value, 40);
+    else if (field === "paid") { const n = Number(value); coral.paid = value === "" || !Number.isFinite(n) ? null : Math.max(0, n); }
+    else if (field === "dipped" || field === "quarantined") coral[field] = !!value;
+    else if (field === "checkCadenceDays") { const n = Number(value); coral.checkCadenceDays = value === "" || !Number.isFinite(n) || n <= 0 ? null : Math.trunc(n); }
+    else if (field === "feedCadenceDays") { const n = Number(value); coral.feedCadenceDays = value === "" || !Number.isFinite(n) ? null : Math.max(0, Math.trunc(n)); }
+    else if (field === "baselineColour") { const b = coral.baseline = coral.baseline || {}; const n = Number(value); b.colour = value === "" || !Number.isFinite(n) ? null : Math.max(1, Math.min(6, Math.trunc(n))); }
+    else if (field === "baselineExtension") { const b = coral.baseline = coral.baseline || {}; const n = Number(value); b.extension = value === "" || !Number.isFinite(n) ? null : Math.max(0, Math.min(3, Math.trunc(n))); }
+    else if (field === "baselineNotes") { const b = coral.baseline = coral.baseline || {}; b.notes = text(value, 200); }
+    else if (field === "photoUrl") { const url = text(value, 300).trim(); coral.photoUrl = !url || url.startsWith("/") || url.startsWith("http://") || url.startsWith("https://") ? url : ""; }
+  }
+
+  async _livestockLoadSummary(force = false) {
+    const st = this._livestock || (this._livestock = { summary: null, at: 0, loading: false, error: "", loadError: "" });
+    if (st.loading) return;
+    if (!force && st.summary && Date.now() - st.at < 30000) return;
+    st.loading = true;
+    try {
+      st.summary = await this._callWS({ type: "openreef/livestock_summary" });
+      if (st.error && st.error === st.loadError) st.error = "";
+      st.loadError = "";
+    } catch (err) {
+      st.error = st.loadError = (err && err.message) || "Could not load the diary.";
+    } finally {
+      st.at = Date.now();
+      st.loading = false;
+      this._render();
+    }
+  }
+
+  async _coralCall(msg, okMessage) {
+    try {
+      const res = await this._callWS(msg);
+      if (res?.config) this._config = res.config;
+      if (res?.summary && this._livestock) { this._livestock.summary = res.summary; this._livestock.at = Date.now(); }
+      this._coralsMsg = okMessage || "";
+      this._coralsErr = "";
+      return true;
+    } catch (err) {
+      this._coralsErr = (err && err.message) || "That did not go through.";
+      return false;
+    } finally {
+      this._render();
+    }
+  }
+
+  // --- the check-in ceremony -----------------------------------------------
+  _coralCheckinStart(cid, round) {
+    if (round) {
+      const due = this._coralsSummary().dueChecks.map((d) => d.id);
+      if (!due.length) { this._coralsMsg = "Nothing is due a look. Go and enjoy the corals."; this._render(); return; }
+      this._coralRound = due;
+      cid = due[0];
+    } else {
+      this._coralRound = null;
+    }
+    const st = this._coralState(cid);
+    const last = st.latest || {};
+    // "Same as last week" is one tap: the draft starts from the last look.
+    this._coralCheckinDraft = {
+      extension: Number.isInteger(last.extension) ? last.extension : 2,
+      tissue: last.tissue || "intact", colour: Number.isInteger(last.colour) ? last.colour : null,
+      fluor: "same", feeding: "", pests: last.pests === "confirmed" ? "confirmed" : "none",
+      neighbours: [], sizeMm: last.sizeMm ?? "", note: "", photoUrl: "",
+    };
+    this._coralCheckinOpen = cid;
+    this._coralDiaryOpen = null;
+    this._render();
+  }
+
+  _coralCheckinPick(field, value) {
+    const d = this._coralCheckinDraft || (this._coralCheckinDraft = {});
+    if (field === "extension" || field === "colour") d[field] = value === "" ? null : Number(value);
+    else if (field === "neighbours") {
+      const list = Array.isArray(d.neighbours) ? d.neighbours : (d.neighbours = []);
+      const i = list.indexOf(value);
+      if (i >= 0) list.splice(i, 1); else list.push(value);
+    } else d[field] = value;
+    this._render();
+  }
+
+  async _coralSubmitCheckin(next) {
+    const cid = this._coralCheckinOpen;
+    if (!cid) return;
+    const d = this._coralCheckinDraft || {};
+    const size = Number(d.sizeMm);
+    const ok = await this._coralCall({
+      type: "openreef/coral_checkin", coralId: cid,
+      extension: Number.isInteger(d.extension) ? d.extension : null,
+      tissue: d.tissue || "intact", colour: Number.isInteger(d.colour) ? d.colour : null,
+      fluor: d.fluor || "same", feeding: d.feeding || "", pests: d.pests || "none",
+      neighbours: Array.isArray(d.neighbours) ? d.neighbours : [],
+      sizeMm: d.sizeMm === "" || !Number.isFinite(size) ? null : size,
+      note: String(d.note || "").slice(0, 500), photoUrl: String(d.photoUrl || "").slice(0, 300),
+    }, `${this._coralName(cid)} checked in — ${this._coralStateLine(cid)}`);
+    if (!ok) return;
+    this._coralsMsg = `${this._coralName(cid)} checked in — ${this._coralStateLine(cid)}`;
+    if (next && this._coralRound) this._coralRoundAdvance();
+    else { this._coralCheckinOpen = null; this._coralRound = null; this._render(); }
+  }
+
+  _coralRoundAdvance() {
+    const round = this._coralRound || [];
+    const idx = round.indexOf(this._coralCheckinOpen);
+    const nextId = round[idx + 1];
+    if (nextId) { this._coralCheckinStart(nextId, false); this._coralRound = round; }
+    else { this._coralCheckinOpen = null; this._coralRound = null; this._coralsMsg = "Round done — every colony that was due has been looked at."; this._render(); }
+  }
+
+  // --- the target feed -------------------------------------------------------
+  _coralFeedStart(cid) {
+    const sum = this._coralsSummary();
+    const picked = cid ? [cid] : sum.dueFeeds.map((d) => d.id);
+    const corals = this._config?.livestock?.corals || {};
+    const first = corals[picked[0]] || corals[Object.keys(corals)[0]];
+    const shelf = first ? this._coralFoodsOnShelf(first) : [];
+    this._coralFeedDraft = { corals: picked, productId: shelf[0]?.fits ? shelf[0].id : "", food: "", ml: "", response: "" };
+    this._coralFeedOpen = true;
+    this._coralDiaryOpen = null;
+    this._render();
+  }
+
+  _coralFeedToggle(cid) {
+    const d = this._coralFeedDraft || (this._coralFeedDraft = { corals: [] });
+    const list = Array.isArray(d.corals) ? d.corals : (d.corals = []);
+    const i = list.indexOf(cid);
+    if (i >= 0) list.splice(i, 1); else list.push(cid);
+    this._render();
+  }
+
+  async _coralSubmitFeed() {
+    const d = this._coralFeedDraft || {};
+    const ids = Array.isArray(d.corals) ? d.corals : [];
+    if (!ids.length) { this._coralsErr = "Pick at least one coral."; this._render(); return; }
+    const ml = Number(d.ml);
+    const msg = { type: "openreef/coral_feed", coralIds: ids, response: d.response || "" };
+    if (d.productId) msg.productId = d.productId;
+    if (d.food) msg.food = String(d.food).slice(0, 60);
+    if (d.ml !== "" && Number.isFinite(ml) && ml > 0) msg.ml = ml;
+    const ok = await this._coralCall(msg, `Fed ${ids.map((c) => this._coralName(c)).join(", ")}.`);
+    if (ok) { this._coralFeedOpen = false; this._render(); }
+  }
+
+  async _coralSetStatus(cid, status) {
+    const noteEl = this.shadowRoot?.getElementById("or-coral-status-note");
+    const note = String(noteEl?.value || "").slice(0, 300);
+    const words = { active: "back in the tank", fragged: "fragged out", rehomed: "rehomed", lost: "marked lost" };
+    await this._coralCall({ type: "openreef/coral_status", coralId: cid, status, note }, `${this._coralName(cid)} ${words[status] || status}.`);
+  }
+
+  async _coralUndo(type, cid, at, okMessage) {
+    await this._coralCall({ type, coralId: cid, at }, okMessage);
+  }
+
+  // --- the Corals tab ----------------------------------------------------------
+  _coralGlyphSvg(c, size = 64) {
+    const pal = this._coralPalette(c?.colour);
+    return `<svg viewBox="-52 -100 104 108" width="${size}" height="${Math.round(size * 1.04)}" aria-hidden="true">${this._diagCoralArt(c?.species || "zoa", 0, 0, pal, 0)}</svg>`;
+  }
+
+  _coralScorePill(st) {
+    if (st.score == null) return `<span class="coral-pill unchecked">not checked</span>`;
+    const trend = st.trend ? (st.trend.word === "up" ? ` ↑${st.trend.delta}` : st.trend.word === "down" ? ` ↓${Math.abs(st.trend.delta)}` : " →") : "";
+    return `<span class="coral-pill ${this._escape(st.word)}">${st.score} · ${this._escape(st.grade)}${this._escape(trend)}</span>`;
+  }
+
+  _coralCard(cid) {
+    const c = (this._config?.livestock?.corals || {})[cid] || {};
+    const st = this._coralState(cid);
+    const groups = this._coralGroups();
+    const age = this._coralAgeText(c.addedAt);
+    const chips = [];
+    if (st.status !== "active") chips.push(`<span class="coral-chip">${this._escape(st.status)}${c.statusAt ? ` · ${this._escape(this._formatActivityTime(c.statusAt))}` : ""}</span>`);
+    else {
+      if (st.checkOverdue) chips.push(`<span class="coral-chip critical">check-in overdue</span>`);
+      else if (st.checkDue) chips.push(`<span class="coral-chip warning">check-in due</span>`);
+      if (st.feedDue) chips.push(`<span class="coral-chip warning">feed due</span>`);
+      if (st.cadenceReason === "arrival") chips.push(`<span class="coral-chip">new arrival · every ${st.cadenceDays} d</span>`);
+      if (c.npsId) chips.push(`<span class="coral-chip">NPS plan feeds it</span>`);
+    }
+    const photo = c.photoUrl ? `<img class="coral-card-photo" src="${this._escape(c.photoUrl)}" alt="">` : `<div class="coral-card-glyph">${this._coralGlyphSvg(c, 56)}</div>`;
+    const top = st.insights.find((i) => i.status === "critical") || st.insights.find((i) => i.status === "warning") || null;
+    return `
+      <article class="coral-card ${this._escape(st.word)} ${st.status !== "active" ? "gone" : ""}" data-coral-card="${this._escape(cid)}">
+        <button type="button" class="coral-card-hero" data-action="coral-diary-open" data-id="${this._escape(cid)}" aria-label="Open ${this._escape(this._coralName(cid))}">${photo}</button>
+        <div class="coral-card-body">
+          <div class="coral-card-head">
+            <div>
+              <strong>${this._escape(this._coralName(cid))}</strong>
+              <small class="muted">${this._escape(c.taxon || this._coralSpeciesLabel(c.species))} · ${this._escape(groups[st.group].label)}${age ? ` · ${this._escape(age)}` : ""}</small>
+            </div>
+            ${this._coralScorePill(st)}
+          </div>
+          <p class="coral-card-line muted">${this._escape(st.score == null ? "No check-in yet." : `${this._coralWordText(st.word)}${top ? ` — ${top.label}` : ""} · looked ${st.daysSinceCheck < 1 ? "today" : `${Math.trunc(st.daysSinceCheck)} d ago`}`)}</p>
+          <div class="coral-chips">${chips.join("")}</div>
+          ${st.status === "active" ? `
+          <div class="button-row">
+            <button class="secondary compact-button" data-action="coral-checkin-open" data-id="${this._escape(cid)}">Check in</button>
+            ${st.feedDays > 0 ? `<button class="secondary compact-button" data-action="coral-feed-open" data-id="${this._escape(cid)}">Feed</button>` : ""}
+            <button class="secondary compact-button" data-action="coral-diary-open" data-id="${this._escape(cid)}">Open</button>
+          </div>` : `<p class="coral-card-line muted">${this._escape(c.statusNote || "")}</p>`}
+        </div>
+      </article>`;
+  }
+
+  _coralsTab() {
+    const corals = this._config?.livestock?.corals || {};
+    const sum = this._coralsSummary();
+    const counts = sum.counts;
+    const filter = this._coralsFilter || "active";
+    const ids = Object.keys(corals);
+    const shown = ids.filter((cid) => {
+      const st = sum.states[cid];
+      if (filter === "gone") return st.status !== "active";
+      if (st.status !== "active") return false;
+      if (filter === "needs") return st.word === "needs" || st.word === "watch";
+      if (filter === "unchecked") return st.word === "unchecked" || st.checkDue;
+      return true;
+    });
+    const order = { needs: 0, watch: 1, unchecked: 2, fine: 3 };
+    shown.sort((a, b) => (order[sum.states[a].word] - order[sum.states[b].word]) || this._coralName(a).localeCompare(this._coralName(b)));
+    const overdue = sum.dueChecks.filter((d) => d.overdue).length;
+    const strip = counts.active
+      ? `${counts.active} colon${counts.active === 1 ? "y" : "ies"} · ${counts.fine} fine${counts.watch ? ` · ${counts.watch} watch` : ""}${counts.needs ? ` · ${counts.needs} need${counts.needs === 1 ? "s" : ""} you` : ""}${counts.unchecked ? ` · ${counts.unchecked} unchecked` : ""}`
+      : "no corals registered yet";
+    const cheeky = this._config?.display?.tone === "cheeky";
+    const calm = counts.active && !counts.needs && !counts.watch && !counts.unchecked && !sum.dueChecks.length && !sum.dueFeeds.length;
+    const cards = `
+      ${this._missionSummaryCard("Colonies", counts.active ? String(counts.active) : "—", strip,
+        counts.needs ? "critical" : counts.watch || counts.unchecked ? "warning" : counts.active ? "ok" : "unknown", "corals")}
+      ${this._missionSummaryCard("Check-ins", sum.dueChecks.length ? `${sum.dueChecks.length} due` : counts.active ? "up to date" : "—",
+        overdue ? `${overdue} overdue — ${sum.dueChecks.slice(0, 3).map((d) => d.name).join(", ")}` : sum.dueChecks.length ? sum.dueChecks.slice(0, 3).map((d) => d.name).join(", ") : "every colony inside its cadence",
+        overdue ? "critical" : sum.dueChecks.length ? "warning" : counts.active ? "ok" : "unknown", "corals", { action: sum.dueChecks.length ? "coral-round-start" : "" })}
+      ${this._missionSummaryCard("Target feeds", sum.dueFeeds.length ? `${sum.dueFeeds.length} due` : "none due",
+        sum.dueFeeds.length ? sum.dueFeeds.slice(0, 3).map((d) => d.name).join(", ") : "the feeders are inside their cadence",
+        sum.dueFeeds.length ? "warning" : "ok", "corals", { action: sum.dueFeeds.length ? "coral-feed-open" : "" })}`;
+    const filters = [["active", `All (${counts.active})`], ["needs", `Needs a look (${counts.needs + counts.watch})`], ["unchecked", `Due a check-in (${sum.dueChecks.length})`], ["gone", `Lost & gone (${counts.lost + counts.gone})`]];
+    const lessons = filter === "gone" ? ids.filter((cid) => sum.states[cid].status === "lost") : [];
+    return `
+      <section class="stack corals-tab">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Livestock</p>
+            <h2>Corals</h2>
+            <p>Every colony on the rock, with a diary: a look on a schedule, the feeds it gets, the photos, and an honest score — a coral nobody looks at cannot grade A.</p>
+          </div>
+          <div class="settings-toolbar">
+            <button class="secondary compact-button" data-action="coral-open">＋ Add a coral</button>
+            <button class="secondary compact-button" data-action="coral-round-start" ${sum.dueChecks.length ? "" : "disabled"}>🔍 Round (${sum.dueChecks.length})</button>
+            <button class="secondary compact-button" data-action="coral-feed-open" ${counts.active ? "" : "disabled"}>🍽 Log a feed</button>
+            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="corals" data-scroll="or-section-corals">Reminders</button>
+          </div>
+        </div>
+        ${this._coralsMsg ? `<div class="notice info-notice"><small>${this._escape(this._coralsMsg)}</small></div>` : ""}
+        ${this._coralsErr ? `<div class="notice warning-notice"><small>${this._escape(this._coralsErr)}</small></div>` : ""}
+        <div class="grid summary-grid">${cards}</div>
+        ${calm && cheeky ? `<p class="muted coral-calm">Every colony accounted for and nothing due. Go and look at them anyway — that is the whole point.</p>` : ""}
+        <div class="coral-filters">${filters.map(([id, label]) => `<button class="secondary compact-button ${filter === id ? "active" : ""}" data-action="corals-filter" data-id="${id}">${this._escape(label)}</button>`).join("")}</div>
+        ${shown.length ? `<div class="coral-grid">${shown.map((cid) => this._coralCard(cid)).join("")}</div>`
+          : ids.length ? `<p class="muted">Nothing in this view.</p>`
+          : `<article class="empty-state"><strong>No corals yet</strong><p>Add the corals on your rock — species and colour draw them on the diagram, and the diary starts from the first check-in.</p><button class="secondary" data-action="coral-open">Add a coral</button></article>`}
+        ${lessons.length ? `
+          <div class="section-head" style="margin-top:12px;"><div><p class="eyebrow">Lessons</p><h4>What was going on each time a colony was lost</h4></div></div>
+          <div class="stack">${lessons.map((cid) => {
+            const c = corals[cid]; const st = sum.states[cid];
+            return `<div class="coral-lesson"><strong>${this._escape(this._coralName(cid))}</strong> <small class="muted">${c.statusAt ? this._escape(this._formatActivityTime(c.statusAt)) : ""}${st.score != null ? ` · last score ${st.score}` : ""}${st.latest ? ` · last look: ${this._escape(st.losses.map((l) => l.label).join(", ") || "looked fine")}` : ""}</small>${c.statusNote ? `<p class="muted">${this._escape(c.statusNote)}</p>` : ""}</div>`;
+          }).join("")}</div>` : ""}
+      </section>`;
+  }
+
+  _missionCoralsCard() {
+    const sum = this._coralsSummary();
+    const c = sum.counts;
+    const due = sum.dueChecks.length + sum.dueFeeds.length;
+    return this._missionSummaryCard(
+      "Corals",
+      c.needs ? `${c.needs} need${c.needs === 1 ? "s" : ""} you` : due ? `${due} due` : c.active ? "all fine" : "—",
+      c.needs ? sum.dueChecks.length ? `and ${sum.dueChecks.length} check-in${sum.dueChecks.length === 1 ? "" : "s"} due` : "a colony is struggling"
+        : due ? `${sum.dueChecks.length} check-in${sum.dueChecks.length === 1 ? "" : "s"}, ${sum.dueFeeds.length} feed${sum.dueFeeds.length === 1 ? "" : "s"}`
+          : c.active ? `${c.active} colon${c.active === 1 ? "y" : "ies"} accounted for` : "register your corals",
+      c.needs ? "critical" : due || c.watch ? "warning" : c.active ? "ok" : "unknown",
+      "corals",
+    );
+  }
+
+  // --- dialogs -------------------------------------------------------------------
+  _coralColourSwatches(c, picked, action, field) {
+    // The CoralWatch chart's six brightness steps in the colony's own hue.
+    const pal = this._coralPalette(c?.colour);
+    const steps = [0.18, 0.34, 0.5, 0.66, 0.82, 1];
+    return `<div class="coral-cw">${steps.map((a, i) => {
+      const n = i + 1;
+      return `<button type="button" class="coral-cw-step ${picked === n ? "selected" : ""}" data-action="${action}" data-id="${field}=${n}" title="Chart ${n}" style="background:${pal.bright};opacity:${a}"><span>${n}</span></button>`;
+    }).join("")}</div>`;
+  }
+
+  _coralTapRow(label, field, options, picked, hint = "") {
+    return `
+      <div class="coral-tap-row">
+        <div class="coral-tap-label"><strong>${this._escape(label)}</strong>${hint ? `<small class="muted">${this._escape(hint)}</small>` : ""}</div>
+        <div class="coral-taps">${options.map(([v, l]) => `<button type="button" class="secondary compact-button ${String(picked) === String(v) ? "active" : ""}" data-action="coral-checkin-pick" data-id="${field}=${this._escape(String(v))}">${this._escape(l)}</button>`).join("")}</div>
+      </div>`;
+  }
+
+  _coralCheckinDialog() {
+    const cid = this._coralCheckinOpen;
+    const c = (this._config?.livestock?.corals || {})[cid];
+    if (!c) return "";
+    const d = this._coralCheckinDraft || {};
+    const st = this._coralState(cid);
+    const gid = this._coralGroupId(c);
+    const fed = this._coralGroups()[gid].feedDays > 0 || gid === "nps";
+    const round = this._coralRound;
+    const pos = round ? `${round.indexOf(cid) + 1} of ${round.length}` : "";
+    const preview = this._coralScoreCheckin({ ...d, extension: Number.isInteger(d.extension) ? d.extension : null, colour: Number.isInteger(d.colour) ? d.colour : null }, c.baseline, gid);
+    const base = c.baseline || {};
+    const hero = d.photoUrl || c.photoUrl;
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog coral-checkin-dialog">
+          <button class="close" data-action="coral-checkin-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Check-in${pos ? ` · ${pos}` : ""}</p>
+              <div class="live-trend-title"><h2>${this._escape(this._coralName(cid))}</h2></div>
+              <p class="muted">${this._escape(st.score == null ? "First look — this becomes the colony's baseline." : `Last look ${this._escape(this._coralStateLine(cid))}. Same as last time is already filled in.`)}</p>
+            </div>
+            <span class="coral-pill ${preview.score < 60 ? "needs" : preview.score < 75 ? "watch" : "fine"}">${preview.score} · ${this._coralGrade(preview.score)}</span>
+          </div>
+          <div class="coral-checkin-photo">
+            ${hero ? `<img src="${this._escape(hero)}" alt="">` : `<div class="coral-card-glyph big">${this._coralGlyphSvg(c, 96)}</div>`}
+            <label class="coral-upload secondary compact-button">📷 ${d.photoUrl ? "Replace this photo" : "Photo for this look"}
+              <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" data-coral-upload="${this._escape(cid)}" data-checkin hidden>
+            </label>
+            ${this._coralUploadState === "uploading" ? `<small class="muted">Uploading…</small>` : this._coralUploadState ? `<small class="muted">⚠ ${this._escape(this._coralUploadState)}</small>` : `<small class="muted">Same angle, same light as last time — slow change is invisible day to day.</small>`}
+          </div>
+          ${this._coralTapRow("Polyps", "extension", [[0, "Retracted"], [1, "Partial"], [2, "Normal"], [3, "Full"]], d.extension, base.extension != null ? `Usually ${["retracted", "partial", "normal", "full"][base.extension]}.` : "")}
+          ${this._coralTapRow("Tissue", "tissue", [["intact", "Intact"], ["stalled", "Recession stopped"], ["receding", "Receding (white edge)"], ["stn", "STN"], ["rtn", "RTN"]], d.tissue || "intact", "A bright white edge means it is happening now; algae-dusted means it stopped.")}
+          <div class="coral-tap-row">
+            <div class="coral-tap-label"><strong>Colour</strong><small class="muted">CoralWatch chart 1–6${base.colour ? ` · usually ${base.colour}` : ""}. Paler than usual is the signal.</small></div>
+            ${this._coralColourSwatches(c, d.colour, "coral-checkin-pick", "colour")}
+          </div>
+          ${this._coralTapRow("Fluorescence", "fluor", [["same", "Same"], ["up", "Brighter"], ["fading", "Fading"]], d.fluor || "same", "Under the blues — fading greens and reds come before colour loss.")}
+          ${fed ? this._coralTapRow("Feeding", "feeding", [["", "Not offered"], ["took", "Took food"], ["ignored", "Ignored it"]], d.feeding || "") : ""}
+          ${this._coralTapRow("Pests", "pests", [["none", "None seen"], ["suspected", "Suspected"], ["confirmed", "Confirmed"]], d.pests || "none", "Lights-out torch inspection is the honest check.")}
+          <div class="coral-tap-row">
+            <div class="coral-tap-label"><strong>Neighbours</strong><small class="muted">Tap what applies.</small></div>
+            <div class="coral-taps">${[["stung", "Stung"], ["shaded", "Shaded"], ["nipped", "Fish nipping"]].map(([v, l]) => `<button type="button" class="secondary compact-button ${(d.neighbours || []).includes(v) ? "active" : ""}" data-action="coral-checkin-pick" data-id="neighbours=${v}">${l}</button>`).join("")}</div>
+          </div>
+          <div class="mini-grid">
+            <label>Size (mm)<input type="number" min="0" max="5000" step="1" data-checkin-field="sizeMm" value="${this._escape(String(d.sizeMm ?? ""))}" placeholder="widest point"></label>
+            <label>Note<input data-checkin-field="note" maxlength="500" value="${this._escape(d.note || "")}" placeholder="What you saw, in a line"></label>
+          </div>
+          ${preview.losses.length || preview.caps.length ? `<p class="muted coral-preview">${this._escape([...preview.caps.map((x) => x.label), ...preview.losses.map((l) => `${l.label} (−${l.points})`)].join(" · "))}</p>` : ""}
+          <div class="button-row end">
+            ${round ? `<button class="secondary compact-button" data-action="coral-checkin-skip">Skip this one</button>` : ""}
+            ${round && round.indexOf(cid) < round.length - 1 ? `<button class="primary compact-button" data-action="coral-checkin-next">Save &amp; next</button>` : `<button class="primary compact-button" data-action="coral-checkin-save">Save check-in</button>`}
+          </div>
+        </section>
+      </div>`;
+  }
+
+  _coralFeedDialog() {
+    const d = this._coralFeedDraft || {};
+    const corals = this._config?.livestock?.corals || {};
+    const sum = this._coralsSummary();
+    const groups = this._coralGroups();
+    const picked = Array.isArray(d.corals) ? d.corals : [];
+    const feeders = Object.keys(corals).filter((cid) => sum.states[cid].status === "active")
+      .sort((a, b) => (groups[sum.states[a].group].feedDays > 0 ? 0 : 1) - (groups[sum.states[b].group].feedDays > 0 ? 0 : 1) || this._coralName(a).localeCompare(this._coralName(b)));
+    const first = corals[picked[0]];
+    const shelf = first ? this._coralFoodsOnShelf(first) : [];
+    const groupNote = first ? groups[this._coralGroupId(first)].feedNote : "";
+    const mouth = first && this._livestock?.summary?.mouths?.[picked[0]]?.note;
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog coral-feed-dialog">
+          <button class="close" data-action="coral-feed-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Target feed</p>
+              <div class="live-trend-title"><h2>Who got fed</h2></div>
+              <p class="muted">A pinch is not a millilitre: the bottle is only debited when you give an amount. The feed goes on each colony's diary${picked.length ? ` — ${this._escape(picked.map((c) => this._coralName(c)).join(", "))}` : ""}.</p>
+            </div>
+          </div>
+          <div class="coral-feed-pick">${feeders.map((cid) => {
+            const st = sum.states[cid];
+            return `<button type="button" class="secondary compact-button ${picked.includes(cid) ? "active" : ""}" data-action="coral-feed-toggle" data-id="${this._escape(cid)}">${this._escape(this._coralName(cid))}${st.feedDue ? " · due" : ""}</button>`;
+          }).join("")}</div>
+          ${groupNote ? `<small class="awc-hint">${this._escape(groupNote)}${mouth ? ` ${this._escape(mouth)}` : ""}</small>` : ""}
+          <div class="mini-grid">
+            <label>From the shelf<select data-feed-field="productId">
+              <option value="">Not a shelf bottle</option>
+              ${shelf.map((p) => `<option value="${this._escape(p.id)}" ${d.productId === p.id ? "selected" : ""}>${this._escape(p.name)}${p.fits ? "" : " — too big or too fine for this mouth"}</option>`).join("")}
+            </select></label>
+            <label>Or name the food<input data-feed-field="food" maxlength="60" value="${this._escape(d.food || "")}" placeholder="mysis, LPS pellet…" ${d.productId ? "disabled" : ""}></label>
+            <label>Amount (ml, optional)<input type="number" min="0" max="1000" step="0.5" data-feed-field="ml" value="${this._escape(String(d.ml ?? ""))}" placeholder="leave blank for a pinch"></label>
+            <label>Response<select data-feed-field="response">
+              <option value="" ${!d.response ? "selected" : ""}>Could not tell</option>
+              <option value="took" ${d.response === "took" ? "selected" : ""}>Took it</option>
+              <option value="ignored" ${d.response === "ignored" ? "selected" : ""}>Ignored it</option>
+            </select></label>
+          </div>
+          <div class="button-row end"><button class="primary compact-button" data-action="coral-feed-save">Log the feed</button></div>
+        </section>
+      </div>`;
+  }
+
+  _coralDiaryDialog() {
+    const cid = this._coralDiaryOpen;
+    const c = (this._config?.livestock?.corals || {})[cid];
+    if (!c) return "";
+    if (this._livestock && !this._livestock.summary && !this._livestock.loading) setTimeout(() => this._livestockLoadSummary(), 0);
+    const st = this._coralState(cid);
+    const groups = this._coralGroups();
+    const g = groups[st.group];
+    const live = this._config.livestock || {};
+    const rows = this._coralLiveRows(live.checkins?.[cid]);
+    const allRows = (Array.isArray(live.checkins?.[cid]) ? live.checkins[cid] : []).slice().sort((a, b) => (this._coralStamp(b.at) || 0) - (this._coralStamp(a.at) || 0));
+    const feeds = (Array.isArray(live.feeds?.[cid]) ? live.feeds[cid] : []).slice().sort((a, b) => (this._coralStamp(b.at) || 0) - (this._coralStamp(a.at) || 0));
+    const speciesLib = (this._nps?.summary?.speciesLibrary) || [];
+    const mouth = this._livestock?.summary?.mouths?.[cid]?.note || "";
+    const shelf = this._coralFoodsOnShelf(c);
+    const photos = Array.isArray(c.photos) ? c.photos : [];
+    const undoable = (at) => { const t = this._coralStamp(at); return t != null && Date.now() - t < 24 * 3600000; };
+    const field = (label, name, value, attrs = "", type = "text") => `<label>${this._escape(label)}<input type="${type}" data-coral-field="${this._escape(cid)}" data-field="${name}" value="${this._escape(value == null ? "" : String(value))}" ${attrs}></label>`;
+    // is-<status> rather than the bare status word: .warning / .critical are the
+    // panel's BUTTON classes and would paint each line as a button.
+    const why = st.insights.length ? st.insights.map((i) => `<li class="is-${this._escape(i.status)}"><strong>${this._escape(i.label)}</strong> <small class="muted">${this._escape(i.detail)}</small></li>`).join("") : `<li class="is-ok"><strong>Nothing to report</strong> <small class="muted">The last look found it fine.</small></li>`;
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog coral-diary-dialog">
+          <button class="close" data-action="coral-diary-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Coral diary · ${this._escape(g.label)}</p>
+              <div class="live-trend-title"><h2>${this._escape(this._coralName(cid))}</h2></div>
+              <p class="muted">${this._escape(this._coralStateLine(cid))}${st.status !== "active" ? ` · ${this._escape(st.status)}` : ""}</p>
+            </div>
+            ${this._saveControls()}
+          </div>
+          <div class="coral-diary-top">
+            <div class="coral-diary-hero">
+              ${c.photoUrl ? `<img src="${this._escape(c.photoUrl)}" alt="">` : `<div class="coral-card-glyph big">${this._coralGlyphSvg(c, 120)}</div>`}
+              <label class="coral-upload secondary compact-button">📷 ${c.photoUrl ? "Add a photo" : "Upload a photo"}
+                <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" data-coral-upload="${this._escape(cid)}" hidden>
+              </label>
+              ${this._coralUploadState === "uploading" ? `<small class="muted">Uploading…</small>` : this._coralUploadState ? `<small class="muted">⚠ ${this._escape(this._coralUploadState)}</small>` : ""}
+              ${photos.length > 1 ? `<div class="coral-photo-strip">${photos.slice(0, 12).map((p) => `<img src="${this._escape(p.url)}" title="${this._escape(this._formatActivityTime(p.at))}${p.note ? ` · ${this._escape(p.note)}` : ""}" alt="">`).join("")}</div>` : ""}
+            </div>
+            <div class="coral-diary-why">
+              <p class="eyebrow">Why it reads ${this._escape(st.score == null ? "unchecked" : `${st.score}`)}</p>
+              <ul class="coral-why">${why}</ul>
+              <p class="muted">${this._escape(g.feedNote)}${mouth ? ` ${this._escape(mouth)}` : ""}${shelf.length ? ` On your shelf: ${this._escape(shelf.filter((p) => p.fits).map((p) => p.name).join(", ") || "nothing that fits this mouth")}.` : ""}</p>
+              ${st.status === "active" ? `<div class="button-row">
+                <button class="primary compact-button" data-action="coral-checkin-open" data-id="${this._escape(cid)}">Check in</button>
+                ${st.feedDays > 0 || c.npsId ? `<button class="secondary compact-button" data-action="coral-feed-open" data-id="${this._escape(cid)}">Log a feed</button>` : ""}
+              </div>` : ""}
+            </div>
+          </div>
+          <div class="awc-section-title"><p class="eyebrow">The colony</p></div>
+          <div class="mini-grid">
+            ${field("Name", "name", c.name, 'maxlength="48"')}
+            ${field("Taxon", "taxon", c.taxon, 'maxlength="80" placeholder="Euphyllia glabrescens ‘Gold’"')}
+            <label>Drawn as<select data-coral-field="${this._escape(cid)}" data-field="species">${this._coralSpeciesList().map((s) => `<option value="${s}" ${c.species === s ? "selected" : ""}>${this._escape(this._coralSpeciesLabel(s))}</option>`).join("")}</select></label>
+            <label>Colour<select data-coral-field="${this._escape(cid)}" data-field="colour">${["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].map((col) => `<option value="${col}" ${c.colour === col ? "selected" : ""}>${col}</option>`).join("")}</select></label>
+            ${field("In the tank since", "addedAt", c.addedAt, "", "date")}
+            ${field("Source", "source", c.source, 'maxlength="80" placeholder="shop, a frag from Dave, wild"')}
+            ${field("Paid", "paid", c.paid, 'min="0" step="0.01" placeholder="optional"', "number")}
+            <label>NPS species<select data-coral-field="${this._escape(cid)}" data-field="npsId">
+              <option value="" ${!c.npsId ? "selected" : ""}>Not an NPS animal</option>
+              ${(speciesLib.length ? speciesLib : (c.npsId ? [{ id: c.npsId, name: c.npsId }] : [])).map((sp) => `<option value="${this._escape(sp.id)}" ${c.npsId === sp.id ? "selected" : ""}>${this._escape(sp.name)}</option>`).join("")}
+            </select></label>
+            <label class="toggle-card compact-toggle"><input type="checkbox" data-coral-field="${this._escape(cid)}" data-field="dipped" ${c.dipped ? "checked" : ""}><span><strong>Dipped on arrival</strong></span></label>
+            <label class="toggle-card compact-toggle"><input type="checkbox" data-coral-field="${this._escape(cid)}" data-field="quarantined" ${c.quarantined ? "checked" : ""}><span><strong>Quarantined</strong></span></label>
+          </div>
+          <div class="awc-section-title"><p class="eyebrow">Its clocks and its baseline</p></div>
+          <div class="mini-grid">
+            ${field(`Check-in every (days) — ${st.cadenceReason === "own" ? "yours" : st.cadenceReason === "arrival" ? `new arrival, ${st.cadenceDays}` : `recommended ${g.checkDays}`}`, "checkCadenceDays", c.checkCadenceDays, 'min="1" max="365" placeholder="recommended"', "number")}
+            ${st.group !== "nps" ? field(`Feed every (days) — ${st.feedReason === "own" ? "yours" : `recommended ${g.feedDays || "none"}`}`, "feedCadenceDays", c.feedCadenceDays, 'min="0" max="365" placeholder="recommended; 0 = off"', "number") : ""}
+            ${field("Usual colour (chart 1–6)", "baselineColour", c.baseline?.colour, 'min="1" max="6" placeholder="from the first look"', "number")}
+            <label>Usual polyps<select data-coral-field="${this._escape(cid)}" data-field="baselineExtension">
+              <option value="" ${c.baseline?.extension == null ? "selected" : ""}>from the first look</option>
+              ${[[0, "retracted"], [1, "partial"], [2, "normal"], [3, "full"]].map(([v, l]) => `<option value="${v}" ${c.baseline?.extension === v ? "selected" : ""}>${l}</option>`).join("")}
+            </select></label>
+          </div>
+          <label class="coral-notes-label">Notes
+            <textarea class="coral-notes" data-coral-field="${this._escape(cid)}" data-field="notes" rows="2" maxlength="500" placeholder="Frag from Dave · moved off the sand 12 Aug · loves the extra flow…">${this._escape(c.notes || "")}</textarea>
+          </label>
+          <div class="awc-section-title"><p class="eyebrow">Check-ins${rows.length ? ` · ${rows.length}` : ""}</p></div>
+          ${allRows.length ? `<div class="coral-timeline">${allRows.slice(0, 26).map((r) => {
+            const scored = this._coralScoreCheckin(r, c.baseline, st.group);
+            const bits = [["retracted", "partial", "normal", "full"][r.extension] && `polyps ${["retracted", "partial", "normal", "full"][r.extension]}`, r.tissue && r.tissue !== "intact" ? r.tissue : "", r.colour ? `colour ${r.colour}` : "", r.fluor === "fading" ? "fluor fading" : "", r.feeding ? `food ${r.feeding}` : "", r.pests !== "none" ? `pests ${r.pests}` : "", ...(r.neighbours || []), r.sizeMm ? `${r.sizeMm} mm` : ""].filter(Boolean).join(" · ");
+            return `<div class="coral-tl-row ${r.undoneAt ? "undone" : ""}">
+              <span class="coral-pill ${scored.score < 60 ? "needs" : scored.score < 75 ? "watch" : "fine"}">${scored.score}</span>
+              <div><strong>${this._escape(this._formatActivityTime(r.at))}</strong> <small class="muted">${this._escape(bits)}</small>${r.note ? `<p class="muted">${this._escape(r.note)}</p>` : ""}</div>
+              ${r.photoUrl ? `<img src="${this._escape(r.photoUrl)}" alt="">` : ""}
+              ${!r.undoneAt && undoable(r.at) ? `<button class="secondary compact-button" data-action="coral-undo-checkin" data-id="${this._escape(cid)}|${this._escape(r.at)}">Undo</button>` : r.undoneAt ? `<small class="muted">taken back</small>` : ""}
+            </div>`;
+          }).join("")}</div>` : `<p class="muted">No check-ins yet.</p>`}
+          <div class="awc-section-title"><p class="eyebrow">Feeds${feeds.length ? ` · ${feeds.filter((f) => !f.undoneAt).length}` : ""}</p></div>
+          ${feeds.length ? `<div class="coral-timeline">${feeds.slice(0, 20).map((f) => `<div class="coral-tl-row ${f.undoneAt ? "undone" : ""}">
+              <span class="coral-pill fine">🍽</span>
+              <div><strong>${this._escape(this._formatActivityTime(f.at))}</strong> <small class="muted">${this._escape([f.food, f.ml ? `${f.ml} ml` : "", f.response].filter(Boolean).join(" · ") || "a pinch")}</small></div>
+              ${!f.undoneAt && undoable(f.at) ? `<button class="secondary compact-button" data-action="coral-undo-feed" data-id="${this._escape(cid)}|${this._escape(f.at)}">Undo</button>` : f.undoneAt ? `<small class="muted">taken back</small>` : ""}
+            </div>`).join("")}</div>` : `<p class="muted">${st.feedDays > 0 ? "No target feeds logged yet." : c.npsId ? "The NPS feed plan counts this animal's feeds." : "This group does not need target feeding."}</p>`}
+          <div class="awc-section-title"><p class="eyebrow">Status</p></div>
+          ${c.statusNote ? `<p class="muted">${this._escape(c.statusNote)}</p>` : ""}
+          <div class="mini-grid">
+            <label>Why (kept with the record)<input id="or-coral-status-note" maxlength="300" placeholder="RTN after the alk crash…"></label>
+          </div>
+          <div class="button-row">
+            ${st.status !== "active" ? `<button class="secondary compact-button" data-action="coral-status" data-id="${this._escape(cid)}=active">Back in the tank</button>` : `
+              <button class="secondary compact-button" data-action="coral-status" data-id="${this._escape(cid)}=lost">Mark lost</button>
+              <button class="secondary compact-button" data-action="coral-status" data-id="${this._escape(cid)}=fragged">Fragged out</button>
+              <button class="secondary compact-button" data-action="coral-status" data-id="${this._escape(cid)}=rehomed">Rehomed</button>`}
+            <button class="danger-text compact-button" data-action="coral-remove" data-id="${this._escape(cid)}">Delete the record</button>
+          </div>
+        </section>
+      </div>`;
+  }
+
+  _coralsSettings() {
+    const s = this._coralSettings();
+    const body = `
+      <small class="awc-hint">The corals themselves are livestock, not a setting — add, edit and retire them on the <strong>Corals</strong> tab. These are the diary's reminders: one line each in the daily maintenance digest, never a push per coral.</small>
+      <div class="mini-grid">
+        <label class="toggle-card compact-toggle"><input type="checkbox" data-coral-setting="remind" ${s.remind ? "checked" : ""}><span><strong>Check-in reminders</strong><small>Colonies due a look ride the daily digest.</small></span></label>
+        <label class="toggle-card compact-toggle"><input type="checkbox" data-coral-setting="feedRemind" ${s.feedRemind ? "checked" : ""}><span><strong>Target-feed reminders</strong><small>Feeders past their cadence ride the daily digest.</small></span></label>
+        <label title="A new arrival is looked at more often for its first weeks — acclimation, dips, pests.">New-arrival window (days)<input type="number" min="0" max="90" step="1" data-coral-setting="arrivalDays" value="${s.arrivalDays}"></label>
+        <label>New-arrival check-in every (days)<input type="number" min="1" max="14" step="1" data-coral-setting="arrivalCadenceDays" value="${s.arrivalCadenceDays}"></label>
+        <label title="Per coral. The oldest photo file is removed when a new one goes over the cap.">Photos kept per coral<input type="number" min="1" max="96" step="1" data-coral-setting="photoCap" value="${s.photoCap}"></label>
+      </div>
+      <small class="awc-hint">Recommended cadences: SPS and LPS weekly, softies and clams fortnightly, a new arrival every ${s.arrivalCadenceDays} days for ${s.arrivalDays} days; target feeds weekly for Euphyllia, every three days for the LPS that eat, every five for the meaty ones and anemones. Override any of them on the coral itself.</small>`;
+    return this._settingsPanel("corals", "Corals", "The coral diary's reminders and photo budget. The colonies live on the Corals tab.", body);
+  }
+
   // --- Reef Layer: the user's registered corals, drawn on the rockwork -----
   // Honesty rule, same as equipment: an empty registry means bare rock. Each
   // coral is a stylised colony in the scene's own vector language; species
   // gates which rock zone it may occupy, colour picks its fluorescence.
 
   _diagramCorals() {
+    // The rockwork draws the first 16 colonies still IN the tank (0.7.192:
+    // the diary keeps up to 60, and a lost coral leaves the rock).
     const raw = this._config?.livestock?.corals;
     if (!raw || typeof raw !== "object") return [];
-    return Object.entries(raw).slice(0, 16).map(([id, c]) => [id, c && typeof c === "object" ? c : {}]);
+    return Object.entries(raw)
+      .filter(([, c]) => c && typeof c === "object" && (c.status || "active") === "active")
+      .slice(0, 16).map(([id, c]) => [id, c]);
   }
 
   _coralZone(species) {
@@ -19984,8 +20878,12 @@ const rigSteps = [
       const label = c.name || this._coralSpeciesLabel(c.species);
       const added = Date.parse(c.addedAt || "");
       const isNew = Number.isFinite(added) && Date.now() - added < 48 * 3600 * 1000 && Date.now() >= added - 86400000;
+      // The diary's word on the glyph (0.7.192): a colony that needs you dims
+      // and pulses; one nobody has looked at past its cadence wears a ring.
+      const st = this._coralState(id);
+      const stateClass = st.word === "needs" ? " dg-cneeds" : st.stale || (st.checkOverdue && st.word === "unchecked") ? " dg-cstale" : "";
       parts.push(`
-        <g class="dg-coral${isNew ? " dg-cnew" : ""}" data-diag-coral="${this._escape(id)}" data-action="pulse-focus" data-id="coral:${this._escape(id)}" data-diag-drag="coral:${this._escape(id)}" role="button" tabindex="0">
+        <g class="dg-coral${isNew ? " dg-cnew" : ""}${stateClass}" data-diag-coral="${this._escape(id)}" data-action="pulse-focus" data-id="coral:${this._escape(id)}" data-diag-drag="coral:${this._escape(id)}" role="button" tabindex="0">
           <title>${this._escape(label)} — ${this._escape(this._coralSpeciesLabel(c.species))}</title>
           <rect x="${slot.rect[0]}" y="${slot.rect[1]}" width="${slot.rect[2]}" height="${slot.rect[3]}" rx="12" fill="transparent"></rect>
           ${this._diagCoralArt(c.species, slot.x, slot.y, pal, seed)}
@@ -20092,24 +20990,29 @@ const rigSteps = [
     }[this._coralZone(species)];
   }
 
-  _addCoral(name, species, colour) {
+  _addCoral(name, species, colour, extra = {}) {
     const live = this._config.livestock = this._config.livestock || {};
     const corals = live.corals = live.corals || {};
-    if (Object.keys(corals).length >= 16) return;
+    if (Object.keys(corals).length >= 60) return null;   // the diary's cap (livestock.CORALS_MAX)
     const base = this._slug(name || species || "coral") || "coral";
     let cid = base;
     let n = 2;
     while (corals[cid]) { cid = `${base}_${n}`; n += 1; }
-    corals[cid] = { name: name || "", species, colour, addedAt: new Date().toISOString().slice(0, 10) };
+    corals[cid] = { name: name || "", species, colour, addedAt: new Date().toISOString().slice(0, 10), status: "active", ...extra };
     this._setDirty(true);
     this._render();
+    return cid;
   }
 
   _removeCoral(cid) {
-    if (this._config.livestock?.corals) delete this._config.livestock.corals[cid];
+    const live = this._config.livestock || {};
+    if (live.corals) delete live.corals[cid];
+    if (live.checkins) delete live.checkins[cid];
+    if (live.feeds) delete live.feeds[cid];
     const layout = this._config.diagram?.layout;
     if (layout) delete layout[`coral:${cid}`];
     if (this._coralFocus === cid) this._coralFocus = null;
+    if (this._coralDiaryOpen === cid) this._coralDiaryOpen = null;
     this._setDirty(true);
     this._render();
   }
@@ -20145,8 +21048,9 @@ const rigSteps = [
             <input data-coral-photo="${this._escape(cid)}" value="${this._escape(c.photoUrl || "")}" placeholder="/local/corals/my-torch.jpg" maxlength="300">
           </label>
           <div class="actions">
+            <button class="secondary compact-button" data-action="coral-diary-open" data-id="${this._escape(cid)}">📔 Open the diary</button>
+            <button class="secondary compact-button" data-action="coral-checkin-open" data-id="${this._escape(cid)}">Check in</button>
             <button class="secondary compact-button" data-action="diagram-arrange">✎ Move it on the rock</button>
-            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Manage corals</button>
           </div>
         </section>
       </div>`;
@@ -20226,7 +21130,7 @@ const rigSteps = [
   // Photo upload: downscale on the client (≤1280px JPEG via canvas) so the
   // websocket payload stays tiny, then the backend stores it in the captures
   // media dir and pins the URL to the coral. No new serving infrastructure.
-  async _uploadCoralPhoto(cid, file) {
+  async _uploadCoralPhoto(cid, file, forCheckin = false) {
     try {
       this._coralUploadState = "uploading";
       this._render();
@@ -20238,9 +21142,9 @@ const rigSteps = [
       canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
       const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
       const res = await this._callWS({ type: "openreef/coral_photo_upload", coralId: cid, image: dataUrl });
-      if (res?.url && this._config.livestock?.corals?.[cid]) {
-        this._config.livestock.corals[cid].photoUrl = res.url;
-      }
+      if (res?.config) this._config = res.config;
+      else if (res?.url && this._config.livestock?.corals?.[cid]) this._config.livestock.corals[cid].photoUrl = res.url;
+      if (forCheckin && res?.url) (this._coralCheckinDraft || (this._coralCheckinDraft = {})).photoUrl = res.url;
       this._coralUploadState = "";
     } catch (err) {
       this._coralUploadState = err?.message || "Upload failed — try a smaller photo";
@@ -20262,6 +21166,7 @@ const rigSteps = [
         <span class="pulse-insight-dot big" style="background:${pal.bright}"></span>
       </header>
       <p class="pulse-focus-note">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}</p>
+      <p class="pulse-focus-note">${this._escape(this._coralStateLine(cid))}</p>
       <p class="pulse-focus-note">${this._escape(this._coralZoneText(c.species))}</p>
       ${c.notes ? `<p class="pulse-focus-note">${this._escape(String(c.notes).slice(0, 200))}</p>` : ""}`;
   }
@@ -20379,6 +21284,7 @@ const rigSteps = [
             <button class="secondary compact-button" data-action="diagram-full">⤢ Full screen</button>
             <button class="secondary compact-button" data-action="diagram-arrange">${this._diagramArranging ? "✓ Done arranging" : "✎ Arrange"}</button>
             <button class="secondary compact-button" data-action="coral-open">🪸 Reef layer</button>
+            <button class="secondary compact-button" data-action="tab" data-id="corals">📔 Corals</button>
             <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="diagram" data-scroll="or-section-diagram">Configure</button>
             ${this._pulseEnabled() ? `<button class="secondary compact-button" data-action="open-pulse">✨ Present</button>` : ""}
           </div>
@@ -23124,6 +24030,7 @@ const rigSteps = [
       cards.energy ? this._missionSummaryCard("Energy", `${mappedEnergy}/3`, "daily, weekly, monthly totals", mappedEnergy ? "ok" : "unknown", "energy") : "",
       cards.cameras ? this._missionCameraCard() : "",
       cards.maintenance ? this._missionMaintenanceCard() : "",
+      cards.corals ? this._missionCoralsCard() : "",
     ].join("");
     const activityItems = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 12);
     const activityBody = activityItems.length ? `
@@ -27367,7 +28274,7 @@ const rigSteps = [
     return [
       { id: "display", label: "Profile & display", icon: "🏠",
         sections: () => [this._profileSettings(), this._guideSettings(), this._missionSettings(), this._liveStatsSettings(),
-          this._overlaySettings(), this._pulseSettings(), this._diagramSettings()] },
+          this._overlaySettings(), this._pulseSettings(), this._diagramSettings(), this._coralsSettings()] },
       { id: "sensing", label: "Sensors & tests", icon: "🌡️",
         sections: () => [this._sensorSettings(), this._manualTestSettings(), this._coolingSettings(), this._lightingScheduleSettings()] },
       { id: "water", label: "Water", icon: "💧",
@@ -28004,7 +28911,7 @@ const rigSteps = [
         <div class="mini-grid">
           ${g.species.map((s) => `
           <label class="toggle-card compact-toggle" title="${this._escape(s.note || "")}">
-            <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${selectedSpecies.includes(s.id) ? "checked" : ""}>
+            <input type="checkbox" data-scope="nps-species" data-id="${this._escape(s.id)}" ${this._npsSelectedSpecies().includes(s.id) ? "checked" : ""}>
             <span><strong>${this._escape(s.name)}</strong><small>Difficulty ${diffDots(s.difficulty)}${Array.isArray(s.foodWords) && s.foodWords.length ? ` · ${this._escape(s.foodWords.join(", "))}` : ""}${s.particle ? ` · ${this._escape(String(s.particle))}` : ""}</small></span>
           </label>`).join("")}
         </div>`).join("")
@@ -31712,6 +32619,64 @@ ${parts.buttons}
         .coral-swatches { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
         .coral-swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; }
         .coral-swatch.selected { border-color: #f4fbff; box-shadow: 0 0 8px 1px currentColor; }
+        /* The coral diary (0.7.192) */
+        .coral-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+        .coral-card { display: flex; flex-direction: column; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 14px; overflow: hidden; background: rgba(255,255,255,0.02); }
+        .coral-card.needs { border-color: rgba(255, 107, 129, .55); }
+        .coral-card.watch { border-color: rgba(232, 192, 106, .45); }
+        .coral-card.gone { opacity: .7; }
+        .coral-card-hero { display: block; width: 100%; padding: 0; border: 0; background: rgba(0,0,0,.25); cursor: pointer; color: inherit; }
+        .coral-card-photo { display: block; width: 100%; height: 150px; object-fit: cover; }
+        .coral-card-glyph { display: flex; align-items: center; justify-content: center; height: 110px; }
+        .coral-card-glyph.big { height: auto; padding: 8px 0 4px; justify-content: flex-start; }
+        .coral-card-body { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; }
+        .coral-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+        .coral-card-head strong { display: block; }
+        .coral-card-line { margin: 0; font-size: .85rem; }
+        .coral-pill { display: inline-flex; align-items: center; white-space: nowrap; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 700; border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); }
+        .coral-pill.fine { color: #7ef29a; border-color: rgba(126, 242, 154, .4); }
+        .coral-pill.watch { color: #e8c06a; border-color: rgba(232, 192, 106, .4); }
+        .coral-pill.needs { color: #ff8b9d; border-color: rgba(255, 107, 129, .45); }
+        .coral-pill.unchecked { color: #9fb3c0; }
+        .coral-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .coral-chip { font-size: 11px; border-radius: 999px; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); color: #9fb3c0; }
+        .coral-chip.warning { color: #e8c06a; border-color: rgba(232, 192, 106, .4); }
+        .coral-chip.critical { color: #ff8b9d; border-color: rgba(255, 107, 129, .45); }
+        .coral-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+        .coral-filters .compact-button.active { border-color: var(--openreef-accent); color: #eaf6ff; font-weight: 700; }
+        .coral-calm { margin: 0; }
+        .coral-lesson { border-left: 3px solid rgba(255, 107, 129, .5); padding: 6px 10px; }
+        .coral-lesson p { margin: 4px 0 0; }
+        .coral-tap-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.06); }
+        .coral-tap-label small { display: block; }
+        .coral-taps { display: flex; flex-wrap: wrap; gap: 6px; }
+        .coral-taps .compact-button.active, .coral-feed-pick .compact-button.active { border-color: var(--openreef-accent); color: #eaf6ff; font-weight: 700; box-shadow: 0 0 0 1px var(--openreef-accent) inset; }
+        .coral-cw { display: flex; gap: 8px; }
+        .coral-cw-step { width: 38px; height: 38px; border-radius: 8px; border: 2px solid transparent; cursor: pointer; padding: 0; color: #041019; font-weight: 800; font-size: 12px; }
+        .coral-cw-step.selected { border-color: #f4fbff; box-shadow: 0 0 8px 1px rgba(255,255,255,.5); }
+        .coral-checkin-photo { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-bottom: 6px; }
+        .coral-checkin-photo img { max-width: 100%; max-height: 220px; border-radius: 12px; object-fit: cover; }
+        .coral-preview { margin: 4px 0 0; font-size: .85rem; }
+        .coral-feed-pick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+        .coral-diary-top { display: grid; grid-template-columns: minmax(180px, 1fr) 2fr; gap: 14px; margin-bottom: 10px; }
+        .coral-diary-hero img { display: block; max-width: 100%; max-height: 240px; border-radius: 12px; object-fit: cover; margin-bottom: 8px; }
+        .coral-photo-strip { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+        .coral-photo-strip img { width: 54px; height: 54px; object-fit: cover; border-radius: 8px; }
+        .coral-why { list-style: none; padding: 0; margin: 0 0 8px; display: flex; flex-direction: column; gap: 4px; }
+        .coral-why li { border-left: 3px solid rgba(255,255,255,.14); padding: 2px 8px; }
+        .coral-why li.is-critical { border-color: rgba(255, 107, 129, .6); }
+        .coral-why li.is-warning { border-color: rgba(232, 192, 106, .6); }
+        .coral-why li.is-ok { border-color: rgba(126, 242, 154, .5); }
+        .coral-why small { display: block; }
+        .coral-timeline { display: flex; flex-direction: column; gap: 6px; }
+        .coral-tl-row { display: grid; grid-template-columns: auto 1fr auto auto; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid rgba(255,255,255,0.06); }
+        .coral-tl-row p { margin: 2px 0 0; font-size: .85rem; }
+        .coral-tl-row img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; }
+        .coral-tl-row.undone { opacity: .5; text-decoration: line-through; }
+        @media (max-width: 720px) { .coral-diary-top { grid-template-columns: 1fr; } }
+        .dg-coral.dg-cneeds { opacity: .55; animation: dg-coral-worry 2.4s ease-in-out infinite; }
+        .dg-coral.dg-cstale .dg-halo { stroke: rgba(232, 192, 106, .7); stroke-width: 2; stroke-dasharray: 6 5; }
+        @keyframes dg-coral-worry { 0%, 100% { opacity: .55; } 50% { opacity: .9; } }
         .button-row.end { justify-content: flex-end; }
         .tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 10px; }
         .tab-icon { opacity: 0.85; margin-right: 2px; }

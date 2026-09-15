@@ -149,6 +149,14 @@ async function npsPanel(configOverrides = {}) {
 const noPlaceholders = (html, where) =>
   assert(!/undefined|NaN|\[object/.test(html), `${where} leaked a placeholder value`);
 
+// 0.7.192: the NPS tick-list lives in the coral diary — a ticked species is a
+// registered colony carrying npsId. Seed the registry the way the backend
+// migration would.
+function keepSpecies(panel, ids) {
+  panel._config.livestock = { corals: Object.fromEntries(ids.map((id) => [`nps_${id}`,
+    { name: id, species: "gorgonian", colour: "orange", npsId: id, status: "active", addedAt: "2026-06-01" }])) };
+}
+
 test("the tab renders the informative sections without placeholder leaks", async () => {
   const restore = freezeTime(NOW);
   try {
@@ -1798,7 +1806,7 @@ test("the hatchery stocks the shelf: live brine cards, the on-its-way coverage l
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    panel._config.nps.species = ["gorgonian_easy", "gorgonian_hard"];
+    keepSpecies(panel, ["gorgonian_easy", "gorgonian_hard"]);
     panel._nps.summary.hatchery = { enabled: true, handFeed: { defaultDoseMl: 40 }, vessels: [], state: { status: "none" },
       reservoir: {}, fridgeBottle: { remainingMl: 0 }, nextHatch: { status: "unknown" }, enrichment: { state: { status: "none" } } };
     const loadedAt = new Date(Date.parse(NOW) - 3 * 3600000).toISOString();
@@ -1904,7 +1912,7 @@ test("the species grid files the catalogue by family, and falls back flat withou
       { id: "seaapple", group: "filter", name: "Sea apple (Pseudocolochirus)", difficulty: 4, note: "" },
       { id: "mystery", name: "Ungrouped thing", difficulty: 2, note: "" },
     ];
-    panel._config.nps.species = ["gorgonian_fan"];
+    keepSpecies(panel, ["gorgonian_fan"]);
     html = panel._npsLibraryDialogBody();
     const order = ["Stony NPS corals", 'data-id="tubastraea"', "Gorgonians (non-photosynthetic)", 'data-id="gorgonian_whip"',
       'data-id="gorgonian_fan"', "Filter feeders, worms, anemones &amp; echinoderms", 'data-id="seaapple"', ">Other<", 'data-id="mystery"'];
@@ -2309,7 +2317,7 @@ test("species coverage reads each mouth: the foods, the size, who feeds it (0.7.
   const restore = freezeTime(NOW);
   try {
     const panel = await npsPanel();
-    panel._config.nps.species = ["gorgonian_easy", "dendronephthya", "rhizotrochus"];
+    keepSpecies(panel, ["gorgonian_easy", "dendronephthya", "rhizotrochus"]);
     const row = (over) => ({ id: "", name: "", difficulty: 2, foodWords: [], particle: "", mouth: { note: "" }, rhythm: "", note: "",
       status: "covered", fedBy: [], pumps: [], coming: null, cultureFeeds: [], verdict: "", ...over });
     panel._nps.summary.speciesPlan = {

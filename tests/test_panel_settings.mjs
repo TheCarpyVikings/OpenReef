@@ -14,7 +14,7 @@ import { assert, assertEqual, makePanel, runTests, test } from "./_panel_harness
 const SECTION_METHODS = ["_profileSettings", "_guideSettings", "_missionSettings", "_liveStatsSettings", "_sensorSettings",
   "_coolingSettings", "_manualTestSettings", "_maintenanceSettings", "_dosingSettings", "_awcSettings", "_mixingSettings",
   "_npsSettings", "_hatcherySettings", "_culturesSettings", "_equipmentSettings", "_cameraSettings", "_captureSettings",
-  "_timelapseSettings", "_overlaySettings", "_feedWatchSettings", "_visionSettings", "_pulseSettings", "_diagramSettings",
+  "_timelapseSettings", "_overlaySettings", "_feedWatchSettings", "_visionSettings", "_pulseSettings", "_diagramSettings", "_coralsSettings",
   "_modePreviewSettings", "_alertsSettings", "_lightingScheduleSettings", "_interlockSettings", "_energySettings",
   "_systemCheckSettings", "_backupRestoreSettings"];
 

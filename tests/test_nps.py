@@ -3178,7 +3178,7 @@ def test_library_enrichment_bottles_migrate_to_the_enrichment_category_once():
         rj=_product(name="Reef Juice (live phyto blend)", brand="Reefphyto")))
     products = out["consumables"]["products"]
     assert [products[k]["category"] for k in ("sel", "rae", "mine", "rj")] == ["enrichment", "enrichment", "other", "phyto"]
-    assert out["schemaVersion"] == integration.const.CORE_SCHEMA_VERSION == 58
+    assert out["schemaVersion"] == integration.const.CORE_SCHEMA_VERSION == 59
     kept = integration._normalise_core_config(cfg(58, sel=_product(name="Selcon", brand="American Marine", category="other")))
     assert kept["consumables"]["products"]["sel"]["category"] == "other", "a choice saved at 58 stands"
     assert integration._normalise_core_config(cfg(

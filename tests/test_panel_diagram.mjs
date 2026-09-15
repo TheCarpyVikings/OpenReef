@@ -610,7 +610,9 @@ test("bare rock until corals are registered; registered corals render by zone", 
   } };
   const panel = prep(await makePanel(cfg), ALL_ON);
   const svg = panel._pulseDiagramSvg();
-  assertEqual((svg.match(/class="dg-coral"/g) || []).length, 2, "both corals drawn");
+  // 0.7.192: the glyph carries the diary's word (dg-cneeds / dg-cstale), so
+  // match the class attribute's start, not its whole value.
+  assertEqual((svg.match(/class="dg-coral[^"]*"/g) || []).length, 2, "both corals drawn");
   const layout = panel._diagramCoralLayout("sump", panel._diagramCorals());
   assertEqual(layout["coral:stag"], "spsPeak", "SPS takes the crest");
   assertEqual(layout["coral:torchy"], "lpsL", "LPS takes mid-rock");
