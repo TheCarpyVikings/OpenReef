@@ -129,6 +129,7 @@ from .const import (
     MIXING_CIRCULATE_FOR_MAX_MIN,
     MIXING_DRAW_DESTINATIONS,
     MIXING_FILL_CAP_DEFAULT_MIN,
+    MIXING_FILL_STOPS,
     MIXING_FILTER_MAX_STAGES,
     MIXING_FILTER_RATED_MAX_L,
     MIXING_FILTER_TYPES,
@@ -1954,6 +1955,9 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         mix_contents = "rodi" if legacy_state == "heating" \
             or str(raw_batch.get("type") or "salt") == "rodi" else "salt"
     contents = str(mix_contents or "empty")
+    contents = contents if contents in MIXING_VESSEL_CONTENTS else "empty"
+    mix_est_norm = round(_awc_num(
+        mix_est, 0, 0, mix_vol if mix_vol > 0 else MIXING_VESSEL_MAX_L), 2)
     mix_cfg["vessels"] = {
         "rodi": {
             "volumeLitres": rodi_vol,
@@ -1967,9 +1971,13 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         },
         "mix": {
             "volumeLitres": mix_vol,
-            "estimatedLitres": round(_awc_num(
-                mix_est, 0, 0, mix_vol if mix_vol > 0 else MIXING_VESSEL_MAX_L), 2),
-            "contents": contents if contents in MIXING_VESSEL_CONTENTS else "empty",
+            "estimatedLitres": mix_est_norm,
+            "contents": contents,
+            # Fresh RODI standing on the old batch, still owed its salt (doc
+            # §32): server-owned, only ever on saltwater, never more than the
+            # vessel holds.
+            "freshLitres": round(_awc_num(raw_mix_v.get("freshLitres"), 0, 0, mix_est_norm), 2)
+            if contents == "salt" and mix_est_norm > 0 else 0.0,
             "levelSensorEntity": _normalise_entity_id(raw_mix_v.get("levelSensorEntity")),
         },
     }
@@ -1986,10 +1994,15 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
     raw_draw = raw_rodi.get("draw") if isinstance(raw_rodi.get("draw"), dict) else {}
     raw_cal = raw_rodi.get("calibration") if isinstance(raw_rodi.get("calibration"), dict) else {}
     draw_dest = str(raw_draw.get("destination") or "store")
+    fill_stop = str(raw_rodi.get("fillStop") or "float")
     mix_cfg["rodi"] = {
         "rateLph": round(_awc_num(raw_rodi.get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH), 2),
         "fillCapMin": int(_awc_num(raw_rodi.get("fillCapMin"),
                                    MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)),
+        # How "Fill until full" stops by default (doc §32): at the float valve
+        # (open-ended, the cap as backstop) or by the rate (a timed run of
+        # what the vessel is short). A keeper's setting, so the client's to edit.
+        "fillStop": fill_stop if fill_stop in MIXING_FILL_STOPS else "float",
         "flushSeconds": int(_awc_num(raw_rodi.get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)),
         "alertPct": int(_awc_num(raw_rodi.get("alertPct"), 80, 0, 99)),
         "externalVolumeL": round(_awc_num(raw_rodi.get("externalVolumeL"), 0, 0,
@@ -2004,6 +2017,7 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
         "draw": {
             "active": bool(raw_draw.get("active", False)),
             "litres": round(_awc_num(raw_draw.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 3),
+            "toFull": bool(raw_draw.get("toFull", False)),
             "destination": draw_dest if draw_dest in MIXING_DRAW_DESTINATIONS else "store",
             "startedAt": _awc_str(raw_draw.get("startedAt"), 40),
             "endsAt": _awc_str(raw_draw.get("endsAt"), 40),
@@ -2075,11 +2089,18 @@ def _normalise_mixing_config(config: dict[str, Any]) -> None:
             or (str(raw_batch.get("type") or "salt") == "rodi"
                 and state in ("ready", "storing")):
         state = "idle"
+    batch_litres = round(_awc_num(raw_batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 1)
+    dose_raw = raw_batch.get("doseLitres")
     mix_cfg["batch"] = {
         "state": state,
         "startedAt": _awc_str(raw_batch.get("startedAt"), 40),
         "stageAt": _awc_str(raw_batch.get("stageAt"), 40),
-        "litres": round(_awc_num(raw_batch.get("litres"), 0, 0, MIXING_VESSEL_MAX_L), 1),
+        "litres": batch_litres,
+        # The litres the run's dose was for (doc §32) — a top-up re-salt doses
+        # only the fresh RODI. A run from before the field was dosed for all
+        # of its litres; nothing stamped must never read as "no salt".
+        "doseLitres": batch_litres if dose_raw is None
+        else round(_awc_num(dose_raw, 0, 0, MIXING_VESSEL_MAX_L), 1),
         "loggedPpt": round(_awc_num(raw_batch.get("loggedPpt"), 0, 0, 100), 2),
         "testedAt": _awc_str(raw_batch.get("testedAt"), 40),
         "circulateUntil": _awc_str(raw_batch.get("circulateUntil"), 40),
@@ -7953,7 +7974,7 @@ def _mixing_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
     incoming_vessels = incoming_mix.setdefault("vessels", {})
     if isinstance(incoming_vessels, dict):
         for vessel_id, fields in (("rodi", ("estimatedLitres",)),
-                                  ("mix", ("estimatedLitres", "contents"))):
+                                  ("mix", ("estimatedLitres", "contents", "freshLitres"))):
             if isinstance(stored_vessels.get(vessel_id), dict):
                 dst = incoming_vessels.setdefault(vessel_id, {})
                 _copy_runtime_fields(stored_vessels[vessel_id], dst, fields)
@@ -17757,18 +17778,47 @@ def _mixing_close_batch(hass: HomeAssistant, config: dict[str, Any]) -> None:
     _clear_mixing_circ_timer(hass)
     _mixing_cfg(config)["batch"] = {
         "state": "idle", "startedAt": "", "stageAt": "",
-        "litres": 0, "loggedPpt": 0, "testedAt": "",
+        "litres": 0, "doseLitres": 0, "loggedPpt": 0, "testedAt": "",
         "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
     }
     _mixing_sync_reminders(config, datetime.now(timezone.utc), "gone")
 
 
+async def _async_mixing_demote_batch(
+    hass: HomeAssistant, config: dict[str, Any], context: Any
+) -> bool:
+    """Fresh RODI is about to land on a READY/STORING batch — the keeper's
+    explicit top-up (doc §32). From the first litre the batch can no longer
+    be vouched for, so the run leaves the books NOW, not at the end of a
+    three-hour fill: circulation stops (a stir burst mid-way is switched
+    off), the retest chore stands down, the logged salinity goes with the
+    run. The vessel keeps its water and its salt — contents stay 'salt', the
+    litres stay put — and the fresh litres that follow are credited to the
+    vessel's freshLitres ledger, the next dose's litres. Returns True when
+    there was a batch to demote. Caller holds the lock and saves."""
+    cfg = _mixing_cfg(config)
+    batch = cfg.get("batch") if isinstance(cfg.get("batch"), dict) else {}
+    if str(batch.get("state") or "idle") not in ("ready", "storing") \
+            or mixing_engine.mix_contents(cfg) != "salt":
+        return False
+    held = round(mixing_engine.mix_vessel_litres(cfg), 1)
+    await _async_mixing_stop_switches(hass, config, ("mixPumpA", "mixPumpB"), context)
+    _mixing_close_batch(hass, config)
+    _append_activity(
+        config, f"Mixing station: topping up the stored batch — {held:g} L of tested "
+        "saltwater goes off target; salt & mix the vessel back once the fresh water is in",
+        "control")
+    return True
+
+
 def _mixing_empty_vessel(cfg: dict[str, Any]) -> None:
-    """The mix vessel is drained: litres to zero, contents to empty."""
+    """The mix vessel is drained: litres to zero, contents to empty, no fresh
+    water owed its salt."""
     mix_v = cfg.setdefault("vessels", {}).setdefault("mix", {})
     if isinstance(mix_v, dict):
         mix_v["estimatedLitres"] = 0
         mix_v["contents"] = "empty"
+        mix_v["freshLitres"] = 0
 
 
 def _mixing_debit_batch(hass: HomeAssistant, config: dict[str, Any], litres: float,
@@ -18087,7 +18137,8 @@ def _mixing_new_water_stamp(hass: Any, config: dict[str, Any]) -> dict[str, Any]
 
 
 async def _async_mixing_enter_stage(
-    hass: HomeAssistant, config: dict[str, Any], stage: str, context: Any
+    hass: HomeAssistant, config: dict[str, Any], stage: str, context: Any,
+    new_dose: bool = True,
 ) -> None:
     """Stamp the stage and actuate what it needs. The heater is stage-gated
     (doc §11): it only ever comes ON in 'heating' — by which point the vessel
@@ -18103,10 +18154,21 @@ async def _async_mixing_enter_stage(
         await _async_mixing_set_switch(hass, config, "mixPumpA", True, context)
         await _async_mixing_set_switch(hass, config, "mixPumpB", True, context)
         mix_v = cfg.setdefault("vessels", {}).setdefault("mix", {})
+        vessel_l = round(mixing_engine.mix_vessel_litres(cfg), 1)
+        if new_dose:
+            # The dose (doc §32): the whole vessel when it held plain RODI;
+            # only the fresh litres when saltwater was standing already (a
+            # top-up re-salt — the old water keeps its own salt). Salt on hand
+            # (V3): that dose leaves the bucket. A stored batch sent back to
+            # the pumps by a retest is NOT a new dose — the correction grams
+            # are the keeper's, so new_dose=False there.
+            dose_l = (round(mixing_engine.mix_vessel_fresh_litres(cfg), 1)
+                      if str(mix_v.get("contents") or "empty") == "salt" else vessel_l)
+            batch["doseLitres"] = dose_l
+            _mixing_salt_stock_debit(config, dose_l)
+            mix_v["freshLitres"] = 0
         mix_v["contents"] = "salt"
-        batch["litres"] = round(mixing_engine.mix_vessel_litres(cfg), 1)
-        # Salt on hand (V3): the guide's dose for this batch leaves the bucket.
-        _mixing_salt_stock_debit(config, batch["litres"])
+        batch["litres"] = vessel_l
     elif stage in ("ready", "idle"):
         await _async_mixing_stop_switches(hass, config, _mixing_run_stop_roles(cfg), context)
     batch["state"] = stage
@@ -18136,9 +18198,16 @@ def _mixing_credit_mix(cfg: dict[str, Any], delta_l: float) -> None:
     vol = _awc_num(mix_v.get("volumeLitres"), 0, 0, MIXING_VESSEL_MAX_L)
     level = _awc_num(mix_v.get("estimatedLitres"), 0, 0, MIXING_VESSEL_MAX_L) + delta_l
     mix_v["estimatedLitres"] = round(max(0.0, min(level, vol if vol > 0 else level)), 2)
-    if mix_v["estimatedLitres"] > 0 and delta_l > 0 \
-            and str(mix_v.get("contents") or "empty") == "empty":
+    contents = str(mix_v.get("contents") or "empty")
+    if mix_v["estimatedLitres"] > 0 and delta_l > 0 and contents == "empty":
         mix_v["contents"] = "rodi"
+    elif delta_l > 0 and contents == "salt" \
+            and str((cfg.get("batch") or {}).get("state") or "idle") != "salting":
+        # Fresh RODI onto standing saltwater (doc §32): the vessel is owed
+        # this water's salt, and the ledger remembers how much. Not while
+        # salting — that is dilution, and the dose has already gone in.
+        fresh = _awc_num(mix_v.get("freshLitres"), 0, 0, MIXING_VESSEL_MAX_L) + delta_l
+        mix_v["freshLitres"] = round(max(0.0, min(fresh, mix_v["estimatedLitres"])), 2)
 
 
 def _mixing_add_processed(cfg: dict[str, Any], litres: float) -> None:
@@ -18262,7 +18331,9 @@ async def _async_mixing_finish_draw(
                          f"{mixing_engine.format_litres(done)} {where}", "control")
     else:
         _append_activity(config, "Mixing station: RODI run done — "
-                         f"{mixing_engine.format_litres(done)} {where}", "control")
+                         f"{mixing_engine.format_litres(done)} {where}"
+                         f"{' — full by the rate' if draw.get('toFull') else ''}",
+                         "control")
 
 
 async def _async_schedule_mixing_rodi(
@@ -18515,15 +18586,25 @@ async def websocket_mixing_start_mix(
             return
         now_iso = datetime.now(timezone.utc).isoformat()
         litres = round(mixing_engine.mix_vessel_litres(cfg), 1)
+        # A top-up re-salt (doc §32): saltwater was standing, so the dose is
+        # for the fresh litres only — stamped now so the heating stage already
+        # tells the right story; the salting edge re-reads the ledger.
+        top_up = mixing_engine.mix_contents(cfg) == "salt"
+        fresh = round(mixing_engine.mix_vessel_fresh_litres(cfg), 1)
         cfg["batch"] = {
             "state": "idle", "startedAt": now_iso, "stageAt": now_iso,
-            "litres": litres, "loggedPpt": 0, "testedAt": "",
+            "litres": litres, "doseLitres": fresh if top_up else litres,
+            "loggedPpt": 0, "testedAt": "",
             "circulateUntil": "", "nextCirculateAt": "", "lastCirculatedAt": "",
         }
         first_stage = "heating" if (cfg.get("heat") or {}).get("enabled") else "salting"
         await _async_mixing_enter_stage(hass, config, first_stage, connection.context(msg))
+        what = (f"{litres:g} L — {fresh:g} L of it fresh RODI on the old batch"
+                if top_up and fresh > 0 else
+                f"{litres:g} L of unfinished saltwater — no new salt owed, mix and test"
+                if top_up else f"{litres:g} L")
         _append_activity(
-            config, f"Mixing station: mix run started on {litres:g} L — "
+            config, f"Mixing station: mix run started on {what} — "
             f"{'heating first' if first_stage == 'heating' else 'salt goes in, pumps on'}",
             "control")
         config = await _async_save_config(hass, entry, config)
@@ -18533,6 +18614,7 @@ async def websocket_mixing_start_mix(
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/mixing_transfer",
     vol.Required("litres"): vol.All(vol.Coerce(float), vol.Range(min=0.1, max=2000)),
+    vol.Optional("topUp", default=False): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -18548,19 +18630,27 @@ async def websocket_mixing_transfer(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     litres = float(msg["litres"])
+    top_up = bool(msg.get("topUp"))
     async with _mixing_lock(hass):
         config = _config_from_entry(entry)
         cfg = _mixing_cfg(config)
-        reasons = mixing_engine.transfer_guard_reasons(cfg, litres)
+        reasons = mixing_engine.transfer_guard_reasons(cfg, litres, top_up=top_up)
         if reasons:
             connection.send_result(msg["id"], {"success": False, "reasons": reasons})
             return
+        # The keeper's top-up (doc §32): a stored batch leaves the books
+        # before the water lands; the credit below then counts as fresh.
+        if top_up:
+            await _async_mixing_demote_batch(hass, config, connection.context(msg))
+        onto_salt = mixing_engine.mix_contents(cfg) == "salt"
         _mixing_credit_rodi(cfg, -litres)
         _mixing_credit_mix(cfg, litres)
         state = str(cfg.get("batch", {}).get("state") or "idle")
+        note = (" — diluting the batch" if state == "salting"
+                else " — topping up the old batch, owed salt for the fresh litres"
+                if onto_salt else "")
         _append_activity(
-            config, f"Mixing station: {litres:g} L transferred to the vessel"
-            f"{' — diluting the batch' if state == 'salting' else ''}", "control")
+            config, f"Mixing station: {litres:g} L transferred to the vessel{note}", "control")
         config = await _async_save_config(hass, entry, config)
     _mixing_send(connection, msg, hass, config)
 
@@ -18659,7 +18749,11 @@ async def websocket_mixing_log_salinity(
             # the honest fix is re-mixing, not a stale "ready" with an asterisk.
             _clear_mixing_circ_timer(hass)
             _mixing_clear_circ_stamps(batch)
-            await _async_mixing_enter_stage(hass, config, "salting", connection.context(msg))
+            # Not a new dose: the batch was salted once already and the
+            # correction grams are the keeper's (the reply carries them) —
+            # the bucket is not debited a second full batch (doc §32).
+            await _async_mixing_enter_stage(hass, config, "salting", connection.context(msg),
+                                            new_dose=False)
             _append_activity(
                 config, f"Mixing station: retest {ppt:g} ppt out of band — back to mixing",
                 "warning")
@@ -18701,8 +18795,10 @@ async def websocket_mixing_abort(
         rodi_busy = mixing_engine.rodi_busy_reason(cfg)
         kept = f" ({rodi_busy} — left running)" if rodi_busy else ""
         if state == "heating":
+            water = ("saltwater" if mixing_engine.mix_contents(cfg) == "salt"
+                     else "RODI water")
             _append_activity(config, "Mixing station: heating stopped — the vessel "
-                             f"keeps its RODI water{kept}", "control")
+                             f"keeps its {water}{kept}", "control")
         else:
             _mixing_empty_vessel(cfg)
             _append_activity(config, "Mixing station: mix run discarded — vessel "
@@ -18788,12 +18884,20 @@ async def websocket_mixing_set_level(
         else:
             mix_v = cfg.setdefault("vessels", {}).setdefault("mix", {})
             vol = _awc_num(mix_v.get("volumeLitres"), 0, 0, MIXING_VESSEL_MAX_L)
+            before = mixing_engine.mix_vessel_litres(cfg)
             level = round(max(0.0, min(litres, vol if vol > 0 else litres)), 1)
             mix_v["estimatedLitres"] = level
             if level <= 0 and str(cfg.get("batch", {}).get("state") or "idle") == "idle":
                 _mixing_empty_vessel(cfg)
             elif level > 0 and str(mix_v.get("contents") or "empty") == "empty":
                 mix_v["contents"] = "rodi"
+            elif level > 0 and str(mix_v.get("contents") or "empty") == "salt":
+                # The keeper re-read the LEVEL, not the salt: fresh litres on
+                # the old batch ride the correction pro rata (doc §32).
+                fresh = _awc_num(mix_v.get("freshLitres"), 0, 0, MIXING_VESSEL_MAX_L)
+                if fresh > 0:
+                    scaled = fresh * level / before if before > 0 else fresh
+                    mix_v["freshLitres"] = round(max(0.0, min(scaled, level)), 2)
         _append_activity(
             config, f"Mixing station: {vessel} level corrected to {litres:g} L", "control")
         config = await _async_save_config(hass, entry, config)
@@ -18804,6 +18908,8 @@ async def websocket_mixing_set_level(
     vol.Required("type"): "openreef/mixing_rodi_draw",
     vol.Required("litres"): vol.All(vol.Coerce(float), vol.Range(min=0, max=2000)),
     vol.Optional("destination", default="store"): cv.string,
+    vol.Optional("topUp", default=False): bool,
+    vol.Optional("toFull", default=False): bool,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -18815,17 +18921,29 @@ async def websocket_mixing_rodi_draw(
     TIMED draw (rate x time is the meter, so the guards refuse without a
     rate); litres == 0 is an OPEN-ENDED fill of one of our vessels — it runs
     to the float valve, with the fill cap as the software backstop. Either
-    way the stop leg is armed by the save pass off the endsAt stamp."""
+    way the stop leg is armed by the save pass off the endsAt stamp.
+
+    Two flags (doc §32). ``toFull``: fill by the rate — the litres are the
+    vessel's own shortfall, read here under the lock (never the panel's
+    stale idea of it), run as a timed draw that stops itself; the float
+    valve, if fitted, is the backstop. ``topUp``: the keeper says fresh RODI
+    may land on the stored batch — it leaves the books before the first
+    litre and the fresh water is credited for the next dose."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     litres = float(msg["litres"])
     destination = str(msg.get("destination") or "store")
+    top_up = bool(msg.get("topUp"))
+    to_full = bool(msg.get("toFull"))
     async with _mixing_lock(hass):
         config = _config_from_entry(entry)
         cfg = _mixing_cfg(config)
-        reasons = mixing_engine.draw_guard_reasons(cfg, litres, destination)
+        if to_full:
+            litres = mixing_engine.fill_to_full_litres(cfg, destination)
+        reasons = mixing_engine.draw_guard_reasons(
+            cfg, litres, destination, top_up=top_up, to_full=to_full)
         if reasons:
             connection.send_result(msg["id"], {"success": False, "reasons": reasons})
             return
@@ -18836,6 +18954,8 @@ async def websocket_mixing_rodi_draw(
             connection.send_error(msg["id"], "booster_start_failed",
                                   f"Could not start the RODI booster: {exc}")
             return
+        if destination == "mix" and top_up:
+            await _async_mixing_demote_batch(hass, config, connection.context(msg))
         rate = _awc_num(cfg.get("rodi", {}).get("rateLph"), 0, 0, MIXING_RODI_RATE_MAX_LPH)
         flush_s = _awc_num(cfg.get("rodi", {}).get("flushSeconds"), 0, 0, MIXING_FLUSH_MAX_S)
         now = datetime.now(timezone.utc)
@@ -18848,6 +18968,7 @@ async def websocket_mixing_rodi_draw(
                                MIXING_FILL_CAP_DEFAULT_MIN, 1, MIXING_FILL_CAP_MAX_MIN)
         cfg.setdefault("rodi", {})["draw"] = {
             "active": True, "litres": round(litres, 3), "destination": destination,
+            "toFull": to_full,
             "startedAt": now.isoformat(),
             "endsAt": (now + timedelta(minutes=minutes)).isoformat(),
         }
@@ -18856,10 +18977,17 @@ async def websocket_mixing_rodi_draw(
             flush_note = f" incl. the {flush_s:g} s flush" if flush_s > 0 else ""
             eta = (f"about {minutes:.0f} min" if minutes >= 2
                    else f"about {round(minutes * 60):g} s")
-            _append_activity(
-                config, f"Mixing station: RODI run started — "
-                f"{mixing_engine.format_litres(litres)} to {where} "
-                f"({eta} at {rate:g} L/h{flush_note})", "control")
+            if to_full:
+                _append_activity(
+                    config, f"Mixing station: filling {where} by the rate — "
+                    f"{mixing_engine.format_litres(litres)} to full "
+                    f"({eta} at {rate:g} L/h{flush_note}); the float valve, if fitted, "
+                    "is the backstop", "control")
+            else:
+                _append_activity(
+                    config, f"Mixing station: RODI run started — "
+                    f"{mixing_engine.format_litres(litres)} to {where} "
+                    f"({eta} at {rate:g} L/h{flush_note})", "control")
         else:
             _append_activity(
                 config, f"Mixing station: filling {where} — the float valve is the stop, "

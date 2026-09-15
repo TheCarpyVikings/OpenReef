@@ -26,7 +26,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.186"
+INTEGRATION_VERSION = "0.7.187"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
@@ -381,6 +381,7 @@ MIXING_RODI_RATE_MAX_LPH = 500.0          # sanity ceiling on a configured RODI 
 # into the store, or an external T-off (the ATO reservoir) — plus a timed-run
 # flow calibration and the filter-litres ledger it feeds.
 MIXING_DRAW_DESTINATIONS = ("store", "mix", "external")
+MIXING_FILL_STOPS = ("float", "timed")    # how "Fill until full" stops: the float valve, or a timed run of the shortfall
 MIXING_CAL_CAP_MIN = 30                   # a calibration run into a jug is short; past this we cancel it
 MIXING_CAL_MIN_SECONDS = 60               # under a minute of PRODUCTION the rate maths is noise, not data
 MIXING_FLUSH_MAX_S = 900                  # ceiling on a unit's auto-flush (flush-to-drain before producing)

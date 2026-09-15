@@ -195,12 +195,13 @@ def test_mix_guards_want_rodi_water_and_an_idle_run():
     cfg = _cfg()
     cfg["vessels"]["mix"].update({"estimatedLitres": 40, "contents": "rodi"})
     assert mixing.mix_guard_reasons(cfg) == []
-    # A run in flight refuses; so does standing saltwater.
+    # A run in flight refuses. Standing saltwater with no run behind it does
+    # NOT (doc §32): a topped-up or unfinished batch is salted back.
     cfg["batch"]["state"] = "salting"
     assert any("already going" in r for r in mixing.mix_guard_reasons(cfg))
     cfg["batch"]["state"] = "idle"
     cfg["vessels"]["mix"]["contents"] = "salt"
-    assert any("already holds mixed saltwater" in r for r in mixing.mix_guard_reasons(cfg))
+    assert mixing.mix_guard_reasons(cfg) == []
     # A vessel still filling from the RODI unit refuses too.
     cfg["vessels"]["mix"]["contents"] = "rodi"
     cfg["rodi"] = {"draw": {"active": True, "destination": "mix",
@@ -2233,6 +2234,394 @@ def test_small_draw_runs_end_to_end_and_the_ledgers_add_it_up():
         hass, conn, {"id": 2, "litres": 0.004, "destination": "store"}))
     assert conn.results[-1].payload["success"] is False
     assert any("10 ml" in r for r in conn.results[-1].payload["reasons"])
+
+
+# ---------------------------------------------------------------- §32 top-up + fill to full (0.7.187)
+
+def test_fill_to_full_reads_the_vessel_shortfall():
+    cfg = _cfg(simulate=True, rodi={"rateLph": 9.21, "fillCapMin": 240})
+    cfg["vessels"]["mix"].update({"volumeLitres": 35, "estimatedLitres": 4.1, "contents": "salt"})
+    assert mixing.fill_to_full_litres(cfg, "mix") == 30.9
+    assert mixing.fill_to_full_litres(cfg, "store") == 10.0        # 40 of 50
+    assert mixing.fill_to_full_litres(cfg, "external") == 0.0      # no level to fill to
+    cfg["vessels"]["mix"]["volumeLitres"] = 0
+    assert mixing.fill_to_full_litres(cfg, "mix") == 0.0           # unsized
+    cfg["vessels"]["mix"].update({"volumeLitres": 35, "estimatedLitres": 60})
+    assert mixing.fill_to_full_litres(cfg, "mix") == 0.0           # over-full anchor reads full
+
+
+def test_to_full_guards_name_the_missing_piece():
+    cfg = _cfg(simulate=True, rodi={"rateLph": 9.21, "fillCapMin": 240})
+    cfg["vessels"]["mix"].update({"volumeLitres": 35, "estimatedLitres": 4.1, "contents": "rodi"})
+    room = mixing.fill_to_full_litres(cfg, "mix")
+    assert mixing.draw_guard_reasons(cfg, room, "mix", to_full=True) == []
+    # No rate: the to-full flavour of the refusal points at the float valve.
+    cfg["rodi"]["rateLph"] = 0
+    reasons = mixing.draw_guard_reasons(cfg, room, "mix", to_full=True)
+    assert any("float valve instead" in r for r in reasons), reasons
+    cfg["rodi"]["rateLph"] = 9.21
+    # A T-off has no level to fill to — and no "open-ended" reason on top.
+    reasons = mixing.draw_guard_reasons(cfg, 0, "external", to_full=True)
+    assert any("no level to fill to" in r for r in reasons), reasons
+    assert not any("open-ended" in r for r in reasons)
+    # An unsized vessel.
+    cfg["vessels"]["mix"]["volumeLitres"] = 0
+    assert any("needs to know the size" in r
+               for r in mixing.draw_guard_reasons(cfg, 0, "mix", to_full=True))
+    # Already full says so — and never trips the 10 ml floor.
+    cfg["vessels"]["mix"].update({"volumeLitres": 35, "estimatedLitres": 35})
+    reasons = mixing.draw_guard_reasons(
+        cfg, mixing.fill_to_full_litres(cfg, "mix"), "mix", to_full=True)
+    assert any("already stands full" in r for r in reasons), reasons
+    assert not any("10 ml" in r for r in reasons)
+
+
+def test_top_up_flag_lets_fresh_rodi_land_on_a_stored_batch():
+    salty = _cfg(simulate=True, rodi={"rateLph": 120, "fillCapMin": 240})
+    salty["vessels"]["mix"].update({"estimatedLitres": 30, "contents": "salt"})
+    salty["batch"]["state"] = "storing"
+    # Unflagged: still refused, and the refusal now names the way through.
+    reasons = mixing.draw_guard_reasons(salty, 5, "mix")
+    assert any("still holds mixed saltwater" in r and "top it up" in r for r in reasons), reasons
+    assert any("top it up" in r for r in mixing.transfer_guard_reasons(salty, 5))
+    # Flagged: the water may land — timed, open-ended, to full, or a transfer.
+    assert mixing.draw_guard_reasons(salty, 5, "mix", top_up=True) == []
+    assert mixing.draw_guard_reasons(salty, 0, "mix", top_up=True) == []
+    assert mixing.draw_guard_reasons(salty, 20, "mix", top_up=True, to_full=True) == []
+    assert mixing.transfer_guard_reasons(salty, 5, top_up=True) == []
+    # The flag is a no-op on plain RODI.
+    salty["vessels"]["mix"]["contents"] = "rodi"
+    salty["batch"]["state"] = "idle"
+    assert mixing.draw_guard_reasons(salty, 5, "mix", top_up=True) == []
+    # The store is never a top-up.
+    assert mixing.draw_guard_reasons(salty, 5, "store", top_up=True) == []
+
+
+def test_mix_guard_lets_standing_saltwater_be_salted_back():
+    cfg = _cfg()
+    cfg["vessels"]["mix"].update({"estimatedLitres": 35, "contents": "salt", "freshLitres": 30.9})
+    assert mixing.mix_guard_reasons(cfg) == []
+    # ...and unfinished saltwater with nothing fresh on it (no new salt owed).
+    cfg["vessels"]["mix"]["freshLitres"] = 0
+    assert mixing.mix_guard_reasons(cfg) == []
+    # An empty vessel still refuses.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 0, "contents": "empty"})
+    assert any("no RODI water yet" in r for r in mixing.mix_guard_reasons(cfg))
+
+
+def test_fresh_litres_ledger_reads_clamped_and_shows_in_levels():
+    cfg = _cfg()
+    cfg["vessels"]["mix"].update({"estimatedLitres": 20, "contents": "salt", "freshLitres": 30.9})
+    assert mixing.mix_vessel_fresh_litres(cfg) == 20.0     # never more than the vessel holds
+    assert mixing.vessel_levels(cfg)["mix"]["freshLitres"] == 20.0
+    cfg["vessels"]["mix"]["freshLitres"] = "junk"
+    assert mixing.mix_vessel_fresh_litres(cfg) == 0.0
+    assert mixing.vessel_levels(_cfg())["mix"]["freshLitres"] == 0.0
+
+
+def test_dose_guide_tells_the_topped_up_and_re_salt_stories():
+    cfg = _cfg()
+    cfg["vessels"]["mix"].update({"volumeLitres": 35, "estimatedLitres": 35,
+                                  "contents": "salt", "freshLitres": 30.9})
+    cfg["batch"] = {"state": "idle"}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    # Fresh water standing on the old batch is owed its salt — 30.9 L of it.
+    assert guide["freshLitres"] == 30.9
+    assert guide["fresh"] == mixing.salt_dose("nyos_pure", 30.9, 35)
+    assert guide["topUp"] is None                       # brim full: nothing more to add
+    # Short of full: the fresh story AND the rest-of-the-way projection stack.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 14.1, "freshLitres": 10})
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["fresh"] == mixing.salt_dose("nyos_pure", 10, 35)
+    assert guide["topUpLitres"] == 20.9
+    assert guide["topUp"] == mixing.salt_dose("nyos_pure", 20.9, 35)
+    # Stored (tested) saltwater has no fresh story — the old top-up projection only.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 14.1, "freshLitres": 0})
+    cfg["batch"] = {"state": "storing", "litres": 14.1}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["fresh"] is None and guide["topUpLitres"] == 20.9
+    # The run that follows doses only the fresh litres — and says so.
+    cfg["vessels"]["mix"].update({"estimatedLitres": 35, "freshLitres": 0})
+    cfg["batch"] = {"state": "salting", "litres": 35, "doseLitres": 30.9, "stageAt": _iso(NOW)}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["run"] == mixing.salt_dose("nyos_pure", 30.9, 35)
+    assert guide["runLitres"] == 35.0 and guide["runDoseLitres"] == 30.9
+    assert guide["runTopUp"] is True and guide["fresh"] is None and guide["topUp"] is None
+    # A re-salt with nothing fresh: no new salt, and the flag says so.
+    cfg["batch"]["doseLitres"] = 0
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["run"]["available"] is False and guide["runTopUp"] is True
+    # A run from before the field (nothing stamped) reads as a full dose.
+    cfg["batch"] = {"state": "salting", "litres": 35, "stageAt": _iso(NOW)}
+    guide = mixing.summary(cfg, NOW)["doseGuide"]
+    assert guide["run"] == mixing.salt_dose("nyos_pure", 35, 35) and guide["runTopUp"] is False
+    assert mixing.batch_state(cfg["batch"], cfg, NOW)["doseLitres"] == 35.0
+    assert mixing.batch_state({"state": "salting", "litres": 35, "doseLitres": 30.9},
+                              cfg, NOW)["doseLitres"] == 30.9
+
+
+def test_rodi_status_carries_the_fill_stop_and_the_to_full_draw():
+    cfg = _cfg(rodi={"rateLph": 9.21, "fillStop": "timed",
+                     "draw": {"active": True, "litres": 30.9, "destination": "mix", "toFull": True,
+                              "startedAt": _iso(NOW - timedelta(hours=1)),
+                              "endsAt": _iso(NOW + timedelta(hours=2, minutes=21))}})
+    status = mixing.rodi_status(cfg, NOW)
+    assert status["fillStop"] == "timed"
+    assert status["draw"]["toFull"] is True and status["draw"]["litres"] == 30.9
+    assert status["draw"]["litresDone"] == 9.21
+    plain = mixing.rodi_status(_cfg(rodi={"fillStop": "junk"}), NOW)
+    assert plain["fillStop"] == "float" and plain["draw"] is None
+
+
+def test_normalise_carries_fresh_litres_fill_stop_and_dose_litres():
+    raw = _station_cfg(rodi={"rateLph": 9.21, "fillCapMin": 240, "fillStop": "timed",
+                             "draw": {"active": True, "litres": 30.9, "destination": "mix",
+                                      "toFull": True, "startedAt": _iso(NOW), "endsAt": _iso(NOW)}})
+    raw["vessels"]["mix"].update({"volumeLitres": 35, "estimatedLitres": 20,
+                                  "contents": "salt", "freshLitres": 30.9})
+    raw["batch"] = {"state": "salting", "litres": 20, "doseLitres": 16, "stageAt": _iso(NOW)}
+    cfg = integration._normalise_core_config({"mixingStation": raw})["mixingStation"]
+    assert cfg["vessels"]["mix"]["freshLitres"] == 20.0     # clamped to the litres held
+    assert cfg["rodi"]["fillStop"] == "timed"
+    assert cfg["rodi"]["draw"]["toFull"] is True
+    assert cfg["batch"]["doseLitres"] == 16.0
+    # Idempotent: a second pass moves nothing.
+    again = integration._normalise_core_config({"mixingStation": copy.deepcopy(cfg)})["mixingStation"]
+    assert again == cfg
+    # Fresh litres mean nothing on RODI contents; junk stops fall back to float;
+    # a batch with nothing stamped was dosed for all its litres.
+    raw["vessels"]["mix"]["contents"] = "rodi"
+    raw["rodi"]["fillStop"] = "sideways"
+    del raw["batch"]["doseLitres"]
+    cfg = integration._normalise_core_config({"mixingStation": raw})["mixingStation"]
+    assert cfg["vessels"]["mix"]["freshLitres"] == 0.0
+    assert cfg["rodi"]["fillStop"] == "float"
+    assert cfg["batch"]["doseLitres"] == 20.0
+    # Defaults on a bare station: float valve, nothing owed, nothing to full.
+    bare = integration._normalise_core_config({"mixingStation": _station_cfg()})["mixingStation"]
+    assert bare["rodi"]["fillStop"] == "float" and bare["rodi"]["draw"]["toFull"] is False
+    assert bare["vessels"]["mix"]["freshLitres"] == 0.0 and bare["batch"]["doseLitres"] == 0.0
+
+
+def test_stale_save_guard_carries_the_fresh_litres():
+    stored = {"mixingStation": {"vessels": {"mix": {"estimatedLitres": 35, "contents": "salt",
+                                                    "freshLitres": 30.9, "volumeLitres": 35}}}}
+    incoming = {"mixingStation": {"vessels": {"mix": {"estimatedLitres": 4.1, "contents": "salt",
+                                                      "freshLitres": 0, "volumeLitres": 35}}}}
+    integration._mixing_preserve_runtime(stored, incoming)
+    mix_v = incoming["mixingStation"]["vessels"]["mix"]
+    assert mix_v["freshLitres"] == 30.9 and mix_v["estimatedLitres"] == 35
+    assert mix_v["volumeLitres"] == 35                       # the setting stays the client's
+
+
+def _topped_station(**rodi_extra):
+    """A 35 L vessel holding 4.1 L of tested, stored saltwater; rate known."""
+    rodi = {"rateLph": 9.21, "fillCapMin": 240}
+    rodi.update(rodi_extra)
+    return _station({
+        "rodi": rodi,
+        "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                    "mix": {"volumeLitres": 35, "estimatedLitres": 4.1, "contents": "salt",
+                            "levelSensorEntity": ""}},
+        "batch": _stored_batch(litres=4.1, loggedPpt=35.0),
+    })
+
+
+def _activity_tail(entry, n=4):
+    """The n most recent Mixing station lines, NEWEST FIRST — the activity log
+    inserts at the front, and the save pass drops a heartbeat in above them."""
+    rows = [a["message"] for a in integration._config_from_entry(entry)["activity"]
+            if str(a.get("message", "")).startswith("Mixing station")]
+    return rows[:n]
+
+
+def test_top_up_fill_by_the_rate_demotes_the_batch_and_credits_the_fresh_litres():
+    scheduler = install_scheduler(integration)
+    hass, entry = _topped_station()
+    conn = FakeConnection()
+    # Unflagged, the stored batch still refuses — with the way through named.
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 0, "destination": "mix", "toFull": True}))
+    payload = conn.results[-1].payload
+    assert payload["success"] is False
+    assert any("top it up" in r for r in payload["reasons"]), payload
+    assert _mix_state(entry)["batch"]["state"] == "storing"
+    # Flagged: the litres are the vessel's own shortfall, the batch leaves the
+    # books before the first litre, the vessel keeps its water and its salt.
+    before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 2, "litres": 0, "destination": "mix", "toFull": True, "topUp": True}))
+    payload = conn.results[-1].payload
+    assert payload["success"] is True, payload
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is True
+    assert state["rodi"]["draw"]["litres"] == 30.9 and state["rodi"]["draw"]["toFull"] is True
+    assert state["batch"]["state"] == "idle" and state["batch"]["loggedPpt"] == 0
+    assert state["vessels"]["mix"]["contents"] == "salt"
+    assert state["vessels"]["mix"]["estimatedLitres"] == 4.1
+    assert state["vessels"]["mix"]["freshLitres"] == 0        # nothing has landed yet
+    assert ("turn_on", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    log = _activity_tail(entry, 3)
+    assert any("topping up the stored batch" in m for m in log), log
+    assert any("30.9 L to full" in m and "by the rate" in m for m in log), log
+    # The reply's summary already tells the top-up story to the panel.
+    assert payload["summary"]["batch"]["status"] == "idle"
+    assert payload["summary"]["rodi"]["draw"]["toFull"] is True
+    # The AWC can no longer be vouched water from it.
+    guard = mixing.awc_guard_reason(_mix_state(entry), 2, datetime.now(timezone.utc))
+    assert guard is not None and "no ready saltwater batch" in guard["message"]
+    # The stop leg lands at the shortfall's own ETA: 30.9 L at 9.21 L/h ≈ 201 min.
+    now = datetime.now(timezone.utc)
+    stops = [r for r in scheduler.scheduled[before:]
+             if not r["cancelled"] and 195 * 60 < (r["run_at"] - now).total_seconds() < 207 * 60]
+    assert len(stops) == 1, "expected one stop leg about 201 min out"
+
+    async def _fire():
+        await stops[0]["callback"](stops[0]["run_at"])
+    run(_fire())
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is False
+    assert state["vessels"]["mix"]["estimatedLitres"] == 35.0
+    assert state["vessels"]["mix"]["freshLitres"] == 30.9
+    assert state["vessels"]["mix"]["contents"] == "salt"
+    assert "full by the rate" in _activity_tail(entry, 1)[0]
+    # The guide now tells the fresh story; the mix run doses the fresh litres only.
+    guide = mixing.summary(_mix_state(entry), datetime.now(timezone.utc))["doseGuide"]
+    assert guide["fresh"] == mixing.salt_dose("nyos_pure", 30.9, 35)
+    run(integration.websocket_mixing_salt_stock(hass, conn, {"id": 3, "action": "set", "kg": 10}))
+    run(integration.websocket_mixing_start_mix(hass, conn, {"id": 4}))
+    assert conn.results[-1].payload.get("success") is not False, conn.results[-1].payload
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "heating"            # heat is on in the fixture
+    assert state["batch"]["litres"] == 35.0 and state["batch"]["doseLitres"] == 30.9
+    assert state["vessels"]["mix"]["freshLitres"] == 30.9   # still owed until the salt goes in
+    assert any("30.9 L of it fresh RODI" in m for m in _activity_tail(entry, 2))
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 5}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "salting"
+    assert state["batch"]["doseLitres"] == 30.9
+    assert state["vessels"]["mix"]["freshLitres"] == 0       # the dose has been taken for it
+    # Salt on hand: 30.9 L × 39 g/L ≈ 1205 g left the bucket, not a full 35 L batch.
+    stock = state["saltStock"]
+    assert stock["history"][-1]["note"] == "salted 30.9 L", stock["history"][-1]
+    assert abs(stock["kg"] - (10.0 - 1.205)) < 0.01, stock
+    guide = mixing.summary(state, datetime.now(timezone.utc))["doseGuide"]
+    assert guide["runTopUp"] is True and guide["runDoseLitres"] == 30.9
+    # Tested at target: a stored batch again, nothing fresh outstanding.
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 6, "ppt": 35.0}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "ready" and state["vessels"]["mix"]["freshLitres"] == 0
+    assert mixing.awc_guard_reason(state, 20, datetime.now(timezone.utc)) is None
+
+
+def test_top_up_by_the_float_valve_credits_what_the_rate_says_landed():
+    scheduler = install_scheduler(integration)
+    hass, entry = _topped_station()
+    conn = FakeConnection()
+    run(integration.websocket_mixing_rodi_draw(
+        hass, conn, {"id": 1, "litres": 0, "destination": "mix", "topUp": True}))
+    assert conn.results[-1].payload["success"] is True, conn.results[-1].payload
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is True and state["rodi"]["draw"]["litres"] == 0
+    assert state["rodi"]["draw"]["toFull"] is False
+    assert state["batch"]["state"] == "idle"
+    # Keeper says done straight away: with a rate, the credit is rate × time
+    # (≈ 0 here) — never a claimed "full" — so the fresh ledger stays honest.
+    run(integration.websocket_mixing_rodi_stop(hass, conn, {"id": 2}))
+    state = _mix_state(entry)
+    assert state["rodi"]["draw"]["active"] is False
+    assert state["vessels"]["mix"]["estimatedLitres"] == 4.1
+    assert state["vessels"]["mix"]["freshLitres"] == 0
+    # ...and the vessel is still mixable (a re-salt with nothing owed), never stuck.
+    assert mixing.mix_guard_reasons(state) == []
+    assert scheduler is not None
+
+
+def test_transfer_top_up_demotes_and_credits_fresh_litres():
+    install_scheduler(integration)
+    hass, entry = _topped_station()
+    conn = FakeConnection()
+    run(integration.websocket_mixing_transfer(hass, conn, {"id": 1, "litres": 10}))
+    assert conn.results[-1].payload["success"] is False
+    assert _mix_state(entry)["batch"]["state"] == "storing"
+    run(integration.websocket_mixing_transfer(hass, conn, {"id": 2, "litres": 10, "topUp": True}))
+    assert conn.results[-1].payload["success"] is True, conn.results[-1].payload
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "idle"
+    assert state["vessels"]["mix"]["estimatedLitres"] == 14.1
+    assert state["vessels"]["mix"]["freshLitres"] == 10.0
+    assert state["vessels"]["mix"]["contents"] == "salt"
+    assert state["vessels"]["rodi"]["estimatedLitres"] == 30.0
+    assert "topping up the old batch" in _activity_tail(entry, 1)[0]
+    # A second top-up onto the (now idle) topped-up vessel simply adds up.
+    run(integration.websocket_mixing_transfer(hass, conn, {"id": 3, "litres": 5, "topUp": True}))
+    assert _mix_state(entry)["vessels"]["mix"]["freshLitres"] == 15.0
+    # Dilution while salting never counts as fresh — the dose has gone in.
+    hass2, entry2 = _station({
+        "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                    "mix": {"volumeLitres": 50, "estimatedLitres": 40, "contents": "salt",
+                            "levelSensorEntity": ""}},
+        "batch": {"state": "salting", "type": "salt", "litres": 40, "stageAt": _iso(NOW)}})
+    run(integration.websocket_mixing_transfer(hass2, FakeConnection(), {"id": 1, "litres": 5}))
+    assert _mix_state(entry2)["vessels"]["mix"]["freshLitres"] == 0
+    assert _mix_state(entry2)["vessels"]["mix"]["estimatedLitres"] == 45.0
+
+
+def test_retest_out_of_band_remixes_without_a_second_dose():
+    install_scheduler(integration)
+    hass, entry = _station({
+        "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                    "mix": {"volumeLitres": 50, "estimatedLitres": 40, "contents": "salt",
+                            "levelSensorEntity": ""}},
+        "batch": _stored_batch(loggedPpt=35.0),
+        "saltStock": {"kg": 10.0, "bucketKg": 0, "updatedAt": _iso(NOW), "history": []}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_log_salinity(hass, conn, {"id": 1, "ppt": 33.0}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "salting"
+    assert state["saltStock"]["kg"] == 10.0, "a re-mix must not debit a second full batch"
+    assert not any("salted" in h["note"] for h in state["saltStock"]["history"])
+    assert state["batch"]["doseLitres"] == 40.0          # the original dose, on record
+    # The reply still carries the correction grams — the keeper's own dose.
+    assert conn.results[-1].payload["correction"]["status"] == "low"
+
+
+def test_level_correction_scales_the_fresh_litres_pro_rata():
+    install_scheduler(integration)
+    hass, entry = _station({
+        "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                    "mix": {"volumeLitres": 35, "estimatedLitres": 35, "contents": "salt",
+                            "freshLitres": 30.9, "levelSensorEntity": ""}}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_set_level(hass, conn, {"id": 1, "vessel": "mix", "litres": 17.5}))
+    assert _mix_state(entry)["vessels"]["mix"]["freshLitres"] == 15.45
+    run(integration.websocket_mixing_set_level(hass, conn, {"id": 2, "vessel": "mix", "litres": 0}))
+    mix_v = _mix_state(entry)["vessels"]["mix"]
+    assert mix_v["freshLitres"] == 0 and mix_v["contents"] == "empty"
+
+
+def test_stopping_heat_on_a_top_up_run_keeps_the_fresh_litres():
+    install_scheduler(integration)
+    hass, entry = _station({
+        "vessels": {"rodi": {"volumeLitres": 50, "estimatedLitres": 40, "levelSensorEntity": ""},
+                    "mix": {"volumeLitres": 35, "estimatedLitres": 35, "contents": "salt",
+                            "freshLitres": 30.9, "levelSensorEntity": ""}}})
+    conn = FakeConnection()
+    run(integration.websocket_mixing_start_mix(hass, conn, {"id": 1}))
+    assert _mix_state(entry)["batch"]["state"] == "heating"
+    run(integration.websocket_mixing_abort(hass, conn, {"id": 2}))
+    state = _mix_state(entry)
+    assert state["batch"]["state"] == "idle" and state["batch"]["doseLitres"] == 0
+    assert state["vessels"]["mix"]["contents"] == "salt"
+    assert state["vessels"]["mix"]["freshLitres"] == 30.9
+    assert "keeps its saltwater" in _activity_tail(entry, 1)[0]
+    # Discarding from salting drains everything, fresh ledger included.
+    run(integration.websocket_mixing_start_mix(hass, conn, {"id": 3}))
+    run(integration.websocket_mixing_advance(hass, conn, {"id": 4}))
+    assert _mix_state(entry)["vessels"]["mix"]["freshLitres"] == 0    # dosed
+    run(integration.websocket_mixing_abort(hass, conn, {"id": 5}))
+    mix_v = _mix_state(entry)["vessels"]["mix"]
+    assert mix_v["contents"] == "empty" and mix_v["estimatedLitres"] == 0 and mix_v["freshLitres"] == 0
 
 
 if __name__ == "__main__":

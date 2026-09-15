@@ -1750,15 +1750,27 @@ class OpenReefPanel extends HTMLElement {
       if (action === "mixing-add-retest-reminder") this._mixingSeedRetestReminder();
       if (action === "mixing-rodi-draw") {
         const litres = Number(this.shadowRoot.querySelector("[data-mixing-draw-litres]")?.value) || 0;
-        const destination = this.shadowRoot.querySelector("[data-mixing-draw-dest]")?.value || "store";
-        if (litres >= 0.01) this._mixingAction({ type: "openreef/mixing_rodi_draw", litres, destination });
+        const destination = this._mixingDrawDestination();
+        // topUp: the card has said out loud that this lands on the vessel's
+        // standing saltwater (doc §32) — the backend refuses it unflagged.
+        if (litres >= 0.01) this._mixingAction({ type: "openreef/mixing_rodi_draw", litres, destination, topUp: this._mixingDrawIsTopUp(destination) });
         else if (litres > 0) { this._mixingMessage = "Timed draws start at 10 ml (0.01 L)."; this._render(); }
         else { this._mixingMessage = "Enter how much RODI to run — litres or millilitres."; this._render(); }
       }
       if (action === "mixing-rodi-fill") {
-        // Open-ended fill: litres 0 means "to the float valve".
-        const destination = this.shadowRoot.querySelector("[data-mixing-draw-dest]")?.value || "store";
-        this._mixingAction({ type: "openreef/mixing_rodi_draw", litres: 0, destination });
+        // Fill until full: litres 0 is the open-ended shape (to the float
+        // valve, fill cap as backstop). With the stop set to the rate, toFull
+        // asks the backend for the vessel's OWN shortfall as a timed draw —
+        // the panel never sends its possibly-stale idea of the litres.
+        const destination = this._mixingDrawDestination();
+        this._mixingAction({ type: "openreef/mixing_rodi_draw", litres: 0, destination,
+          toFull: this._mixingFillStopMode() === "timed", topUp: this._mixingDrawIsTopUp(destination) });
+      }
+      if (action === "mixing-transfer-topup") {
+        // The gravity transfer as a top-up (doc §32): the card said the batch goes off target.
+        const moved = Number(this.shadowRoot.querySelector("[data-mixing-transfer]")?.value) || 0;
+        if (moved > 0) this._mixingAction({ type: "openreef/mixing_transfer", litres: moved, topUp: true });
+        else { this._mixingMessage = "Enter how many litres you moved across."; this._render(); }
       }
       if (action === "mixing-rodi-stop") this._mixingAction({ type: "openreef/mixing_rodi_stop" });
       // The calibration ceremony: prep is pure panel state — NOTHING runs
@@ -2036,6 +2048,17 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.action === "feed-seek") { this._feedSeek(Number(target.value)); return; }
       if (target.dataset.action === "timelapse-speed") { this._timelapseSetSpeed(Number(target.value)); return; }
 
+      if (target.dataset.mixingDrawDest !== undefined || target.dataset.mixingFillStop !== undefined) {
+        // The destination and the fill stop are remembered (a summary poll
+        // used to snap the select back to the store — and the fill went to
+        // the wrong vessel) and the card re-paints: the fill buttons change
+        // their words with them — litres to full, a top-up onto the batch.
+        if (event.type !== "change") return;
+        if (target.dataset.mixingDrawDest !== undefined) this._mixingDrawDest = String(target.value || "");
+        else this._mixingFillStop = target.value === "timed" ? "timed" : "float";
+        this._render();
+        return;
+      }
       if (target.dataset.mixingDrawLitres !== undefined || target.dataset.mixingDrawMl !== undefined) {
         // Litres and millilitres are one number: typing in either box
         // patches the other in place (never a render — typing must not fight it).
@@ -3450,6 +3473,48 @@ class OpenReefPanel extends HTMLElement {
     if (raw === "" || raw == null || !Number.isFinite(v) || v < 0) return null;
     const ml = unit === "ml" ? Math.round(v) : Math.round(v * 1000);
     return { litres: ml / 1000, ml };
+  }
+
+  // Minutes for a sentence: "under a minute", "about 45 min", "about 3 h 21 min".
+  _mixingEtaText(minutes) {
+    const m = Number(minutes);
+    if (!Number.isFinite(m) || m < 0) return "";
+    if (m < 1) return "under a minute";
+    const whole = Math.round(m);
+    if (whole < 60) return `about ${whole} min`;
+    const h = Math.floor(whole / 60);
+    const rest = whole % 60;
+    return rest ? `about ${h} h ${rest} min` : `about ${h} h`;
+  }
+
+  // The draw destination: the live select first, then the remembered pick,
+  // then the layout's default. Remembered so a summary poll can never snap
+  // it back to the store behind the keeper's back.
+  _mixingDrawDestination() {
+    const live = this.shadowRoot?.querySelector?.("[data-mixing-draw-dest]")?.value;
+    if (live) return live;
+    if (this._mixingDrawDest) return this._mixingDrawDest;
+    return (this._mixingCfg().layout || "dual") === "single" ? "mix" : "store";
+  }
+
+  // Whether a draw to the vessel lands on standing saltwater outside the
+  // dilution window — the top-up (doc §32). The card says so in words and
+  // the buttons carry the flag; unflagged, the backend still refuses.
+  _mixingDrawIsTopUp(destination) {
+    if (destination !== "mix") return false;
+    const sum = this._mixingSummary;
+    const cfg = this._mixingCfg();
+    const status = sum?.batch?.status || cfg.batch?.state || "idle";
+    const contents = sum?.batch?.contents || sum?.levels?.mix?.contents || cfg.vessels?.mix?.contents || "empty";
+    const litres = Number(sum?.levels?.mix?.litres ?? cfg.vessels?.mix?.estimatedLitres) || 0;
+    return contents === "salt" && litres > 0 && status !== "salting";
+  }
+
+  // How "Fill until full" stops: the card's own pick for this fill, else the
+  // setting (rodi.fillStop) — float valve, or a timed run of the shortfall.
+  _mixingFillStopMode() {
+    if (this._mixingFillStop === "timed" || this._mixingFillStop === "float") return this._mixingFillStop;
+    return (this._mixingCfg().rodi || {}).fillStop === "timed" ? "timed" : "float";
   }
 
   // Litres for a sentence: whole millilitres under a litre (57 ml), litres
@@ -14102,6 +14167,12 @@ const rigSteps = [
         if (state === "idle" && (mixV.contents || "empty") === "rodi" && left > 0) {
           return this._hubCard(id, label, `${this._format(left, 1)} L RODI`,
             "in the vessel, ready to mix", "ok");
+        }
+        if (state === "idle" && (mixV.contents || "empty") === "salt" && left > 0) {
+          // Topped up (doc §32) or unfinished: saltwater with no run behind it.
+          const fresh = Math.max(0, Number(mixV.freshLitres) || 0);
+          return this._hubCard(id, label, `${this._format(left, 1)} L salt`,
+            fresh > 0 ? "topped up — salt & mix it back" : "saltwater standing — mix or discard", "warning");
         }
         return this._hubCard(id, label, this._mixingStatusLabel(state),
           state === "idle" ? "fill, transfer, mix — each on its own clock" : "a mix run is on the go", "ok");
@@ -26214,16 +26285,31 @@ const rigSteps = [
     let doseBody;
     if (guide && guide.full?.available) {
       const lines = [`<p class="muted"><strong>Fresh full batch:</strong> ${this._format(guide.fullLitres, 0)} L from empty needs roughly <strong>${this._format(guide.full.grams, 0)} g</strong> (${this._format(guide.full.gPerL, 1)} g/L).</p>`];
+      const running = status === "heating" || status === "salting";
       if (guide.run?.available) {
-        lines.push(`<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong>.</p>`);
-      } else if (guide.topUp?.available) {
-        lines.push(`<p class="muted"><strong>Top back up to full:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L of saltwater — adding ${this._format(guide.topUpLitres, 0)} L of fresh RODI needs roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong> more salt. The water already standing keeps its own.</p>`);
-      } else if (guide.standingRodi?.available) {
-        lines.push(`<p class="muted"><strong>Salting what's on hand:</strong> the ${this._format(guide.heldLitres, 0)} L of RODI standing in the vessel needs roughly <strong>${this._format(guide.standingRodi.grams, 0)} g</strong>.</p>`);
+        // A top-up re-salt (doc §32) dosed only the fresh litres — say which.
+        lines.push(guide.runTopUp
+          ? `<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong> — the salt for the ${this._format(guide.runDoseLitres, 0)} L of fresh RODI topped up; the water already standing kept its own.</p>`
+          : `<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now took roughly <strong>${this._format(guide.run.grams, 0)} g</strong>.</p>`);
+      } else if (running && guide.runTopUp && Number(guide.runLitres) > 0) {
+        lines.push(`<p class="muted"><strong>This run:</strong> the ${this._format(guide.runLitres, 0)} L mixing now needed no new salt — it already carried its own; test it once the window is done.</p>`);
+      } else {
+        // Fresh RODI already on the old batch is owed its salt BEFORE any
+        // further top-up is planned (doc §32) — the two lines stack.
+        if (guide.fresh?.available) {
+          lines.push(`<p class="muted"><strong>Salt the top-up:</strong> ${this._format(guide.freshLitres, 0)} L of fresh RODI has gone onto the standing batch — Salt &amp; mix brings the vessel back to target with roughly <strong>${this._format(guide.fresh.grams, 0)} g</strong>.</p>`);
+        }
+        if (guide.topUp?.available) {
+          lines.push(guide.fresh?.available
+            ? `<p class="muted"><strong>Top the rest up:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L — adding the last ${this._format(guide.topUpLitres, 0)} L of fresh RODI would need roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong> more.</p>`
+            : `<p class="muted"><strong>Top back up to full:</strong> the vessel holds ${this._format(guide.heldLitres, 0)} L of saltwater — adding ${this._format(guide.topUpLitres, 0)} L of fresh RODI needs roughly <strong>${this._format(guide.topUp.grams, 0)} g</strong> more salt. The water already standing keeps its own.</p>`);
+        } else if (guide.standingRodi?.available) {
+          lines.push(`<p class="muted"><strong>Salting what's on hand:</strong> the ${this._format(guide.heldLitres, 0)} L of RODI standing in the vessel needs roughly <strong>${this._format(guide.standingRodi.grams, 0)} g</strong>.</p>`);
+        }
       }
       // The what-if row: standing saltwater + any litres the keeper fancies
       // adding — grams computed live off the engine's own g/L as they type.
-      if (!guide.run?.available && contents === "salt") {
+      if (!running && contents === "salt") {
         const whatIfL = Math.max(0, Number(this._mixingDoseWhatIfL ?? 10) || 0);
         const free = Math.max(0, (Number(guide.fullLitres) || 0) - (Number(guide.heldLitres) || 0));
         lines.push(`
@@ -26282,7 +26368,7 @@ const rigSteps = [
       ${head}${notices}
       ${this._mixingHeroCards(mix, batch, levels, rodi, status)}
       ${diagramCard}
-      ${this._mixingRodiCard(mix, rodi)}
+      ${this._mixingRodiCard(mix, rodi, batch, levels)}
       ${this._mixingTransferCard(mix, status, contents, vesselL, levels)}
       ${this._mixingVesselCard(mix, sum, batch, levels, status)}
       ${this._mixingFilterCard(rodi)}
@@ -26370,8 +26456,12 @@ const rigSteps = [
       vesselDetail = "Ready to mix whenever you are — it keeps";
       vesselStatus = "ok";
     } else if (status === "idle" && contents === "salt" && vesselL > 0) {
+      // Topped up (doc §32): fresh RODI on the old batch, owed its salt.
+      const fresh = Number(levels?.mix?.freshLitres) || 0;
       vesselValue = `${this._format(vesselL, 1)} L salt`;
-      vesselDetail = "Unfinished saltwater standing — mix or discard";
+      vesselDetail = fresh > 0
+        ? `Topped up with ${this._format(fresh, 1)} L of fresh RODI — salt & mix it back`
+        : "Unfinished saltwater standing — mix or discard";
       vesselStatus = "warning";
     } else if (status === "heating") {
       vesselValue = "Heating";
@@ -26432,6 +26522,20 @@ const rigSteps = [
             <input type="number" min="1" step="1" data-mixing-transfer placeholder="${this._format(Number(levels?.rodi?.litres) || 0, 0)}"></label>
           <div style="display:flex;align-items:flex-end;"><button class="primary" data-action="mixing-transfer" ${disabled}>Log transfer →</button></div>
         </div>`;
+    } else if (contents === "salt" && vesselL > 0 && ["idle", "ready", "storing"].includes(status)) {
+      // The transfer as a TOP-UP (doc §32): fresh RODI onto the standing
+      // batch, said out loud — the batch goes off target and Salt & mix
+      // doses the fresh litres afterwards. Its own action, so the plain
+      // transfer never lands on saltwater by accident.
+      body = `
+        <p class="muted">${status === "idle"
+          ? `${this._format(vesselL, 1)} L of saltwater stands in the vessel — a transfer tops it up with fresh RODI, and Salt &amp; mix doses the fresh litres afterwards (the dose guide has the grams).`
+          : `The vessel holds ${this._format(vesselL, 1)} L of tested saltwater — a transfer tops it up with fresh RODI: the batch goes off target and closes, and Salt &amp; mix brings the whole vessel back (the dose guide has the grams).`}</p>
+        <div class="mini-grid">
+          <label>Litres transferred from the store
+            <input type="number" min="1" step="1" data-mixing-transfer placeholder="${this._format(Number(levels?.rodi?.litres) || 0, 0)}"></label>
+          <div style="display:flex;align-items:flex-end;"><button class="secondary" data-action="mixing-transfer-topup" ${disabled}>Top up →</button></div>
+        </div>`;
     } else {
       const why = status === "heating"
         ? `the vessel is warming ${this._format(vesselL, 1)} L for a batch`
@@ -26470,10 +26574,16 @@ const rigSteps = [
           </span>`).join("")}
       </div>`;
 
+    const fresh = Number(levels?.mix?.freshLitres) || 0;
     const statusDetail = status === "idle"
       ? (contents === "rodi" && vesselL > 0
         ? `${this._format(vesselL, 1)} L of RODI water in the vessel — mix whenever you're ready. It keeps.`
-        : "The vessel stands empty. Fill, transfer and mix each run on their own — nothing here forces the next step.")
+        : contents === "salt" && vesselL > 0
+          ? (fresh > 0
+            // Topped up (doc §32): the old batch plus fresh RODI, owed its salt.
+            ? `${this._format(vesselL, 1)} L in the vessel — ${this._format(fresh, 1)} L of it fresh RODI on the old batch. Salt & mix brings the whole vessel back to target; the dose guide has the grams for the fresh water.`
+            : `${this._format(vesselL, 1)} L of saltwater standing with no tested batch behind it — salt & mix brings it back to target (test it once the window is done), or discard it.`)
+          : "The vessel stands empty. Fill, transfer and mix each run on their own — nothing here forces the next step.")
       : status === "heating"
         ? `Warming ${this._format(vesselL, 1)} L of RODI to temperature — the salt waits until the water is ready.`
         : status === "salting"
@@ -26500,10 +26610,12 @@ const rigSteps = [
     const abortBtn = `<button class="danger-text" data-action="mixing-abort" ${disabled}>${status === "heating" ? "Stop heating" : "Discard batch"}</button>`;
     let controls = "";
     if (status === "idle") {
-      const canMix = contents === "rodi" && vesselL > 0;
+      // Plain RODI mixes; standing saltwater with no run behind it (a top-up,
+      // or an unfinished batch) is salted BACK — the same run, a smaller dose.
+      const canMix = (contents === "rodi" || contents === "salt") && vesselL > 0;
       controls = `
         <div class="button-row">
-          ${canMix ? `<button class="primary" data-action="mixing-start" ${disabled}>Start mixing ${this._format(vesselL, 1)} L</button>` : ""}
+          ${canMix ? `<button class="primary" data-action="mixing-start" ${disabled}>${contents === "salt" ? "Salt & mix" : "Start mixing"} ${this._format(vesselL, 1)} L</button>` : ""}
           ${contents === "salt" && vesselL > 0 ? abortBtn : ""}
         </div>
         ${canMix ? "" : `<small class="awc-hint">${dual
@@ -26561,7 +26673,9 @@ const rigSteps = [
     return `
       <article class="panel stack" id="or-mixing-vessel">
         <div class="section-head">
-          <div><p class="eyebrow">Salt &amp; mix</p><h3>${this._escape(status === "idle" && contents === "rodi" && vesselL > 0 ? "RODI water on hand" : this._mixingStatusLabel(status))}</h3></div>
+          <div><p class="eyebrow">Salt &amp; mix</p><h3>${this._escape(status === "idle" && contents === "rodi" && vesselL > 0 ? "RODI water on hand"
+            : status === "idle" && contents === "salt" && vesselL > 0 ? (fresh > 0 ? "Topped up — salt it back" : "Saltwater standing")
+            : this._mixingStatusLabel(status))}</h3></div>
         </div>
         ${rail}
         <p class="muted">${this._escape(statusDetail)}</p>
@@ -26635,7 +26749,7 @@ const rigSteps = [
   // the flow rate from a timed run. Litres are metered by rate x time, so an
   // unknown rate says so instead of guessing. The filter train lives on its
   // own card below — this one is for running water, that one for unit health.
-  _mixingRodiCard(mix, rodi) {
+  _mixingRodiCard(mix, rodi, batch, levels) {
     const dual = (mix.layout || "dual") !== "single";
     const disabled = this._busy ? "disabled" : "";
     const rate = Number(rodi?.rateLph) || 0;
@@ -26649,7 +26763,7 @@ const rigSteps = [
         <div class="button-row"><button class="primary" data-action="mixing-rodi-stop" ${disabled}>Fill done — stop</button></div>`
         : `
         <p class="muted"><strong>${this._formatLitres(d.litresDone)} of ${this._formatLitres(d.litres)}</strong>
-          → ${where}${d.minutesLeft != null ? ` · ${d.minutesLeft < 1 ? "under a minute" : `about ${this._format(d.minutesLeft, 0)} min`} left` : ""}.</p>
+          → ${where}${d.toFull ? " — filling to full by the rate, it stops itself" : ""}${d.minutesLeft != null ? ` · ${d.minutesLeft < 1 ? "under a minute" : `about ${this._format(d.minutesLeft, 0)} min`} left` : ""}.</p>
         <div class="button-row"><button class="danger-text" data-action="mixing-rodi-stop" ${disabled}>Stop draw</button></div>`;
     } else if (rodi?.calibration) {
       const cal = rodi.calibration;
@@ -26702,6 +26816,41 @@ const rigSteps = [
       // The draw size survives a re-render (summary polls) — the two boxes
       // are one number in two units, kept in step by _mixingDrawSync.
       const drawL = Number.isFinite(this._mixingDrawL) && this._mixingDrawL > 0 ? this._mixingDrawL : 10;
+      // Where the water goes decides what the fill buttons say (doc §32):
+      // the litres the vessel is short, and whether this is a TOP-UP onto
+      // standing saltwater — an explicit act, never an accident.
+      const dest = this._mixingDrawDestination();
+      const fillStop = this._mixingFillStopMode();
+      const topUp = this._mixingDrawIsTopUp(dest);
+      const vesselName = dest === "store" ? "the RODI store" : dest === "mix" ? (dual ? "the mix vessel" : "the vessel") : "the T-off";
+      const lv = dest === "store" ? levels?.rodi : dest === "mix" ? levels?.mix : null;
+      const room = lv && Number(lv.volumeLitres) > 0
+        ? Math.max(0, Number(lv.volumeLitres) - (Number(lv.litres) || 0)) : null;
+      const flushS = Number(rodi?.flushSeconds) || 0;
+      const roomMin = room != null && rate > 0 ? flushS / 60 + room / rate * 60 : null;
+      const roomText = room != null ? `${this._format(room, 1)} L` : "";
+      const fillWord = topUp ? "Top up" : "Fill";
+      const fillBtn = fillStop === "timed" && room != null && room >= 0.01
+        ? `${fillWord} ${roomText} to full` : `${fillWord} until full`;
+      const held = Number(lv?.litres) || 0;
+      const batchStatus = batch?.status || "idle";
+      const topUpNote = topUp ? `
+        <p class="muted" data-mixing-topup-note><strong>Topping up the ${batchStatus === "ready" || batchStatus === "storing" ? "stored batch" : "standing saltwater"}.</strong> ${batchStatus === "ready" || batchStatus === "storing"
+          ? `The vessel holds ${this._format(held, 1)} L of tested saltwater — fresh RODI on top takes it off target, so the batch closes the moment the water starts, and Salt &amp; mix brings the whole vessel back (the dose guide has the grams).`
+          : `Fresh RODI lands on the ${this._format(held, 1)} L already in the vessel and is owed its salt — Salt &amp; mix doses the fresh litres afterwards (the dose guide has the grams).`}</p>` : "";
+      let fillHint;
+      if (fillStop === "timed") {
+        fillHint = room == null
+          ? `Fill to full by the rate needs a sized vessel — ${dest === "external" ? "the T-off has no level to fill to; run the litres instead" : "set its volume in settings"}.`
+          : room < 0.01
+            ? `${vesselName[0].toUpperCase()}${vesselName.slice(1)} already stands full — correct the level if it isn't.`
+            : rate > 0
+              ? `Fill to full runs the calibrated rate for what ${vesselName} is short — ${roomText}, ${this._mixingEtaText(roomMin)} at ${Number(rate)} L/h — and stops itself; a float valve, if fitted, is the backstop.`
+              : `Fill to full by the rate needs a flow rate — calibrate it, or stop at the float valve instead.`;
+      } else {
+        fillHint = `Fill until full runs to the float valve (the fill cap is the backstop)${room != null && room >= 0.01
+          ? ` — ${vesselName} is about ${roomText} short${rate > 0 ? `, ${this._mixingEtaText(roomMin)} at this rate` : ""}` : ""}.`;
+      }
       body = `
         <p class="muted">${dual
           ? "Fill the store, fill the vessel, or T off to the ATO reservoir — each on its own."
@@ -26710,17 +26859,24 @@ const rigSteps = [
           <label>Litres (for a timed draw)<input type="number" min="0.01" step="any" inputmode="decimal" data-mixing-draw-litres value="${drawL}"></label>
           <label>or millilitres<input type="number" min="10" step="1" inputmode="numeric" data-mixing-draw-ml value="${Math.round(drawL * 1000)}"></label>
           <label>Destination<select data-mixing-draw-dest>
-            ${dual ? `<option value="store">RODI store</option>` : ""}
-            <option value="mix" ${dual ? "" : "selected"}>${dual ? "Mix vessel" : "The vessel"}</option>
-            <option value="external">T-off (ATO / external)</option>
+            ${dual ? `<option value="store" ${dest === "store" ? "selected" : ""}>RODI store</option>` : ""}
+            <option value="mix" ${dest === "mix" ? "selected" : ""}>${dual ? "Mix vessel" : "The vessel"}</option>
+            <option value="external" ${dest === "external" ? "selected" : ""}>T-off (ATO / external)</option>
           </select></label>
         </div>
+        <div class="mini-grid">
+          <label>Fill until full stops at<select data-mixing-fill-stop>
+            <option value="float" ${fillStop === "float" ? "selected" : ""}>Float valve (fill cap backstop)</option>
+            <option value="timed" ${fillStop === "timed" ? "selected" : ""}>Calibrated rate${room != null && room >= 0.01 ? ` — ${roomText} to full` : " — timed to full"}</option>
+          </select></label>
+        </div>
+        ${topUpNote}
         <div class="button-row">
-          <button class="primary" data-action="mixing-rodi-fill" ${disabled}>Fill until full</button>
-          <button class="secondary" data-action="mixing-rodi-draw" ${disabled}>Run the litres</button>
+          <button class="primary" data-action="mixing-rodi-fill" ${disabled}>${fillBtn}</button>
+          <button class="secondary" data-action="mixing-rodi-draw" ${disabled}>${topUp ? "Top up the litres" : "Run the litres"}</button>
           <button class="secondary" data-action="mixing-cal-prep" ${disabled}>Calibrate flow</button>
         </div>
-        <small class="awc-hint">Fill until full runs to the float valve (the fill cap is the backstop). Type litres or millilitres — the other box follows${rate > 0 ? ` (57 ml is about ${Math.max(1, Math.round(0.057 / rate * 3600))} s at this rate)` : ""}; timed draws start at 10 ml. ${rate > 0
+        <small class="awc-hint">${fillHint} Type litres or millilitres — the other box follows${rate > 0 ? ` (57 ml is about ${Math.max(1, Math.round(0.057 / rate * 3600))} s at this rate)` : ""}; timed draws start at 10 ml. ${rate > 0
           ? `Flow rate: ${Number(rate)} L/h${rodi?.calibratedAt
             ? ` — calibrated ${new Date(rodi.calibratedAt).toLocaleDateString()}`
             : " — set by hand; a timed calibration makes the litres honest"}.`
@@ -26995,11 +27151,15 @@ const rigSteps = [
       <div class="mini-grid">
         <label>RODI rate (L/h, 0 = unknown)<input type="number" min="0" step="0.01" data-scope="mixing-rodi" data-field="rateLph" value="${Number(rodi.rateLph) || 0}"></label>
         <label>Fill cap (minutes)<input type="number" min="1" step="1" data-scope="mixing-rodi" data-field="fillCapMin" value="${Number(rodi.fillCapMin) || 240}"></label>
+        <label>Fill until full stops at<select data-scope="mixing-rodi" data-field="fillStop">
+          <option value="float" ${rodi.fillStop === "timed" ? "" : "selected"}>Float valve (fill cap backstop)</option>
+          <option value="timed" ${rodi.fillStop === "timed" ? "selected" : ""}>Calibrated rate — timed to full</option>
+        </select></label>
         <label>Auto-flush (s, 0 = none)<input type="number" min="0" max="900" step="1" data-scope="mixing-rodi" data-field="flushSeconds" value="${Number(rodi.flushSeconds) || 0}"></label>
         <label>Near-full alert (%, 0 = off)<input type="number" min="0" max="99" step="5" data-scope="mixing-rodi" data-field="alertPct" value="${Number(rodi.alertPct) || 0}"></label>
         <label>T-off container volume (L, 0 = no T-off alert)<input type="number" min="0" step="1" data-scope="mixing-rodi" data-field="externalVolumeL" value="${Number(rodi.externalVolumeL) || 0}"></label>
       </div>
-      ${this._howItWorks("mixing-rate", `<p>The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. If your unit auto-flushes to drain before producing, set the flush seconds: that time is discounted from calibration and every metered run, so the flush never counts as water. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty. Timed draws also get a nearly-done heads-up at the same threshold (8 of 10 L at 80%) — whichever story lands first is the one that fires.</p>`)}
+      ${this._howItWorks("mixing-rate", `<p>The rate meters timed draws and the fill ETA — the Calibrate flow button on the tab measures it for real. "Fill until full" can stop at the float valve (open-ended, the fill cap as backstop) or by the rate: a timed run of exactly what the vessel is short, read at the moment it starts, that stops itself — a float valve, if fitted, is then the backstop. The tab's own selector overrides this default for one fill. If your unit auto-flushes to drain before producing, set the flush seconds: that time is discounted from calibration and every metered run, so the flush never counts as water. The near-full alert fires once per RODI run (in HA and to your phone target) when a container is projected past the threshold — it needs a known rate, and the T-off alert assumes its container starts empty. Timed draws also get a nearly-done heads-up at the same threshold (8 of 10 L at 80%) — whichever story lands first is the one that fires.</p>`)}
       <small class="awc-hint">Filter stages, in flow order — each cartridge tracks its own litres and rated life (0 = untracked; the maker's spec or your own experience sets it). Every litre through the unit counts against every stage.</small>
       ${(Array.isArray(rodi.filters) ? rodi.filters : []).map((f) => `
       <div class="mini-grid">

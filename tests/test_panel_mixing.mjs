@@ -611,9 +611,25 @@ test("the transfer card owns the move — and says why when it's paused", async 
   }));
   stored._activeTab = "mixing";
   slice = transferSlice(stored._mixingTab());
-  assert(slice.includes("Transfers are paused"), "standing salt must pause the card");
+  // Standing saltwater: the transfer becomes a TOP-UP, said out loud (doc §32) —
+  // its own action, so the plain transfer never lands on saltwater.
+  assert(slice.includes('data-action="mixing-transfer-topup"'), "standing salt must offer the top-up transfer");
+  assert(!slice.includes('data-action="mixing-transfer"'), "the plain transfer must never land on saltwater");
+  assert(slice.includes("tops it up with fresh RODI") && slice.includes("goes off target"),
+    "the top-up transfer must say what it does to the batch");
+  assert(slice.includes("data-mixing-transfer"), "the top-up transfer needs its litres input");
+  noPlaceholders(slice, "top-up transfer card");
+  // Heating: the card is paused and says why.
+  const heating = await mixingPanel({ batch: { state: "heating", litres: 40 } }, summaryBlob({
+    batch: { status: "heating", contents: "rodi", litres: 40, remainingLitres: 40,
+             stages: ["heating", "salting", "ready", "storing"] },
+    levels: { rodi: { litres: 10, volumeLitres: 50, percent: 20, estimated: true },
+              mix: { litres: 40, volumeLitres: 50, percent: 80, contents: "rodi", estimated: true } },
+  }));
+  heating._activeTab = "mixing";
+  slice = transferSlice(heating._mixingTab());
+  assert(slice.includes("Transfers are paused"), "heating must pause the card");
   assert(!slice.includes("data-mixing-transfer"), "a paused card must not offer the input");
-  noPlaceholders(slice, "paused transfer card");
   // Single layout has no store — and no transfer card at all.
   const single = await mixingPanel({ layout: "single" });
   single._activeTab = "mixing";
@@ -984,6 +1000,227 @@ test("a 57 ml draw reads as millilitres — the input, the guard and the readout
   assert(liveHtml.includes("under a minute left"), "a seconds-long run said 'about 0 min'");
   assert(!liveHtml.includes("0.1 L"), "the run still reads as 0.1 L somewhere");
   noPlaceholders(liveHtml, "rodi card small draw");
+});
+
+// --- §32 top-up a stored batch + fill to full by the rate (0.7.187) ---------------
+
+const SINGLE_RODI = {
+  rateLph: 9.21, calibratedAt: "2026-08-31T10:00:00+00:00", flushSeconds: 0, litresProcessed: 203,
+  filters: [], filterDue: false, draw: null, calibration: null,
+};
+
+function singleLevels(mixOver = {}) {
+  return { mix: { litres: 4.1, volumeLitres: 35, percent: 12, contents: "rodi", freshLitres: 0, estimated: true, ...mixOver } };
+}
+
+test("the fill button names the litres to full and its stop switches between float valve and the rate", async () => {
+  const panel = await mixingPanel({ layout: "single", rodi: { rateLph: 9.21, fillCapMin: 240, fillStop: "float" } },
+    summaryBlob({ layout: "single", batch: { status: "idle", contents: "rodi", remainingLitres: 4.1 },
+      levels: singleLevels(), rodi: SINGLE_RODI }));
+  panel._activeTab = "mixing";
+  let html = panel._mixingTab();
+  assert(html.includes(">Fill until full<"), "float mode lost its button");
+  assert(html.includes("30.9 L short") && html.includes("about 3 h 21 min"),
+    "float mode must still state the litres to full and the ETA");
+  assert(html.includes("data-mixing-fill-stop"), "the stop selector is missing");
+  assert(html.includes('value="float" selected'), "the setting's default must be selected");
+  assert(html.includes("30.9 L to full"), "the timed option must carry the litres");
+  // The card's own pick for this fill: the rate.
+  panel._mixingFillStop = "timed";
+  html = panel._mixingTab();
+  assert(html.includes(">Fill 30.9 L to full<"), "timed mode must put the litres on the button");
+  assert(html.includes("stops itself") && html.includes("about 3 h 21 min at 9.21 L/h"),
+    "timed mode must say the run stops itself, with the ETA");
+  assert(html.includes('value="timed" selected'), "the timed pick must be selected");
+  assert(panel._mixingFillStopMode() === "timed", "the helper must read the card's pick");
+  noPlaceholders(html, "fill to full card");
+  // The setting alone flips the default.
+  const setDefault = await mixingPanel({ layout: "single", rodi: { rateLph: 9.21, fillCapMin: 240, fillStop: "timed" } },
+    summaryBlob({ layout: "single", levels: singleLevels(), rodi: SINGLE_RODI }));
+  assert(setDefault._mixingFillStopMode() === "timed", "the stored setting must be the default");
+  assert(setDefault._mixingTab().includes(">Fill 30.9 L to full<"), "the stored setting must shape the button");
+  // No rate: the hint points at calibration or the float valve, never a guess.
+  const noRate = await mixingPanel({ layout: "single", rodi: { rateLph: 0, fillCapMin: 240, fillStop: "timed" } },
+    summaryBlob({ layout: "single", levels: singleLevels() }));
+  noRate._activeTab = "mixing";
+  const noRateHtml = noRate._mixingTab();
+  assert(noRateHtml.includes("needs a flow rate"), "timed mode without a rate must say so");
+  assert(noRateHtml.includes(">Fill 30.9 L to full<"), "the litres to full are known without a rate");
+  assert(noRateHtml.includes("Flow rate unknown"), "an unknown rate must still say so");
+  noPlaceholders(noRateHtml, "fill to full without a rate");
+  // A brim-full vessel says so instead of offering litres.
+  const full = await mixingPanel({ layout: "single", rodi: { rateLph: 9.21, fillCapMin: 240, fillStop: "timed" } },
+    summaryBlob({ layout: "single", levels: singleLevels({ litres: 35, percent: 100 }), rodi: SINGLE_RODI }));
+  const fullHtml = full._mixingTab();
+  assert(fullHtml.includes("already stands full") && fullHtml.includes(">Fill until full<"),
+    "a full vessel must say so and fall back to the plain label");
+  // The T-off has no level to fill to.
+  const tee = await mixingPanel({ layout: "single", rodi: { rateLph: 9.21, fillCapMin: 240, fillStop: "timed" } },
+    summaryBlob({ layout: "single", levels: singleLevels(), rodi: SINGLE_RODI }));
+  tee._mixingDrawDest = "external";
+  assert(tee._mixingTab().includes("no level to fill to"), "a T-off fill to full must say why not");
+  // ETA wording.
+  assert(panel._mixingEtaText(0.4) === "under a minute" && panel._mixingEtaText(45) === "about 45 min"
+    && panel._mixingEtaText(201.3) === "about 3 h 21 min" && panel._mixingEtaText(120) === "about 2 h",
+    "the ETA text must read in minutes and hours");
+});
+
+test("the draw destination is remembered across renders — a poll can never snap it back to the store", async () => {
+  const dual = await mixingPanel();
+  dual._activeTab = "mixing";
+  assert(dual._mixingDrawDestination() === "store", "dual defaults to the store");
+  assert(dual._mixingTab().includes('value="store" selected'), "the default must be selected");
+  dual._mixingDrawDest = "mix";
+  const html = dual._mixingTab();
+  assert(html.includes('value="mix" selected') && !html.includes('value="store" selected'),
+    "the remembered destination must be the selected option");
+  assert(dual._mixingDrawDestination() === "mix", "the helper must read the remembered pick");
+  assert(html.includes("the mix vessel is about 50.0 L short"), "the hint must follow the destination");
+  const single = await mixingPanel({ layout: "single" });
+  assert(single._mixingDrawDestination() === "mix", "single defaults to the vessel");
+});
+
+test("a fill onto the stored batch says top-up out loud — dilution while salting does not", async () => {
+  const stored = await mixingPanel({ layout: "single", batch: { state: "storing" }, rodi: { rateLph: 9.21, fillCapMin: 240 } },
+    summaryBlob({ layout: "single", batch: { status: "storing", contents: "salt", remainingLitres: 4.1, loggedPpt: 35 },
+      levels: singleLevels({ contents: "salt" }), rodi: SINGLE_RODI }));
+  stored._activeTab = "mixing";
+  const html = stored._mixingTab();
+  assert(html.includes(">Top up until full<"), "the fill button must say top-up on a stored batch");
+  assert(html.includes(">Top up the litres<"), "the draw button must say top-up on a stored batch");
+  assert(html.includes("data-mixing-topup-note") && html.includes("Topping up the stored batch"),
+    "the top-up note is missing");
+  assert(html.includes("4.1 L of tested saltwater") && html.includes("the batch closes"),
+    "the note must name the water at stake and what happens to the batch");
+  assert(stored._mixingDrawIsTopUp("mix") === true, "the helper must flag the top-up");
+  assert(stored._mixingDrawIsTopUp("external") === false, "a T-off draw is never a top-up");
+  noPlaceholders(html, "top-up rodi card");
+  // With the rate as the stop, the litres ride on the top-up button.
+  stored._mixingFillStop = "timed";
+  assert(stored._mixingTab().includes(">Top up 30.9 L to full<"), "timed top-up must carry the litres");
+  // Idle saltwater (already topped up, or unfinished): still a top-up, worded for what it is.
+  const idleSalt = await mixingPanel({ layout: "single", rodi: { rateLph: 9.21, fillCapMin: 240 } },
+    summaryBlob({ layout: "single", batch: { status: "idle", contents: "salt", remainingLitres: 14.1 },
+      levels: singleLevels({ litres: 14.1, percent: 40, contents: "salt", freshLitres: 10 }), rodi: SINGLE_RODI }));
+  const idleHtml = idleSalt._mixingTab();
+  assert(idleHtml.includes("Topping up the standing saltwater") && idleHtml.includes("owed its salt"),
+    "idle saltwater must get its own top-up wording");
+  // Salting: dilution, not a top-up — plain labels.
+  const salting = await mixingPanel({ layout: "single", batch: { state: "salting", litres: 35 } },
+    summaryBlob({ layout: "single",
+      batch: { status: "salting", contents: "salt", litres: 35, remainingLitres: 35, mix: { percent: 50, hoursLeft: 1, testUnlocked: false } },
+      levels: singleLevels({ litres: 35, percent: 100, contents: "salt" }), rodi: SINGLE_RODI }));
+  assert(salting._mixingDrawIsTopUp("mix") === false, "dilution while salting is not a top-up");
+  assert(salting._mixingTab().includes(">Fill until full<"), "salting keeps the plain fill label");
+  // Plain RODI or an empty vessel: never a top-up.
+  const rodiWater = await mixingPanel({ layout: "single" }, summaryBlob({ layout: "single", levels: singleLevels() }));
+  assert(rodiWater._mixingDrawIsTopUp("mix") === false, "RODI water is not a top-up");
+});
+
+test("topped-up saltwater gets Salt & mix, the fresh litres named, and the dose for them", async () => {
+  const dualLevels = (mixOver) => ({
+    rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
+    mix: { litres: 35, volumeLitres: 35, percent: 100, contents: "salt", freshLitres: 30.9, estimated: true, ...mixOver },
+  });
+  const guide = {
+    full: { available: true, grams: 1365, gPerL: 39.0 }, fullLitres: 35, heldLitres: 35,
+    topUp: null, topUpLitres: 0, standingRodi: null, run: null, runLitres: 0, runDoseLitres: 0, runTopUp: false,
+    fresh: { available: true, grams: 1205, gPerL: 39.0 }, freshLitres: 30.9,
+  };
+  const blob = summaryBlob({ batch: { status: "idle", contents: "salt", remainingLitres: 35 }, levels: dualLevels() });
+  blob.doseGuide = guide;
+  const vessels = (mixOver = {}) => ({
+    rodi: { volumeLitres: 50, estimatedLitres: 40, levelSensorEntity: "" },
+    mix: { volumeLitres: 35, estimatedLitres: 35, contents: "salt", freshLitres: 30.9, levelSensorEntity: "", ...mixOver },
+  });
+  const panel = await mixingPanel({ vessels: vessels() }, blob);
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes('data-action="mixing-start"') && html.includes("Salt & mix 35.0 L"),
+    "topped-up saltwater must offer Salt & mix");
+  assert(html.includes("Topped up — salt it back"), "the card head must say topped up");
+  assert(html.includes("30.9 L of it fresh RODI"), "the fresh litres must be named on the run card");
+  assert(html.includes("Salt the top-up:") && html.includes("1205"), "the dose guide must price the fresh litres");
+  assert(html.includes("Topped up with 30.9 L of fresh RODI"), "the hero must say topped up");
+  assert(!html.includes("Top back up to full"), "a brim-full vessel has no rest-of-the-way line");
+  assert(html.includes("Discard batch"), "topped-up saltwater keeps its discard");
+  assert(html.includes("Your own top-up:"), "the what-if row stays on standing saltwater");
+  noPlaceholders(html, "topped-up tab");
+  const hub = panel._hubTab("water");
+  assert(hub.includes("35.0 L salt") && hub.includes("topped up"), "the hub must read the topped-up vessel");
+  // Short of full: the fresh story and the rest-of-the-way line stack.
+  const partBlob = summaryBlob({ batch: { status: "idle", contents: "salt", remainingLitres: 14.1 },
+    levels: dualLevels({ litres: 14.1, percent: 40, freshLitres: 10 }) });
+  partBlob.doseGuide = { ...guide, heldLitres: 14.1, topUp: { available: true, grams: 815, gPerL: 39.0 },
+    topUpLitres: 20.9, fresh: { available: true, grams: 390, gPerL: 39.0 }, freshLitres: 10 };
+  const part = await mixingPanel({ vessels: vessels({ estimatedLitres: 14.1, freshLitres: 10 }) }, partBlob);
+  part._activeTab = "mixing";
+  const partHtml = part._mixingTab();
+  assert(partHtml.includes("Salt the top-up:") && partHtml.includes("Top the rest up:") && partHtml.includes("the last 21 L"),
+    "both stories must stack when short of full");
+  assert(partHtml.includes("Salt & mix 14.1 L"), "a part-full topped-up vessel still mixes");
+  noPlaceholders(partHtml, "part-full topped-up tab");
+  // Unfinished saltwater with nothing fresh: still mixable, worded as such.
+  const plainBlob = summaryBlob({ batch: { status: "idle", contents: "salt", remainingLitres: 35 },
+    levels: dualLevels({ freshLitres: 0 }) });
+  plainBlob.doseGuide = { ...guide, fresh: null, freshLitres: 0 };
+  const plain = await mixingPanel({ vessels: vessels({ freshLitres: 0 }) }, plainBlob);
+  plain._activeTab = "mixing";
+  const plainHtml = plain._mixingTab();
+  assert(plainHtml.includes("Saltwater standing") && plainHtml.includes("Salt & mix 35.0 L")
+    && plainHtml.includes("no tested batch behind it"), "unfinished saltwater must be salted back, not stuck");
+  assert(plainHtml.includes("Unfinished saltwater standing — mix or discard"), "the hero keeps the unfinished line");
+  assert(!plainHtml.includes("Salt the top-up:"), "nothing fresh, no fresh story");
+  assert(plain._hubTab("water").includes("saltwater standing"), "the hub must read unfinished saltwater");
+});
+
+test("the run story says when only the fresh litres were dosed — or when no new salt was owed", async () => {
+  const runBlob = summaryBlob({ batch: { status: "salting", contents: "salt", litres: 35, remainingLitres: 35,
+    mix: { percent: 50, hoursLeft: 1.0, testUnlocked: false } },
+    levels: { rodi: { litres: 40, volumeLitres: 50, percent: 80, estimated: true },
+              mix: { litres: 35, volumeLitres: 35, percent: 100, contents: "salt", freshLitres: 0, estimated: true } } });
+  runBlob.doseGuide = {
+    full: { available: true, grams: 1365, gPerL: 39.0 }, fullLitres: 35, heldLitres: 35,
+    topUp: null, topUpLitres: 0, standingRodi: null,
+    run: { available: true, grams: 1205, gPerL: 39.0 }, runLitres: 35, runDoseLitres: 30.9, runTopUp: true,
+    fresh: null, freshLitres: 0,
+  };
+  const panel = await mixingPanel({ batch: { state: "salting", litres: 35 } }, runBlob);
+  panel._activeTab = "mixing";
+  const html = panel._mixingTab();
+  assert(html.includes("This run:") && html.includes("the salt for the 31 L of fresh RODI topped up"),
+    "a top-up re-salt must say which litres it dosed");
+  assert(!html.includes("Your own top-up:"), "no what-if row mid-run");
+  noPlaceholders(html, "top-up run story");
+  runBlob.doseGuide = { ...runBlob.doseGuide, run: { available: false, grams: null, gPerL: null }, runDoseLitres: 0 };
+  const reSalt = await mixingPanel({ batch: { state: "salting", litres: 35 } }, runBlob);
+  reSalt._activeTab = "mixing";
+  const reHtml = reSalt._mixingTab();
+  assert(reHtml.includes("needed no new salt"), "a re-salt with nothing fresh must say no salt was owed");
+  noPlaceholders(reHtml, "re-salt run story");
+  // A plain full run reads as before.
+  runBlob.doseGuide = { ...runBlob.doseGuide, run: { available: true, grams: 1365, gPerL: 39.0 }, runDoseLitres: 35, runTopUp: false };
+  const fullRun = await mixingPanel({ batch: { state: "salting", litres: 35 } }, runBlob);
+  fullRun._activeTab = "mixing";
+  const fullHtml = fullRun._mixingTab();
+  assert(fullHtml.includes("mixing now took roughly") && !fullHtml.includes("topped up"), "a full run keeps its plain line");
+});
+
+test("a live fill to full says it stops itself; settings carries the stored stop", async () => {
+  const live = await mixingPanel({ layout: "single" }, summaryBlob({ layout: "single", levels: singleLevels(),
+    rodi: { ...SINGLE_RODI, draw: { litres: 30.9, destination: "mix", toFull: true, openEnded: false, litresDone: 12.3, percent: 40, minutesLeft: 121 } } }));
+  live._activeTab = "mixing";
+  const html = live._mixingTab();
+  assert(html.includes("12.3 L of 30.9 L") && html.includes("filling to full by the rate, it stops itself"),
+    "a live fill to full must say so");
+  assert(html.includes('data-action="mixing-rodi-stop"'), "a live fill to full keeps its Stop");
+  noPlaceholders(html, "live fill to full");
+  const panel = await mixingPanel();
+  const body = panel._mixingSettingsBody(mixConfig({ rodi: { rateLph: 9.21, fillCapMin: 240, fillStop: "timed" } }));
+  assert(body.includes('data-field="fillStop"'), "settings lost the fill stop field");
+  assert(/value="timed"[^>]*selected/.test(body), "the stored timed stop must be selected in settings");
+  const floatBody = panel._mixingSettingsBody(mixConfig({ rodi: { rateLph: 9.21, fillCapMin: 240 } }));
+  assert(/value="float"[^>]*selected/.test(floatBody), "an unset stop must default to the float valve in settings");
 });
 
 runTests();

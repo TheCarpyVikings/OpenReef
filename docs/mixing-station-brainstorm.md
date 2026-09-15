@@ -665,3 +665,81 @@ one number in two units: `_mixingDrawSync(unit, raw)` (pure, tested) converts wh
 was typed in and the input hook patches the other in place — never a render, so typing never
 fights the summary poll. The chosen size lives in `_mixingDrawL` and seeds both boxes on the
 next render. The draw button still reads the litres box; the WS contract is unchanged.
+
+## §32 The top-up is a batch — fresh RODI onto standing saltwater, and fill to full by the rate (0.7.187)
+
+Reece, with 4.1 L of tested saltwater standing in a 35 L vessel: "I'm trying to top up my
+saltwater vessel to full with RODI water so I can mix it back to 35 ppt once full — it says
+'The vessel still holds mixed saltwater — use or discard it' and won't let me. The salt dose
+guide already calculates the salt to top the vessel back to full." And: "Fill until full uses
+a float valve only — can it use the pump calibration too (user selectable), stating how many
+litres is required to full."
+
+The §15 guard was right about the accident and wrong about the plan. §25's top-up story was
+a figure with no button behind it. Now the top-up is a first-class act, and the guard keeps
+its job.
+
+- **The flag, not the hole.** `mixing_rodi_draw` and `mixing_transfer` take `topUp: true`.
+  Unflagged, fresh water onto standing saltwater outside the salting window is still refused —
+  the reason now names the way through ("…or top it up: fresh RODI onto the batch, then salt
+  the whole vessel back to target"). Flagged, the water lands. The panel sets the flag only
+  when its own card has said out loud what is about to happen: with the vessel selected and
+  saltwater standing, the buttons read **Top up until full / Top up the litres**, a note names
+  the litres at stake, and the transfer card offers **Top up →** (`mixing-transfer-topup`, its
+  own action — the plain transfer never lands on saltwater). An automation that never says
+  "top up" gets the refusal it always got.
+- **The batch leaves the books before the first litre.** `_async_mixing_demote_batch`: a
+  READY/STORING batch that is about to be topped up closes NOW (idle, circulation stopped and
+  the pumps switched off, the retest chore stood down, `loggedPpt` gone with the run) — not at
+  the end of a three-hour fill, during which the AWC could otherwise still be vouched water
+  from a vessel being diluted live. The vessel keeps its litres and its `contents: salt`.
+- **The vessel remembers what it is owed.** `vessels.mix.freshLitres` — fresh RODI landed on
+  standing saltwater since the batch was last salted; server-owned (it joins
+  `_mixing_preserve_runtime`), clamped to what the vessel holds, only ever on `salt` contents.
+  `_mixing_credit_mix` accrues it whenever fresh water lands on salt outside `salting`
+  (dilution mid-run is already dosed and never counts). A level correction scales it pro rata
+  — the keeper re-read the level, not the salt. Emptying the vessel clears it.
+- **Salt & mix on standing saltwater.** `mix_guard_reasons` no longer refuses `idle + salt`:
+  the run card offers **Salt & mix N L** on a topped-up (or merely unfinished) vessel. At the
+  salting edge the dose is for the FRESH litres when saltwater was standing, the whole vessel
+  otherwise — stamped as `batch.doseLitres` (a batch from before the field reads as dosed for
+  all of its litres, never as "no salt"), and it is THAT dose the salt-on-hand bucket pays
+  (30.9 L × 39 g/L ≈ 1205 g, not a full 35 L batch). `freshLitres` goes to 0 as the salt goes
+  in; a test at target makes it a stored batch again with nothing outstanding. A re-salt with
+  nothing fresh (the fill stopped inside the flush, an old unfinished batch) is a 0 g run:
+  mix, test, done — never stuck behind "use or discard".
+- **A retest that sends a stored batch back to the pumps is not a new dose.** Found while
+  wiring the above: `log_salinity` → `salting` re-entered the stage with the full-batch stock
+  debit, so a low retest cost the bucket another 1.4 kg. `new_dose=False` on that path; the
+  correction grams in the reply are the keeper's own.
+- **The guide gains a third story.** `doseGuide.fresh` / `freshLitres`: "Salt the top-up:
+  30.9 L of fresh RODI has gone onto the standing batch — Salt & mix brings the vessel back to
+  target with roughly 1205 g." It stacks with `topUp` when the vessel is still short ("Top the
+  rest up: … the last 21 L would need 815 g more"). `run` carries `runDoseLitres` and
+  `runTopUp`, so mid-run the line says "the salt for the 31 L of fresh RODI topped up; the
+  water already standing kept its own", or "needed no new salt" on a 0 g re-salt.
+- **Fill to full by the rate.** `mixing_rodi_draw` takes `toFull: true`: the backend reads the
+  destination vessel's own shortfall under the lock (`fill_to_full_litres`, volume − level) and
+  runs it as a timed draw that stops itself; `draw_guard_reasons(…, to_full=True)` refuses an
+  unsized vessel, a T-off (no level to fill to), a vessel already full (said with the litres,
+  never the 10 ml floor), or a missing rate ("calibrate it for a fill by the rate, or stop at
+  the float valve instead"). The draw stamps `toFull`; `rodi_status` echoes it; the activity
+  and the card say "full by the rate". The float valve, if fitted, is the backstop.
+- **User-selectable, remembered.** `rodi.fillStop` (`float` | `timed`, a keeper's setting in
+  the RODI unit block) is the default; the Make water card carries its own **Fill until full
+  stops at** selector (`data-mixing-fill-stop`, panel state `_mixingFillStop`) for this fill.
+  Either way the button states the litres: **Fill 30.9 L to full** by the rate, and even the
+  float-valve mode's hint says "the vessel is about 30.9 L short, about 3 h 21 min at this
+  rate". `_mixingEtaText` reads minutes as "about 3 h 21 min".
+- **The destination is remembered.** `_mixingDrawDest` / `_mixingDrawDestination()`: the
+  summary poll used to re-render the select back to "RODI store" behind the keeper's back —
+  the very accident the guard exists for. Changing the destination or the stop re-paints the
+  card (a select is not a text box; nothing fights a render).
+
+Tests: `test_mixing.py` (§32 block — engine guards, `fill_to_full_litres`, the ledger, the
+guide stories, normalise/stale-save carry, and the three WS journeys: fill-to-full top-up end
+to end through Salt & mix and the bucket debit, a float-valve top-up, a transfer top-up; the
+retest re-mix no longer double-debits; level corrections scale; stopping heat keeps the fresh
+litres) and `test_panel_mixing.mjs` (the button words, the stop selector, the remembered
+destination, the top-up note, Salt & mix on standing saltwater, the run and fresh stories, the
+live fill-to-full line, the settings field).
