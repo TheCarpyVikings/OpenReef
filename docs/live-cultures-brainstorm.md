@@ -817,3 +817,27 @@ lane's name carries the learned "clears in ~N h" and the open wait. Journal rows
 "looked · feed skipped" / "feed skipped". `test_cultures.py` 65 (3 new),
 `test_panel_cultures.mjs` 38 (4 new). Verified by rendering the demo view through the harness
 and screenshotting with headless Chrome.
+
+#### Addendum 2026-09-15 (0.7.191) — Undo a daily tap
+
+Reece: "I set the tint to green when it was actually clearing — other users are likely to
+make the same mistake. Can we add an undo button, as it affects the feeding and water
+timeline as well as the feeding recommendations." The journal now carries **Undo** on every
+daily tap — a look, a feed, a skip, a sign — for a day (`HAND_DOSE_UNDO_MIN`, the same window
+as the shelf and the hatchery); `cultures_undo {jar_id, at}`. The row is **tombstoned**
+(`undoneAt`), never deleted, so a stale save cannot resurrect it; the normaliser keeps the
+stamp and the journal shows the row struck through with "· taken back". `_chronological` is
+the ONE choke point: a tombstoned row is invisible to `clearing_samples`, `feed_timeline`,
+`risk_line`, `tint_strip`, the slow-clearing test and the learned cadences, so the timeline
+band, the spans and the feed advice stop counting it on the reload. The jar's stamps are
+re-read from the surviving rows by `cultures.replay_state(history)` — only the fields the
+undone row wrote (`lastTint`, `lastFedAt`, `lastFeedSkippedAt`, `lastSign/At`; a seed or
+restart is the newest word on water and signs, a crash stops the walk; a journal cut short
+falls back to `startedAt` for the feed). A feed's phyto dose comes back: `_cultures_feed_debit`
+now stamps the bottle's dose row with the tap's own `at`, the undo finds the jar-bound row
+nearest the stamp (≤ 10 s, for the rows logged before this release), tombstones it and
+credits the ml only if the bottle still holds that load (`_vessel_holds_that_load`). The
+reminder completion the tap wrote is dropped; a skip's snooze clears when no other skip holds
+it. The ceremonies — harvest, restart, water change, seed, split, crash — move water and stock
+and are refused (`not_undoable`). The success message after a look/feed/skip says the undo is
+there. `test_cultures.py` 68 (3 new), `test_panel_cultures.mjs` 40 (1 new).

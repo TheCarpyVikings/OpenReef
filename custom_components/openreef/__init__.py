@@ -1087,6 +1087,9 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 # 0.7.184: a look that decided NOT to feed — the feed chore
                 # skipped for this cycle, the water still on the record.
                 "skipped": bool(item.get("skipped")),
+                # 0.7.191: a taken-back tap stays as a tombstone — never
+                # deleted, so a stale save cannot resurrect it.
+                **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {}),
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         jars[jid] = {
@@ -15747,10 +15750,12 @@ def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict
     return None
 
 
-def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any], jar_id: str = "") -> None:
+def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any], jar_id: str = "",
+                         at: datetime | None = None) -> None:
     """One feed = one dose off the linked phyto bottle (the shelf keeps count).
     The row says it went in the jar (0.7.165), so the tank's strip never
-    counts it — and the same bottle's tank doses still show."""
+    counts it — and the same bottle's tank doses still show. ``at`` is the
+    tap's own stamp (0.7.191) so an undo can find the dose it wrote."""
     feed = jar.get("feed") if isinstance(jar.get("feed"), dict) else {}
     product_id = str(feed.get("productId") or "")
     if not product_id:
@@ -15758,7 +15763,7 @@ def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any], jar_id: st
     products = (config.get("consumables") or {}).get("products") or {}
     product = products.get(product_id)
     if isinstance(product, dict):
-        _consumable_debit(product, _awc_num(feed.get("doseMl"), 5, 0.5, 200), "dose", to="jar", jar_id=jar_id)
+        _consumable_debit(product, _awc_num(feed.get("doseMl"), 5, 0.5, 200), "dose", at=at, to="jar", jar_id=jar_id)
 
 
 def _cultures_touch_continuity(cultures: dict[str, Any], now: datetime) -> None:
@@ -16204,7 +16209,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         notes.append(f"{egg:g} % carrying eggs")
     if fed:
         state["lastFedAt"] = now.isoformat()
-        _cultures_feed_debit(config, jar, jar_id)
+        _cultures_feed_debit(config, jar, jar_id, at=now)
         _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
         notes.append("fed")
     if skip_feed:
@@ -16256,6 +16261,117 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
                       purgeMl=purge, skipped=True if skip_feed else None)
     _append_activity(config, f"{jar['name']}: " + ", ".join(notes), "control")
     return None
+
+
+def _cultures_undo_apply(config: dict[str, Any], jar_id: str, stamp: str,
+                         now: datetime) -> tuple[str, str] | None:
+    """Take back a daily tap (0.7.191): the journal row named by ``stamp`` —
+    a look, a feed, a skip, a sign — is tombstoned, never deleted, so a stale
+    save cannot resurrect it; every reader of the journal (the clearing
+    maths, the timeline, the risk line, the strip) skips it from then on.
+    The jar's stamps are re-read from the surviving rows, the phyto dose the
+    feed drew comes back to the bottle if it still holds that load, and the
+    reminder completion the tap wrote goes (a skip's snooze with it). The
+    ceremonies — harvest, restart, water change, seed, split, crash — move
+    water and stock and are refused here. Returns (code, message) on refusal."""
+    cultures = _nps_cultures_cfg(config)
+    jar = cultures["jars"].get(jar_id)
+    if not isinstance(jar, dict):
+        return "unknown_jar", f"No culture jar '{jar_id}'"
+    history = jar.get("history") if isinstance(jar.get("history"), list) else []
+    row = next((item for item in history
+                if isinstance(item, dict) and str(item.get("at")) == stamp and not item.get("undoneAt")), None)
+    at = _parse_datetime(stamp)
+    if row is None or not _undo_window_ok(at, now):
+        return "nothing_to_undo", "Nothing to undo — a tap can be taken back for a day"
+    if row.get("event") not in cultures_engine.UNDOABLE_EVENTS:
+        return "not_undoable", "Only a look, a feed, a skip or a sign can be taken back — a harvest or a restart moves water and stock"
+    row["undoneAt"] = now.isoformat()
+    state = jar["state"]
+    replay = cultures_engine.replay_state(history)
+    notes = []
+    if str(row.get("tint") or "") in cultures_engine.TINTS:
+        state["lastTint"] = replay["lastTint"]
+        notes.append(f"water back to {replay['lastTint']}")
+    if str(row.get("sign") or ""):
+        state["lastSign"], state["lastSignAt"] = replay["lastSign"], replay["lastSignAt"]
+        notes.append("sign withdrawn")
+    if row.get("fed") is True or row.get("event") == "feed":
+        # A journal cut short (600 rows) may have lost the seed row: the seed
+        # fed the jar, so the start is the floor, never a blank clock.
+        state["lastFedAt"] = replay["lastFedAt"] or str(state.get("startedAt") or "")
+        _drop_completion(config, _cultures_task_id(jar_id, "feed"), stamp)
+        credited = _cultures_feed_credit(config, jar, jar_id, at)
+        notes.append("feed taken back" + (f" — {credited:g} ml back in the phyto bottle" if credited else ""))
+    if row.get("skipped"):
+        state["lastFeedSkippedAt"] = replay["lastFeedSkippedAt"]
+        _drop_completion(config, _cultures_task_id(jar_id, "feed"), stamp)
+        tasks = (config.get("maintenance") or {}).get("tasks")
+        task = tasks.get(_cultures_task_id(jar_id, "feed")) if isinstance(tasks, dict) else None
+        if isinstance(task, dict) and not replay["lastFeedSkippedAt"]:
+            task["snoozedUntil"] = None          # the hold came from this skip alone
+        notes.append("skip taken back")
+    if row.get("eggRatio") is not None and not notes:
+        notes.append("egg count withdrawn")
+    _append_activity(config, f"{jar['name']}: " + ", ".join(notes or ["tap taken back"]), "control")
+    return None
+
+
+def _cultures_feed_credit(config: dict[str, Any], jar: dict[str, Any], jar_id: str,
+                          at: datetime | None) -> float:
+    """Reverse the phyto dose a feed tap drew (0.7.191): the bottle's jar-bound
+    dose row nearest the tap (older rows were stamped a breath later than the
+    journal) is tombstoned; the ml returns only if the bottle still holds the
+    load it came from. Returns the ml credited, 0 when nothing came back."""
+    feed = jar.get("feed") if isinstance(jar.get("feed"), dict) else {}
+    product = ((config.get("consumables") or {}).get("products") or {}).get(str(feed.get("productId") or ""))
+    if not isinstance(product, dict) or at is None:
+        return 0.0
+    rows = product.get("history") if isinstance(product.get("history"), list) else []
+    best, best_gap = None, 10.0
+    for item in rows:
+        if not (isinstance(item, dict) and item.get("kind") == "dose" and item.get("to") == "jar"
+                and str(item.get("jarId") or "") == jar_id and not item.get("undoneAt")):
+            continue
+        dosed = _parse_datetime(item.get("at"))
+        gap = abs((dosed - at).total_seconds()) if dosed is not None else None
+        if gap is not None and gap <= best_gap:
+            best, best_gap = item, gap
+    if best is None:
+        return 0.0
+    best["undoneAt"] = datetime.now(timezone.utc).isoformat()
+    ml = max(0.0, awc_engine._f(best.get("ml")))
+    if not (_vessel_holds_that_load(product.get("openedAt"), at) or not product.get("openedAt")):
+        return 0.0
+    bottle_ml = max(0.0, awc_engine._f(product.get("bottleMl")))
+    remaining = max(0.0, awc_engine._f(product.get("remainingMl"))) + ml
+    product["remainingMl"] = round(min(remaining, bottle_ml) if bottle_ml > 0 else remaining, 2)
+    return ml
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_undo",
+    vol.Required("jar_id"): str,
+    vol.Required("at"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_undo(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Take back a daily tap (see ``_cultures_undo_apply``)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    error = _cultures_undo_apply(config, str(msg.get("jar_id") or ""), str(msg.get("at") or ""),
+                                 datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
+        return
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
 
 
 def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str,
@@ -22470,6 +22586,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cultures_summary)
     websocket_api.async_register_command(hass, websocket_cultures_seed)
     websocket_api.async_register_command(hass, websocket_cultures_log)
+    websocket_api.async_register_command(hass, websocket_cultures_undo)
     websocket_api.async_register_command(hass, websocket_cultures_restart)
     websocket_api.async_register_command(hass, websocket_cultures_water_change)
     websocket_api.async_register_command(hass, websocket_cultures_split)

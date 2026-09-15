@@ -947,7 +947,7 @@ test("the taps: Skip feed sends the tint and skip_feed, Looked sends the tint al
   panel._culturesLog("c1", false, false);
   await new Promise((r) => setTimeout(r, 0));
   assert(calls.length === 2 && calls[1].tint === "green" && !("skip_feed" in calls[1]) && !("fed" in calls[1]), `the look: ${JSON.stringify(calls[1])}`);
-  assert(panel._cultures.message === "Tint logged — nothing else moved.", panel._cultures.message);
+  assert(panel._cultures.message.startsWith("Tint logged — nothing else moved."), panel._cultures.message);
   // Fed wins over skip if both were somehow asked for.
   panel._culturesLog("c1", true, false, "", true);
   await new Promise((r) => setTimeout(r, 0));
@@ -1058,6 +1058,35 @@ test("a refused cultures tap outlives the summary reload (0.7.186)", async () =>
   panel._callWS = async () => ({});
   await panel._culturesLoadSummary(true);
   assert(panel._cultures.error === "", "a good load clears the loader's own failure");
+});
+
+test("journal: a daily tap inside the day carries Undo, a ceremony and an old row do not, a taken-back row is struck", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const row = (f) => ({ event: "tint", at: iso(2), ml: 0, tint: "", from: "", sign: "", eggRatio: null, tempC: null, skipped: false, fed: false, ...f });
+    const jar = jarSummary({ history: [
+      row({ event: "feed", at: iso(1), tint: "green", fed: true }),
+      row({ event: "tint", at: iso(3), tint: "clearing", undoneAt: iso(0.5) }),
+      row({ event: "harvest", at: iso(5), ml: 500 }),
+      row({ event: "feed", at: iso(30), tint: "clear", fed: true }),
+    ] });
+    const panel = await culturesPanel({}, summaryFixture([jar]));
+    const html = panel._culturesTab();
+    const journal = html.slice(html.indexOf("Culture journal"));
+    const undos = journal.match(/data-action="cultures-undo"/g) || [];
+    assert(undos.length === 1, `one Undo — the feed from an hour ago: ${undos.length}`);
+    assert(journal.includes(`data-action="cultures-undo" data-id="${jar.id}" data-at="${iso(1)}"`), "the button names the jar and the row");
+    assert(journal.includes("culture-journal-undone") && journal.includes("looked · taken back"), "the taken-back look is struck and named");
+    // The tap sends the row's stamp; the reply message tells the keeper to log it again.
+    const calls = [];
+    panel._callWS = async (call) => { calls.push(call); return {}; };
+    await panel._culturesUndo(jar.id, iso(1));
+    assert(calls[0].type === "openreef/cultures_undo" && calls[0].jar_id === jar.id && calls[0].at === iso(1), JSON.stringify(calls[0]));
+    assert(panel._cultures.message.includes("Taken back"), panel._cultures.message);
+    calls.length = 0;
+    await panel._culturesUndo(jar.id, "");
+    assert(calls.length === 0, "no stamp, no call");
+  } finally { restore(); }
 });
 
 // Keep this LAST: a test defined below the runner is a test that never runs.

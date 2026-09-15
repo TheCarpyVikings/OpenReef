@@ -568,10 +568,17 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # V2 Stage B — the journal that learns (doc §8.5)
 # --------------------------------------------------------------------------- #
+UNDOABLE_EVENTS = ("feed", "tint", "skip", "sign")
+
+
 def _chronological(history: Any) -> list[tuple[datetime, dict[str, Any]]]:
+    """Every dated row, oldest first. A taken-back row (``undoneAt``, 0.7.191)
+    is invisible to every reader below — the clearing maths, the timeline,
+    the risk line, the tint strip — the one choke point, so a wrong tap
+    undone never colours a clock again."""
     rows = []
     for row in (history if isinstance(history, list) else []):
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get("undoneAt"):
             continue
         at = _parse_iso(row.get("at"))
         if at is not None:
@@ -598,6 +605,38 @@ def clearing_samples(history: Any) -> list[float]:
             fed_at = at
     samples.reverse()
     return samples
+
+
+def replay_state(history: Any) -> dict[str, Any]:
+    """The jar's tap stamps re-read from the surviving journal (0.7.191) —
+    what ``state`` would say had the taken-back row never happened. Only
+    the fields a daily tap writes: the last tint (a seed or restart puts the
+    water back to green, the way the ceremonies do), the last feed, the last
+    skip, the last sign (cleared by a seed or restart, as the ceremonies do).
+    A crash stops the walk — nothing after it is a running jar's word."""
+    out: dict[str, Any] = {"lastTint": "green", "lastFedAt": "", "lastFeedSkippedAt": "",
+                           "lastSignAt": "", "lastSign": ""}
+    tint_done = sign_done = False
+    for at, row in reversed(_chronological(history)):
+        event = row.get("event")
+        stamp = at.isoformat()
+        if event == "crashed":
+            break
+        if not out["lastFedAt"] and (event in ("feed", "seeded", "restart") or row.get("fed") is True):
+            out["lastFedAt"] = stamp
+        if not out["lastFeedSkippedAt"] and row.get("skipped"):
+            out["lastFeedSkippedAt"] = stamp
+        if not tint_done and str(row.get("tint") or "") in TINTS:
+            out["lastTint"] = str(row["tint"])
+            tint_done = True
+        if not sign_done and str(row.get("sign") or "") in SIGNS:
+            out["lastSign"], out["lastSignAt"] = str(row["sign"]), stamp
+            sign_done = True
+        if event in ("seeded", "restart"):
+            tint_done = sign_done = True            # green water, no sign — the ceremony's word
+        if out["lastFedAt"] and out["lastFeedSkippedAt"] and tint_done and sign_done:
+            break
+    return out
 
 
 def first_harvest_samples(histories: Any) -> list[float]:

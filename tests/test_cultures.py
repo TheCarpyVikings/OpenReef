@@ -1480,6 +1480,130 @@ def test_ws_skip_feed_logs_the_look_and_skips_the_reminder():
     assert conn.errors[-1].code == "jar_idle"
 
 
+def test_replay_state_rereads_the_surviving_journal():
+    """A tombstoned row is invisible to every reader — the clocks re-read
+    what is left, a seed or restart puts the water back to green."""
+    h = lambda **f: {"event": "tint", "at": "", "ml": 0, "tint": "", "sign": "", "eggRatio": None,
+                     "fed": False, "skipped": False, "undoneAt": "", **f}
+    rows = [h(event="feed", at=_iso(REAL - timedelta(hours=1)), tint="green", fed=True, undoneAt=_iso(REAL)),
+            h(event="tint", at=_iso(REAL - timedelta(hours=6)), tint="clearing", skipped=True),
+            h(event="sign", at=_iso(REAL - timedelta(hours=8)), sign="foam"),
+            h(event="feed", at=_iso(REAL - timedelta(hours=20)), tint="clear", fed=True),
+            h(event="restart", at=_iso(REAL - timedelta(days=3)))]
+    out = cultures.replay_state(rows)
+    assert out["lastTint"] == "clearing" and out["lastFedAt"] == _iso(REAL - timedelta(hours=20))
+    assert out["lastFeedSkippedAt"] == _iso(REAL - timedelta(hours=6))
+    assert out["lastSign"] == "foam" and out["lastSignAt"] == _iso(REAL - timedelta(hours=8))
+    # The restart is the newest word on water and signs once the taps above it go.
+    for row in rows[:4]:
+        row["undoneAt"] = _iso(REAL)
+    out = cultures.replay_state(rows)
+    assert out == {"lastTint": "green", "lastFedAt": _iso(REAL - timedelta(days=3)), "lastFeedSkippedAt": "",
+                   "lastSignAt": "", "lastSign": ""}
+    assert cultures.clearing_samples(rows) == [] and cultures.feed_timeline(rows, REAL)["marks"][-1]["event"] == "restart"
+    assert cultures.tint_strip(rows, REAL)[-1] == ""
+
+
+def test_ws_undo_takes_a_wrong_feed_back_everywhere():
+    """Reece logged a feed as green when the water was clearing: the undo
+    tombstones the row, the water and the feed clock fall back, the phyto
+    returns, the reminder completion goes, the timeline stops counting it."""
+    maintenance = {"tasks": {"culture_c1_feed": {"label": "Feed rotifers", "snoozedUntil": None}},
+                   "completions": {}}
+    jar = _jar(started_ago_days=5, lastFedAt=_iso(REAL - timedelta(hours=20)), lastTint="clearing")
+    jar["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=3)), "ml": 0, "tint": "clearing",
+                       "fed": False, "skipped": False},
+                      {"event": "feed", "at": _iso(REAL - timedelta(hours=20)), "ml": 0, "tint": "green",
+                       "fed": True, "skipped": False}]
+    entry = _entry(jars={"c1": jar}, maintenance=maintenance)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "tint": "green", "fed": True}))
+    cfg = entry.options[CONF_SETTINGS]
+    jar = cfg["nps"]["cultures"]["jars"]["c1"]
+    stamp = jar["history"][0]["at"]
+    phyto = cfg["consumables"]["products"]["phyto"]
+    assert jar["state"]["lastTint"] == "green" and jar["state"]["lastFedAt"] == stamp
+    assert phyto["remainingMl"] == 295.0 and phyto["history"][-1]["at"] == stamp, "the dose carries the tap's stamp"
+    assert cfg["maintenance"]["completions"]["culture_c1_feed"][0]["timestamp"] == stamp
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 2}))
+    tl = next(j for j in conn.results[-1].payload["jars"] if j["id"] == "c1")["timeline"]
+    assert tl["marks"][-1]["fed"] is True and tl["spans"][-1]["open"] is True
+    # The undo.
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 3, "jar_id": "c1", "at": stamp}))
+    assert conn.results[-1].payload["success"] is True
+    cfg = entry.options[CONF_SETTINGS]
+    jar = cfg["nps"]["cultures"]["jars"]["c1"]
+    phyto = cfg["consumables"]["products"]["phyto"]
+    assert jar["history"][0]["undoneAt"] and jar["history"][0]["at"] == stamp, "tombstoned, never deleted"
+    assert jar["state"]["lastTint"] == "clearing", "the water falls back to the look before it"
+    assert jar["state"]["lastFedAt"] == _iso(REAL - timedelta(hours=20)), "the feed clock falls back"
+    assert phyto["remainingMl"] == 300.0 and phyto["history"][-1]["undoneAt"], "the phyto is back and its row tombstoned"
+    assert not cfg["maintenance"]["completions"].get("culture_c1_feed"), "the reminder completion goes"
+    assert "taken back" in cfg["activity"][0]["message"] and "5 ml back" in cfg["activity"][0]["message"]
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 4}))
+    payload = next(j for j in conn.results[-1].payload["jars"] if j["id"] == "c1")
+    assert payload["tint"] == "clearing" and payload["timeline"]["marks"][-1]["fed"] is False
+    assert payload["timeline"]["spans"][-1]["fedAt"] == _iso(REAL - timedelta(hours=20)) and payload["timeline"]["spans"][-1]["open"], \
+        "the open clearing span now runs from the feed before it"
+    assert payload["history"][0]["undoneAt"], "the journal still shows the row, marked"
+    # The normaliser keeps the tombstone; the same row cannot be undone twice.
+    assert _config(entry)["nps"]["cultures"]["jars"]["c1"]["history"][0]["undoneAt"]
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 5, "jar_id": "c1", "at": stamp}))
+    assert conn.errors[-1].code == "nothing_to_undo"
+    # Relogged as seen: the clocks read the new row.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 6, "jar_id": "c1", "tint": "clearing", "fed": True}))
+    jar = entry.options[CONF_SETTINGS]["nps"]["cultures"]["jars"]["c1"]
+    assert jar["state"]["lastTint"] == "clearing" and jar["state"]["lastFedAt"] == jar["history"][0]["at"]
+    assert entry.options[CONF_SETTINGS]["consumables"]["products"]["phyto"]["remainingMl"] == 295.0
+
+
+def test_ws_undo_skip_sign_window_and_ceremonies():
+    maintenance = {"tasks": {"culture_c1_feed": {"label": "Feed rotifers", "snoozedUntil": None}},
+                   "completions": {}}
+    entry = _entry(jars={"c1": _jar(started_ago_days=12, lastFedAt=_iso(REAL - timedelta(hours=20)))},
+                   maintenance=maintenance)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # A skip: the hold on the reminder and the skip stamp go with it.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "tint": "green", "skip_feed": True}))
+    cfg = entry.options[CONF_SETTINGS]
+    stamp = cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]["at"]
+    assert cfg["maintenance"]["tasks"]["culture_c1_feed"]["snoozedUntil"]
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 2, "jar_id": "c1", "at": stamp}))
+    cfg = entry.options[CONF_SETTINGS]
+    jar = cfg["nps"]["cultures"]["jars"]["c1"]
+    assert jar["state"]["lastFeedSkippedAt"] == "" and cfg["maintenance"]["tasks"]["culture_c1_feed"]["snoozedUntil"] is None
+    assert not cfg["maintenance"]["completions"].get("culture_c1_feed")
+    assert cfg["consumables"]["products"]["phyto"]["remainingMl"] == 300.0, "a skip never moved phyto, so none comes back"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    feed = next(j for j in conn.results[-1].payload["jars"] if j["id"] == "c1")["state"]["feed"]
+    assert feed["skipped"] is False and feed["due"] is True, "the feed is due again"
+    # A sign: withdrawn, the restart no longer comes forward.
+    run(integration.websocket_cultures_log(hass, conn, {"id": 4, "jar_id": "c1", "sign": "foam"}))
+    stamp = entry.options[CONF_SETTINGS]["nps"]["cultures"]["jars"]["c1"]["history"][0]["at"]
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 5}))
+    assert next(j for j in conn.results[-1].payload["jars"] if j["id"] == "c1")["state"]["restart"]["reason"] == "sign"
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 6, "jar_id": "c1", "at": stamp}))
+    jar = entry.options[CONF_SETTINGS]["nps"]["cultures"]["jars"]["c1"]
+    assert jar["state"]["lastSign"] == "" and jar["state"]["lastSignAt"] == ""
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 7}))
+    assert next(j for j in conn.results[-1].payload["jars"] if j["id"] == "c1")["state"]["restart"]["reason"] != "sign"
+    # Beyond a day, a ceremony, an unknown jar: refused, nothing moves.
+    old = _iso(REAL - timedelta(hours=30))
+    jar["history"].insert(0, {"event": "feed", "at": old, "ml": 0, "tint": "green", "fed": True, "skipped": False})
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 8, "jar_id": "c1", "at": old}))
+    assert conn.errors[-1].code == "nothing_to_undo"
+    run(integration.websocket_cultures_log(hass, conn, {"id": 9, "jar_id": "c1", "harvested": True}))
+    stamp = entry.options[CONF_SETTINGS]["nps"]["cultures"]["jars"]["c1"]["history"][0]["at"]
+    assert entry.options[CONF_SETTINGS]["nps"]["cultures"]["jars"]["c1"]["history"][0]["event"] == "harvest"
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 10, "jar_id": "c1", "at": stamp}))
+    assert conn.errors[-1].code == "not_undoable"
+    assert not entry.options[CONF_SETTINGS]["nps"]["cultures"]["jars"]["c1"]["history"][0].get("undoneAt")
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 11, "jar_id": "nope", "at": stamp}))
+    assert conn.errors[-1].code == "unknown_jar"
+
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

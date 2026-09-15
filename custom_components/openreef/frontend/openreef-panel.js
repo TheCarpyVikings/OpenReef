@@ -1920,6 +1920,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-fed") this._culturesLog(id, true, false);
       if (action === "cultures-looked") this._culturesLog(id, false, false);
       if (action === "cultures-skip-feed") this._culturesLog(id, false, false, "", true);
+      if (action === "cultures-undo") this._culturesUndo(id, target.dataset.at || "");
       if (action === "cultures-timeline-days") { this._cultures.timelineDays = Number(target.dataset.days) || 14; this._render(); }
       if (action === "cultures-harvested") this._culturesLog(id, true, true);
       if (action === "cultures-harvest-tank") this._culturesLog(id, false, true, "tank");
@@ -12751,9 +12752,19 @@ const rigSteps = [
     this._culturesCall(msg, harvested
       ? (msg.destination === "tank" ? "Harvest logged — straight into the tank; the strip, the log and the reminders keep count."
         : "Harvest logged — the bottle and the reminders keep count.")
-      : fed ? "Feed logged — the phyto bottle keeps count."
-        : msg.skip_feed ? "Feed skipped — the water is on the record; the reminder holds until the next slot."
-          : "Tint logged — nothing else moved.");
+      : fed ? "Feed logged — the phyto bottle keeps count. Wrong water? Undo it from the journal for a day."
+        : msg.skip_feed ? "Feed skipped — the water is on the record; the reminder holds until the next slot. Wrong water? Undo it from the journal for a day."
+          : "Tint logged — nothing else moved. Wrong water? Undo it from the journal for a day.");
+  }
+
+  // Take a daily tap back (0.7.191): the journal row is tombstoned, the
+  // jar's clocks re-read the surviving rows, the phyto dose returns, the
+  // reminder completion goes. The timeline and the feed advice follow on
+  // the reload — the backend owns every one of them.
+  _culturesUndo(jarId, at) {
+    if (!jarId || !at) return;
+    this._culturesCall({ type: "openreef/cultures_undo", jar_id: jarId, at },
+      "Taken back — the journal, the timeline and the feed advice no longer count that tap. Log the look again as you saw it.");
   }
 
   // A crash sign (V2 Stage B): foam, milky water, a smell, pods at the
@@ -13610,12 +13621,19 @@ const rigSteps = [
           return `<small><strong>${this._escape(j.speciesName)}</strong> <em class="muted">${this._escape(j.latin || "")}</em> — ${this._escape(j.note || "")}</small>`;
         }).join("")}
       </article>` : "";
-    const events = jars.flatMap((j) => (j.history || []).map((h) => ({ ...h, jar: j.name })))
+    const events = jars.flatMap((j) => (j.history || []).map((h) => ({ ...h, jar: j.name, jarId: j.id })))
       .concat((bottle.history || []).map((h) => ({ ...h, jar: "Bottle" })))
       .filter((h) => h.at).sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, 12);
     const eventLabel = { seeded: "seeded", feed: "fed", tint: "looked", skip: "feed skipped", harvest: "harvested", restart: "restarted", water_change: "water change", split: "split", crashed: "crashed", sign: "sign",
       enriched: "enriched & bottled", bottled: "bottled plain", filled: "filled", fed_tank: "fed to the tank", emptied: "emptied" };
     const signWord = Object.fromEntries((sum.signs || []).map((sg) => [sg.id, sg.label]));
+    // Undo (0.7.191): a daily tap — a look, a feed, a skip, a sign — can be
+    // taken back for a day; the ceremonies move water and stock and cannot.
+    // A taken-back row stays on the page, struck through, so the log never
+    // hides what happened.
+    const undoWindowMs = 24 * 3600000;
+    const undoable = (h) => h.jarId && !h.undoneAt && ["feed", "tint", "skip", "sign"].includes(h.event)
+      && Date.now() - Date.parse(h.at) <= undoWindowMs;
     const journal = events.length ? `
       <article class="panel stack">
         <p class="eyebrow" style="margin:0;">Culture journal</p>
@@ -13630,16 +13648,20 @@ const rigSteps = [
               <th style="text-align:left;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Sign</th>
               <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">Eggs</th>
               <th style="text-align:right;padding:6px 10px;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65;">°C</th>
+              <th style="padding:6px 10px;"></th>
             </tr></thead>
-            <tbody>${events.map((h) => `<tr>
+            <tbody>${events.map((h) => `<tr${h.undoneAt ? ` class="culture-journal-undone" style="opacity:0.45;text-decoration:line-through;"` : ""}>
               <td style="padding:6px 10px;white-space:nowrap;">${this._escape(this._formatActivityTime(h.at))}</td>
               <td style="padding:6px 10px;">${this._escape(h.jar)}</td>
-              <td style="padding:6px 10px;">${this._escape(h.skipped && h.event === "tint" ? "looked · feed skipped" : eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}${h.purgeMl ? ` · bled ${this._escape(String(Math.round(h.purgeMl)))} ml` : ""}</td>
+              <td style="padding:6px 10px;">${this._escape(h.skipped && h.event === "tint" ? "looked · feed skipped" : eventLabel[h.event] || h.event)}${h.from ? ` (${this._escape((jars.find((x) => x.id === h.from) || {}).name || h.from)})` : ""}${h.purgeMl ? ` · bled ${this._escape(String(Math.round(h.purgeMl)))} ml` : ""}${h.undoneAt ? ` · taken back` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.ml ? this._escape(String(Math.round(h.ml))) : ""}</td>
               <td style="padding:6px 10px;">${this._escape(h.tint || "")}</td>
               <td style="padding:6px 10px;color:var(--error-color,#e5484d);">${this._escape(h.sign ? (signWord[h.sign] || h.sign) : "")}</td>
               <td style="padding:6px 10px;text-align:right;">${h.eggRatio != null ? `${this._escape(String(Math.round(h.eggRatio)))} %` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.tempC != null ? this._escape(String(h.tempC)) : ""}</td>
+              <td style="padding:2px 6px;text-align:right;white-space:nowrap;">${undoable(h)
+                ? `<button class="secondary compact-button" data-action="cultures-undo" data-id="${this._escape(h.jarId)}" data-at="${this._escape(h.at)}" title="Takes this tap back — the water, the feed clock and the phyto dose go back to how they were; the timeline and the feed advice stop counting it">Undo</button>`
+                : ""}</td>
             </tr>`).join("")}</tbody>
           </table>
         </div>
