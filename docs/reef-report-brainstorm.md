@@ -216,20 +216,25 @@ recorder is absent.
 A–E is the weekly report end to end; F–G make it the monthly one and make it
 shareable (the livestream and Discord audience will want the PNG).
 
-## 8. Open questions for Reece
+## 8. Decisions (Reece, 2026-09-16)
 
-1. **Week boundary**: Monday–Sunday (matches the water-change chart)? Report
-   lands Monday 07:00?
-2. **Where it lives**: a Reports screen off Home (hero card "Last week: 78,
-   up 4") or its own tab? Brief assumes off Home, matching the settings-audit
-   rule (dialogs and screens off feature tabs, not more tabs).
-3. **Score name**: "Reef Week Score" vs extending Reef Health with a history.
-   Brief keeps Reef Health as the *now* score and the Week Score as the
-   *period* score, sharing the chemistry parts.
-4. **Push**: digest line only, or the whole headline block in Telegram?
-5. **Beta**: does the first tester (Apex + Trident) get a report that reads
-   Trident tests from the recorder? That decides whether Stage B reads sensor
-   history for Alk/Ca/Mg or waits for manual tests.
+1. **Week boundary**: user-configurable, default Monday–Sunday → `reports.weekStart` (0 = Monday).
+2. **Where it lives**: off Home (a hero card, a Reports screen behind it).
+3. **Score**: the Reef Week Score sits *alongside* Reef Health (the now score); they share the chemistry parts.
+4. **Push**: the headline block as its own Monday push (score, delta, verdict, three counts, top recommendation, link); the digest line is the fallback when push is off. The whole report is never pushed — sharing is the share button's job.
+5. **Beta tester**: yes — Stage B reads Trident tests from the recorder from day one, falling back to manual tests.
+
+### 8.1 Stage A as built (0.7.197, 2026-09-16)
+
+- `reports` block in `DEFAULT_CORE_CONFIG`: `weekStart`, `scoreLog` (cap 400, one row per local day), `events` (cap 400). `_normalise_reports` coerces both ledgers, newest first, latest stamp per day wins.
+- **Score log is panel-stamped.** Reef Health is panel maths over live HA state (sensor alerts, interlocks, validation); porting it is not Stage A work. The panel calls `openreef/report_score_stamp {date, total, parts}` once per local day (refreshed every six hours it is open, never from a demo). A day the panel never opened is an honest gap — Stage D's Week Score computes its chemistry part backend-side from tests + recorder, and reads this log as "Reef Health as seen".
+- **Event ledger rides `_append_activity`.** Every non-info activity (`control`, `warning`) and any caller that passes a `kind` is mirrored into `reports.events` at the same choke point; the activity feed keeps its 200 lines, the ledger keeps the month. `openreef/report_events {days}` reads a window.
+- Both ledgers are server-owned and join the stale-save guard (`_reports_preserve_runtime`, both save paths); `weekStart` stays the client's.
+
+## 8.2 Still open
+
+- Report landing time: Monday 07:00 local assumed (a Settings field alongside weekStart in Stage E).
+- Which activity choke points should pass a `kind` (mode applied, AWC run, spawning run, cooling trigger) so the "What happened" section can group them — decided per stage as the compile needs them.
 
 ## 9. Sources (research 2026-09-16)
 

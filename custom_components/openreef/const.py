@@ -53,7 +53,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.196"
+INTEGRATION_VERSION = "0.7.197"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
@@ -310,6 +310,13 @@ NOTIFY_ACTION_UNSUB = "notify_action_unsub"
 # runs from the refractometer. The task itself is seeded by a panel button —
 # the sync bridge never conjures a reminder behind the keeper's back.
 MAINTENANCE_SOURCE_MIXING = "mixing"
+
+# Reef Report ledgers (Stage A, 0.7.197 — docs/reef-report-brainstorm.md §4).
+# Both server-owned: the panel stamps the day's Reef Health through
+# report_score_stamp, the backend mirrors non-info activity into events.
+REPORT_SCORE_LOG_MAX = 400          # one row per local day, newest first
+REPORT_EVENTS_MAX = 400             # the month of "what happened", newest first
+REPORT_EVENT_TYPES = ("control", "warning", "critical", "error")
 MAINTENANCE_MIXING_RETEST_TASK_ID = "mixing_retest"
 
 # Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
@@ -1466,6 +1473,12 @@ DEFAULT_CORE_CONFIG = {
     # the diagram rockwork. Honesty rule: empty registry = bare rock. Placement
     # slots live in diagram.layout under coral:<id> keys like every other
     # draggable node; species gates which zone slots are valid.
+    # Reef Report (Stage A, 0.7.197): the week boundary + two bounded ledgers.
+    "reports": {
+        "weekStart": 0,                     # 0 = Monday … 6 = Sunday (Reece: user-configurable, default Mon–Sun)
+        "scoreLog": [],                     # [{date, at, total, parts{category: score}}] newest first
+        "events": [],                       # [{at, message, type, kind}] newest first
+    },
     "livestock": {
         "corals": {},
         # The coral diary (0.7.192, docs/coral-diary-brainstorm.md): the

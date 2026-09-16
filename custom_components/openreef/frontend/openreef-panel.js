@@ -141,6 +141,8 @@ class OpenReefPanel extends HTMLElement {
     this._maintenanceExpanded = "";       // the one row open to its full card
     this._maintenanceLaterOpen = false;   // "Later this week" folded by default
     this._maintLog = { days: 30, task: "", source: "", limit: 80 };   // 0.7.196 log filters
+    this._reportStampedDate = "";         // 0.7.197: the local day the Reef Health stamp went up
+    this._reportStampedAt = 0;
     // Per-task completion-form drafts (done-at / volume / unit). Echoed back into
     // the inputs on render so a background hass update re-render doesn't wipe
     // half-typed values the moment the field loses focus.
@@ -6739,6 +6741,39 @@ class OpenReefPanel extends HTMLElement {
     }).join("");
   }
 
+  // Reef Report, Stage A (0.7.197): the panel is the one that can say today's
+  // Reef Health (it is panel maths over live HA state), so it stamps the
+  // day's score into the backend's ledger — once per local day, refreshed
+  // every six hours the panel is open, never from a demo. A day the panel
+  // never opened is an honest gap in the report, by design.
+  _reportLocalDate(date = new Date()) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+
+  _reportMaybeStamp(health) {
+    if (!health || !Number.isFinite(Number(health.score)) || !this._hass || this._nps?.demo || this._cultures?.demo) return false;
+    const today = this._reportLocalDate();
+    const stampedAt = Number(this._reportStampedAt) || 0;
+    const stampedDate = this._reportStampedDate || "";
+    if (stampedDate === today && Date.now() - stampedAt < 6 * 3600000) return false;
+    // A stamp already on the ledger for today (another device, an earlier
+    // open) counts as ours until it ages out.
+    const latest = (this._config?.reports?.scoreLog || [])[0];
+    if (stampedDate !== today && latest?.date === today && Date.now() - Date.parse(latest.at || "") < 6 * 3600000) {
+      this._reportStampedDate = today;
+      this._reportStampedAt = Date.parse(latest.at) || Date.now();
+      return false;
+    }
+    this._reportStampedDate = today;
+    this._reportStampedAt = Date.now();
+    const parts = Object.fromEntries(Object.entries(health.categories || {})
+      .map(([id, cat]) => [id, Math.round(Number(cat?.score))])
+      .filter(([, v]) => Number.isFinite(v)));
+    Promise.resolve(this._callWS({ type: "openreef/report_score_stamp", date: today, total: Math.round(Number(health.score)), parts }))
+      .catch(() => { this._reportStampedAt = 0; });   // try again on the next render
+    return true;
+  }
+
   _systemCheck() {
     const sensors = Object.entries(this._config.sensors || {});
     const enabledSensors = sensors.filter(([, sensor]) => this._sensorEnabled(sensor));
@@ -6760,6 +6795,7 @@ class OpenReefPanel extends HTMLElement {
       ? this._config.activity[0].message || "Recorded"
       : "None yet";
     const health = this._reefHealthScore(enabledSensors, equipment, sensorAlerts, interlocks);
+    this._reportMaybeStamp(health);
     const sensorSummary = this._sensorSummaryState(sensorAlerts, !enabledSensors.length);
     const manualTracked = this._manualTestParameterIds().filter((id) => this._manualTestConfig(id).enabled);
     const manualDue = this._manualTestFreshnessItems().filter((item) => item.status === "warning" || item.status === "critical");

@@ -123,6 +123,9 @@ from .const import (
     MANUAL_TEST_PARAMETERS,
     MAINTENANCE_MIXING_RETEST_TASK_ID,
     MAINTENANCE_SOURCE_MIXING,
+    REPORT_EVENT_TYPES,
+    REPORT_EVENTS_MAX,
+    REPORT_SCORE_LOG_MAX,
     MIXING_CAL_CAP_MIN,
     MIXING_CAL_MIN_SECONDS,
     MIXING_CIRCULATE_EVERY_MAX_H,
@@ -3583,6 +3586,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     # ledgers and the one-shot NPS tick-list migration live in one place.
     _normalise_livestock(config)
 
+    # Reef Report ledgers (Stage A, 0.7.197).
+    _normalise_reports(config)
+
     dosing = config.setdefault("dosing", {})
     if not isinstance(dosing, dict):
         config["dosing"] = deepcopy(DEFAULT_CORE_CONFIG["dosing"])
@@ -6639,20 +6645,107 @@ async def _async_save_config(
     return normalised
 
 
-def _append_activity(config: dict[str, Any], message: str, activity_type: str = "info") -> None:
+def _append_activity(config: dict[str, Any], message: str, activity_type: str = "info",
+                     kind: str | None = None) -> None:
     activity = config.setdefault("activity", [])
     if not isinstance(activity, list):
         activity = []
         config["activity"] = activity
+    stamp = datetime.now(timezone.utc).isoformat()
     activity.insert(
         0,
         {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": stamp,
             "message": message,
             "type": activity_type,
         },
     )
     config["activity"] = activity[:ACTIVITY_MAX_ENTRIES]
+    # The report's event ledger (Stage A, 0.7.197) rides the same choke point:
+    # anything that is not plain information — a control, a warning — or a
+    # caller that names its kind, kept long enough for a month's report where
+    # the activity feed keeps only its 200 lines.
+    if kind or activity_type in REPORT_EVENT_TYPES:
+        _append_report_event(config, message, activity_type, kind, stamp)
+
+
+def _reports_block(config: dict[str, Any]) -> dict[str, Any]:
+    reports = config.get("reports")
+    if not isinstance(reports, dict):
+        reports = deepcopy(DEFAULT_CORE_CONFIG["reports"])
+        config["reports"] = reports
+    return reports
+
+
+def _append_report_event(config: dict[str, Any], message: str, event_type: str,
+                         kind: str | None, stamp: str | None = None) -> None:
+    reports = _reports_block(config)
+    events = reports.get("events")
+    if not isinstance(events, list):
+        events = []
+    row: dict[str, Any] = {"at": stamp or datetime.now(timezone.utc).isoformat(),
+                           "message": str(message)[:200], "type": str(event_type)}
+    if kind:
+        row["kind"] = str(kind)[:40]
+    events.insert(0, row)
+    reports["events"] = events[:REPORT_EVENTS_MAX]
+
+
+def _normalise_reports(config: dict[str, Any]) -> None:
+    """The Reef Report block (Stage A): the keeper's week boundary and the two
+    server-written ledgers, each row coerced, newest first, one score per
+    day, both capped. Garbage never crashes the load."""
+    reports = _reports_block(config)
+    defaults = DEFAULT_CORE_CONFIG["reports"]
+    reports["weekStart"] = int(_awc_num(reports.get("weekStart"), defaults["weekStart"], 0, 6))
+    score_rows: dict[str, dict[str, Any]] = {}
+    for raw in reports.get("scoreLog") if isinstance(reports.get("scoreLog"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        date = str(raw.get("date") or "")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            continue
+        total = raw.get("total")
+        if not isinstance(total, (int, float)) or isinstance(total, bool):
+            continue
+        parts_raw = raw.get("parts") if isinstance(raw.get("parts"), dict) else {}
+        parts = {str(k)[:24]: int(round(_awc_num(v, 0, 0, 100))) for k, v in parts_raw.items()
+                 if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        row = {"date": date, "at": str(raw.get("at") or ""), "total": int(round(_awc_num(total, 0, 0, 100))),
+               "parts": parts}
+        prev = score_rows.get(date)
+        if prev is None or row["at"] >= prev["at"]:
+            score_rows[date] = row
+    reports["scoreLog"] = sorted(score_rows.values(), key=lambda r: r["date"], reverse=True)[:REPORT_SCORE_LOG_MAX]
+    events = []
+    for raw in reports.get("events") if isinstance(reports.get("events"), list) else []:
+        if not isinstance(raw, dict) or _parse_datetime(raw.get("at")) is None:
+            continue
+        row = {"at": str(raw.get("at")), "message": str(raw.get("message") or "")[:200],
+               "type": str(raw.get("type") or "info")}
+        if raw.get("kind"):
+            row["kind"] = str(raw.get("kind"))[:40]
+        events.append(row)
+    events.sort(key=lambda r: _parse_datetime(r["at"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    reports["events"] = events[:REPORT_EVENTS_MAX]
+
+
+def _reports_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
+    """Carry the report ledgers through a whole-config save, in place on
+    ``incoming``: the score log and the event ledger are written only by the
+    backend (the stamp WS, the activity choke point), so the client's copy is
+    at best a snapshot and at worst a stale one. weekStart is the keeper's
+    setting and stays the client's."""
+    if not isinstance(stored, dict) or not isinstance(incoming, dict):
+        return
+    stored_reports = stored.get("reports")
+    if not isinstance(stored_reports, dict):
+        return
+    target = incoming.get("reports")
+    if not isinstance(target, dict):
+        target = {}
+        incoming["reports"] = target
+    _copy_runtime_fields(stored_reports, target, ("scoreLog", "events"))
 
 
 def _mode_label(config: dict[str, Any], mode_id: str) -> str:
@@ -10325,6 +10418,7 @@ async def websocket_save_config(
     _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     _livestock_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
+    _reports_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
     _merge_activity(entry.options.get(CONF_SETTINGS), msg["config"])
     # A hatch-clock change here has to reach the batch already incubating and
     # the reminders hanging off it, or the page contradicts itself (0.7.80).
@@ -10378,6 +10472,7 @@ async def websocket_update_config_alias(
     _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
     _nps_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
     _livestock_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
+    _reports_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
     _merge_activity(entry.options.get(CONF_SETTINGS), msg["settings"])
     config = await _async_save_config(hass, entry, msg["settings"])
     connection.send_result(
@@ -10719,6 +10814,69 @@ async def websocket_coral_feed(
     _append_activity(config, f"Target-fed {names}" + (f" — {food}" if food else "") + (f", {ml:g} ml" if ml else ""), "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/report_score_stamp",
+    vol.Required("date"): cv.string,
+    vol.Required("total"): vol.Any(int, float),
+    vol.Optional("parts"): dict,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_report_score_stamp(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The day's Reef Health, stamped by the panel (Stage A, 0.7.197). The
+    score is panel maths over live HA state, so the panel is the one that
+    can say it; the backend keeps the ledger — one row per local day, the
+    latest stamp wins, a day the panel never opened stays an honest gap."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    date = str(msg.get("date") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        connection.send_error(msg["id"], "invalid_date", "date must be YYYY-MM-DD")
+        return
+    total = msg.get("total")
+    if not isinstance(total, (int, float)) or isinstance(total, bool) or not 0 <= float(total) <= 100:
+        connection.send_error(msg["id"], "invalid_total", "total must be 0–100")
+        return
+    config = _config_from_entry(entry)
+    reports = _reports_block(config)
+    parts_raw = msg.get("parts") if isinstance(msg.get("parts"), dict) else {}
+    row = {"date": date, "at": datetime.now(timezone.utc).isoformat(), "total": int(round(float(total))),
+           "parts": {str(k)[:24]: int(round(_awc_num(v, 0, 0, 100))) for k, v in parts_raw.items()
+                     if isinstance(v, (int, float)) and not isinstance(v, bool)}}
+    log = [r for r in (reports.get("scoreLog") or []) if isinstance(r, dict) and r.get("date") != date]
+    log.insert(0, row)
+    reports["scoreLog"] = log
+    _normalise_reports(config)
+    config = await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"scoreLog": (config.get("reports") or {}).get("scoreLog", [])[:14]})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/report_events",
+    vol.Optional("days"): vol.Any(int, float),
+})
+@websocket_api.async_response
+async def websocket_report_events(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The event ledger for a window (default 7 days) — the report's "what
+    happened", readable on its own."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    days = _awc_num(msg.get("days"), 7, 1, 92)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    events = [row for row in (config.get("reports") or {}).get("events", [])
+              if isinstance(row, dict) and (_parse_datetime(row.get("at")) or since) >= since]
+    connection.send_result(msg["id"], {"days": days, "events": events})
 
 
 @websocket_api.websocket_command({
@@ -23179,6 +23337,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_coral_checkin_undo)
     websocket_api.async_register_command(hass, websocket_coral_feed)
     websocket_api.async_register_command(hass, websocket_coral_feed_undo)
+    websocket_api.async_register_command(hass, websocket_report_score_stamp)
+    websocket_api.async_register_command(hass, websocket_report_events)
     websocket_api.async_register_command(hass, websocket_coral_status)
     websocket_api.async_register_command(hass, websocket_search_entities)
     websocket_api.async_register_command(hass, websocket_validate_config)
