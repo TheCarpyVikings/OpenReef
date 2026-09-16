@@ -231,7 +231,13 @@ shareable (the livestream and Discord audience will want the PNG).
 - **Event ledger rides `_append_activity`.** Every non-info activity (`control`, `warning`) and any caller that passes a `kind` is mirrored into `reports.events` at the same choke point; the activity feed keeps its 200 lines, the ledger keeps the month. `openreef/report_events {days}` reads a window.
 - Both ledgers are server-owned and join the stale-save guard (`_reports_preserve_runtime`, both save paths); `weekStart` stays the client's.
 
-## 8.2 Still open
+### 8.2 Stage B as built (0.7.198, 2026-09-16)
+
+- `report.py` — pure engine: `period_bounds` (week on `reports.weekStart`, month; previous or the partial current), `compile_period(ctx)` → headline (score stamps: latest / average / delta vs the period before / gaps), What you did (per task done / skipped / late with on-time % against each task's own cadence, water changed by hand vs AWC, AWC runs, tests, feeds recounted inside the window, hatches, culture feeds, coral looks), Water (per parameter: tests, sensor samples, latest, days since, four-week points, band steady / drifting / swinging / single / untested on kit-precision tolerances, in-range against the sensor's min/max, a median-fall-per-day consumption estimate for Alk/Ca/Mg that needs two falling pairs), Living reef (hatches with actual vs planned hours, culture journals, coral grades and score moves), What happened (event ledger in the window), Next (the plan by local day), notes (the honesty lines), one calm verdict sentence.
+- Backend: `_maintenance_next_due_at` / `_maintenance_upcoming` mirror the panel's Coming up clock (interval, hour cadence, fixed days, snooze, culture and hatch clocks); `_report_context` gathers every ledger; `_nps_feed_log_for` reuses the NPS feed-log engine; `_report_recorder_readings` reads sensor history from the recorder when present (decision 5) and the panel may hand its own `readings` in; `openreef/report_compile {period, which, readings}`.
+- Not stored, no UI, no push yet — Stage C renders it, Stage E schedules and stores it.
+
+## 8.3 Still open
 
 - Report landing time: Monday 07:00 local assumed (a Settings field alongside weekStart in Stage E).
 - Which activity choke points should pass a `kind` (mode applied, AWC run, spawning run, cooling trigger) so the "What happened" section can group them — decided per stage as the compile needs them.

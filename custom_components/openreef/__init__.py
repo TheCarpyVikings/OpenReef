@@ -7,6 +7,7 @@ import base64
 import binascii
 import logging
 import math
+import functools
 import re
 import uuid
 from collections.abc import Iterable
@@ -225,6 +226,7 @@ from . import icp
 from . import mixing as mixing_engine
 from . import cultures as cultures_engine
 from . import livestock as livestock_engine
+from . import report as report_engine
 from . import cooling as cooling_engine
 from . import nps as nps_engine
 from . import spawning
@@ -10817,6 +10819,43 @@ async def websocket_coral_feed(
 
 
 @websocket_api.websocket_command({
+    vol.Required("type"): "openreef/report_compile",
+    vol.Optional("period"): vol.In(("week", "month")),
+    vol.Optional("which"): vol.In(("previous", "current")),
+    vol.Optional("readings"): dict,
+})
+@websocket_api.async_response
+async def websocket_report_compile(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The Reef Report, compiled on demand (Stage B, 0.7.198): the last
+    complete week (or month), or the one in progress flagged partial. Sensor
+    readings come from the recorder when it is there, or from the panel's
+    own history fetch (``readings``) — never guessed."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    now_utc = datetime.now(timezone.utc)
+    now_local = dt_util.as_local(now_utc)
+    if not isinstance(now_local, datetime):
+        now_local = now_utc
+    period = report_engine.period_bounds(
+        now_local, (config.get("reports") or {}).get("weekStart", 0),
+        str(msg.get("period") or "week"), str(msg.get("which") or "previous"))
+    readings = msg.get("readings") if isinstance(msg.get("readings"), dict) else {}
+    if not readings:
+        readings = await _report_recorder_readings(
+            hass, config, tuple(MANUAL_TEST_PARAMETERS),
+            period["start"] - timedelta(days=report_engine.TREND_DAYS), period["end"])
+    ctx = _report_context(config, now_utc, now_local, period, readings)
+    report = report_engine.compile_period(ctx)
+    report["readingsSource"] = "panel" if msg.get("readings") else ("recorder" if readings else "tests")
+    connection.send_result(msg["id"], report)
+
+
+@websocket_api.websocket_command({
     vol.Required("type"): "openreef/report_score_stamp",
     vol.Required("date"): cv.string,
     vol.Required("total"): vol.Any(int, float),
@@ -16424,6 +16463,227 @@ def _nps_cultures_cfg(config: dict[str, Any]) -> dict[str, Any]:
     nps_cfg = config.setdefault("nps", {})
     nps_cfg["cultures"] = _normalise_cultures(nps_cfg.get("cultures"))
     return nps_cfg["cultures"]
+
+
+def _maintenance_next_scheduled_after(task: dict[str, Any], today) -> Any:
+    """The next fixed-schedule day strictly after ``today`` (LOCKSTEP with the
+    panel's _maintenanceNextScheduledAfter: ISO weekday, Monday = 0)."""
+    days = {int(d) for d in (task.get("scheduleDays") or []) if isinstance(d, (int, float))}
+    month_days = {int(d) for d in (task.get("scheduleMonthDays") or []) if isinstance(d, (int, float))}
+    if not days and not month_days:
+        return None
+    cursor = today + timedelta(days=1)
+    for _ in range(366):
+        if cursor.weekday() in days or cursor.day in month_days:
+            return cursor
+        cursor += timedelta(days=1)
+    return None
+
+
+def _maintenance_next_due_at(config: dict[str, Any], task_id: str, task: dict[str, Any],
+                             now: datetime) -> tuple[datetime | None, str]:
+    """(when this task next falls due, its state) — the backend mirror of the
+    panel's _maintenanceNextDueMs (Stage B, 0.7.198) so the report's "next
+    week" plans on the same clock the Coming up list shows. Already-due tasks
+    return ``now``; a task with no clock to read returns None."""
+    completions = (config.get("maintenance") or {}).get("completions") or {}
+    last_done = _maintenance_last_done(completions.get(task_id) if isinstance(completions, dict) else None)
+    snooze = _parse_datetime(task.get("snoozedUntil"))
+    if snooze is not None and snooze <= now:
+        snooze = None
+    state = _maintenance_task_state(task, last_done, now)
+    clock: dict[str, Any] | None = None
+    tid = str(task_id)
+    if tid.startswith(MAINTENANCE_CULTURE_TASK_PREFIX):
+        clock = _cultures_task_clock(config, tid, now)
+        if not clock.get("available"):
+            return None, "unknown"
+        state = ("critical" if clock.get("reason") in ("sign", "slow") else "warning") if clock.get("due") else "ok"
+    elif tid.startswith(MAINTENANCE_HATCH_START_TASK_ID) or tid.startswith(MAINTENANCE_HATCH_HARVEST_TASK_ID):
+        clock = _nps_hatch_task_clock(config, tid, now)
+        if clock and not clock.get("available"):
+            return None, "unknown"
+        if clock:
+            state = str(clock.get("severity") or "ok") if clock.get("due") else "ok"
+        else:
+            clock = None
+    if snooze is not None:
+        state = "ok"
+    elif state in ("warning", "critical"):
+        return now, state
+    if clock is not None:
+        at = _parse_datetime(clock.get("at"))
+        if at is None:
+            return None, "unknown"
+        return (max(at, snooze) if snooze else at), state
+    if task.get("scheduleMode") == "fixed":
+        tz = now.tzinfo or timezone.utc
+        nxt = _maintenance_next_scheduled_after(task, now.astimezone(tz).date())
+        if nxt is None:
+            return None, "unknown"
+        base = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz)
+    else:
+        cadence_h = task.get("cadenceHours")
+        if isinstance(cadence_h, (int, float)) and not isinstance(cadence_h, bool) and cadence_h > 0:
+            span = timedelta(hours=float(cadence_h))
+        else:
+            span = timedelta(days=float(task.get("cadenceDays") or 7))
+        base = (last_done or now) + span
+    return (max(base, snooze) if snooze else base), state
+
+
+def _maintenance_task_source(task_id: str) -> str:
+    tid = str(task_id)
+    if tid.startswith(MAINTENANCE_HATCH_START_TASK_ID) or tid.startswith(MAINTENANCE_HATCH_HARVEST_TASK_ID):
+        return "hatchery"
+    if tid.startswith(MAINTENANCE_CULTURE_TASK_PREFIX):
+        return "cultures"
+    if tid.startswith(MAINTENANCE_SHELF_TASK_PREFIX):
+        return "shelf"
+    return ""
+
+
+def _maintenance_upcoming(config: dict[str, Any], now: datetime, days: float = 7) -> list[dict[str, Any]]:
+    """Every tracked task falling due within ``days`` of ``now`` (already-due
+    ones first), for the report's plan — the Coming up list, backend-side."""
+    maintenance = config.get("maintenance") or {}
+    if not isinstance(maintenance, dict) or not maintenance.get("enabled", True):
+        return []
+    tasks = maintenance.get("tasks") if isinstance(maintenance.get("tasks"), dict) else {}
+    horizon = now + timedelta(days=days)
+    out: list[dict[str, Any]] = []
+    for task_id, task in tasks.items():
+        if not isinstance(task, dict) or not task.get("enabled"):
+            continue
+        at, state = _maintenance_next_due_at(config, str(task_id), task, now)
+        if at is None or at > horizon:
+            continue
+        out.append({"id": str(task_id), "label": str(task.get("label") or task_id), "dueAt": at.isoformat(),
+                    "status": state, "source": _maintenance_task_source(str(task_id)) or None})
+    out.sort(key=lambda item: item["dueAt"])
+    return out
+
+
+def _nps_feed_scope(hatchery_cfg: dict[str, Any], cultures_cfg: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """(quiet product ids, culture bottle species) — the bottles linked to the
+    soak or a jar, and the species whose harvest fills a fridge bottle."""
+    quiet = {str(hatchery_cfg["enrichment"]["productId"]), str(cultures_cfg["enrichment"]["productId"])}
+    quiet.update(str((jar.get("feed") or {}).get("productId") or "")
+                 for jar in cultures_cfg["jars"].values() if isinstance(jar, dict))
+    quiet.discard("")
+    bottle_species = {sid for sid in cultures_engine.species_ids()
+                      if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0}
+    return quiet, bottle_species
+
+
+def _nps_feed_log_for(config: dict[str, Any], now_local: datetime, days: int) -> dict[str, Any]:
+    """The feeding log for the last ``days`` local days, as the NPS summary
+    builds it (same inputs, same engine) — the report's feed counts."""
+    products = (config.get("consumables") or {}).get("products") or {}
+    channels = _dosing_channels(config)
+    hatchery_cfg = _nps_hatchery_v2(config)
+    cultures_cfg = _nps_cultures_cfg(config)
+    quiet, bottle_species = _nps_feed_scope(hatchery_cfg, cultures_cfg)
+    return nps_engine.feed_log(
+        now_local, products=products, channels=channels, cultures=cultures_cfg,
+        hatchery=hatchery_cfg, brine_feeds=[dict(item) for item in hatchery_cfg["handFeeds"]],
+        days=days, quiet_product_ids=quiet, culture_bottle_species=bottle_species)
+
+
+def _report_param_meta() -> dict[str, dict[str, Any]]:
+    meta: dict[str, dict[str, Any]] = {}
+    for param in MANUAL_TEST_PARAMETERS:
+        sensor = MVP_SENSORS.get(param) or {}
+        meta[param] = {"label": sensor.get("label") or param, "unit": sensor.get("unit") or "",
+                       "min": sensor.get("min"), "max": sensor.get("max")}
+    return meta
+
+
+def _report_context(config: dict[str, Any], now_utc: datetime, now_local: datetime,
+                    period: dict[str, Any], sensor_readings: dict[str, Any]) -> dict[str, Any]:
+    """Everything the report engine reads, gathered from the ledgers the
+    integration already keeps (brief §4). Pure config in; the recorder's
+    readings are handed in by the caller."""
+    start, end = period["start"], period["end"]
+    maintenance = config.get("maintenance") if isinstance(config.get("maintenance"), dict) else {}
+    hatchery_cfg = _nps_hatchery_v2(config)
+    cultures_cfg = _nps_cultures_cfg(config)
+    live = _livestock_cfg(config)
+    states = livestock_engine.summary(live, now_utc)["corals"]
+    for cid, coral in live["corals"].items():
+        if not isinstance(coral, dict) or cid not in states:
+            continue
+        before = [r for r in (live["checkins"].get(cid) or [])
+                  if isinstance(r, dict) and not r.get("undoneAt")
+                  and (_parse_datetime(r.get("at")) or end) < start]
+        if before:
+            before.sort(key=lambda r: _parse_datetime(r.get("at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            baseline = coral.get("baseline") if isinstance(coral.get("baseline"), dict) else {}
+            states[cid]["scoreBefore"] = livestock_engine.score_checkin(
+                before[0], baseline, livestock_engine.group_id(coral))["score"]
+    feed_log: dict[str, Any] | None = None
+    try:
+        span_days = (now_local.date() - start.astimezone(now_local.tzinfo).date()).days + 1
+        feed_log = _nps_feed_log_for(config, now_local, max(1, min(nps_engine.FEED_LOG_DAYS_MAX, span_days)))
+    except Exception as err:  # noqa: BLE001 — the report says "not available" rather than failing whole
+        _LOGGER.debug("report: feed log unavailable: %s", err)
+        feed_log = None
+    reports = _reports_block(config)
+    plan_from = now_utc if period["partial"] else max(now_utc, end)
+    return {
+        "period": period, "now": now_utc, "tankL": _awc_effective_tank_l(config),
+        "tasks": maintenance.get("tasks"), "completions": maintenance.get("completions"),
+        "manualReadings": config.get("manualReadings"), "sensorReadings": sensor_readings,
+        "paramMeta": _report_param_meta(),
+        "awcHistory": (_awc_cfg(config) or {}).get("history"),
+        "feedLog": feed_log,
+        "hatchHistory": hatchery_cfg.get("history"), "hatchVessels": hatchery_cfg.get("vessels"),
+        "cultureJars": cultures_cfg.get("jars") if cultures_cfg.get("enabled") else {},
+        "corals": live.get("corals"), "checkins": live.get("checkins"), "coralFeeds": live.get("feeds"),
+        "coralStates": states,
+        "events": reports.get("events"), "scoreLog": reports.get("scoreLog"),
+        "upcoming": _maintenance_upcoming(config, plan_from, 7 if period["kind"] == "week" else 14),
+    }
+
+
+async def _report_recorder_readings(hass: Any, config: dict[str, Any], params: tuple[str, ...],
+                                    start: datetime, end: datetime, cap: int = 240) -> dict[str, list[dict[str, Any]]]:
+    """Sensor history for the Water section — the beta tester's Trident
+    numbers live in the recorder, not in manual tests (brief §8, decision 5).
+    Returns {} when the recorder is not there (tests, a stripped install);
+    the report then reads manual tests alone and says so."""
+    sensors = config.get("sensors") if isinstance(config.get("sensors"), dict) else {}
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        from homeassistant.components.recorder import get_instance, history  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return out
+    for param in params:
+        entity_id = str((sensors.get(param) or {}).get("entity_id") or "")
+        if not entity_id:
+            continue
+        try:
+            states = await get_instance(hass).async_add_executor_job(
+                functools.partial(history.state_changes_during_period, hass, start, end, entity_id,
+                                  no_attributes=True))
+            rows = []
+            for st in (states or {}).get(entity_id, []) or []:
+                try:
+                    value = float(st.state)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if value != value:
+                    continue
+                rows.append({"t": st.last_changed.isoformat(), "v": round(value, 3)})
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("report: recorder read failed for %s: %s", entity_id, err)
+            continue
+        if len(rows) > cap:
+            step = len(rows) / cap
+            rows = [rows[int(i * step)] for i in range(cap)]
+        if rows:
+            out[param] = rows
+    return out
 
 
 def _cultures_task_id(jar_id: str, chore: str) -> str:
@@ -23337,6 +23597,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_coral_checkin_undo)
     websocket_api.async_register_command(hass, websocket_coral_feed)
     websocket_api.async_register_command(hass, websocket_coral_feed_undo)
+    websocket_api.async_register_command(hass, websocket_report_compile)
     websocket_api.async_register_command(hass, websocket_report_score_stamp)
     websocket_api.async_register_command(hass, websocket_report_events)
     websocket_api.async_register_command(hass, websocket_coral_status)
