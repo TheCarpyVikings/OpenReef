@@ -251,7 +251,14 @@ shareable (the livestream and Discord audience will want the PNG).
 - **Small recommendations** (`report.recommend`): rules over the compiled report, each with evidence, effort, effect and deep-link actions; ranked by priority (culture crash 8, alk untested 10, out of range 12, swinging 15, coral drop 18, culture signs 20, hatch late 25, other tests 30, no water change 35, late 40, skipped 45, closed panel 50); capped at three. A calm week gets "Keep the rhythm". `reports.snoozedRecs` (id → until; expired dropped by the normaliser; rides the guard) hides a recommendation until its stamp passes — `openreef/report_rec_snooze {rec_id, days}` (0 lifts).
 - Viewer: the Week Score card sits beside the Reef Health average with a "Why this score" fold (each part's score, weight, why and how to raise it); a Recommendations section under the headline with the actions and "Snooze a month".
 
-## 8.5 Still open
+### 8.5 Stage E as built (0.7.201, 2026-09-16)
+
+- **Schedule**: `reports.schedule {enabled, time (07:00), push}` (Settings → Maintenance → Reef Report, with the week-start day). One daily tick at that time (`_async_schedule_report`, re-armed on every save like the maintenance reminder) runs `_async_report_tick`: every period that has ended and is not stored is generated — the weekly one the morning the week turns, the monthly one on the 1st, a missed morning caught up the next, a fresh install's first report the next morning.
+- **Stored snapshots**: `report.snapshot(report)` keeps the compact record (headline numbers, counts, one line per parameter, the recommendations by title; under 2.5 KB) in `reports.items`, 26 weekly + 12 monthly, newest first, the same period replaced; server-owned, rides the guard. The viewer's "Past weeks / months" timeline draws the scores across periods and re-reads any stored period from the ledgers (`report_compile {anchor}`); "Store this week" (`report_generate`) stores by hand, never pushes.
+- **Push** (decision 4): `report.push_text` — the headline block (score with condition · consistency, Reef Health average and its move, the verdict, the counts, the top recommendation, where to read it) to the reminders' push target, its own message the morning it is written. Push off → `_report_digest_line` puts one line in that day's maintenance digest.
+- **Ledger hygiene** (found on Reece's tank the same night): the ATO duty cycle said "skipped unavailable ATO" every tick after a restart — the warning saved the config, the save re-armed the scheduler, re-arming ran the handler at once — 397 of the ledger's 400 rows. Now said once per window and state, persisted only when something changed; and the event ledger counts a repeated line up (`count`, `lastAt`, 6 h window) instead of adding rows, with a one-shot collapse of an existing flood on load.
+
+## 8.6 Still open
 
 - Report landing time: Monday 07:00 local assumed (a Settings field alongside weekStart in Stage E).
 - Which activity choke points should pass a `kind` (mode applied, AWC run, spawning run, cooling trigger) so the "What happened" section can group them — decided per stage as the compile needs them.

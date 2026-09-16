@@ -53,7 +53,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.200"
+INTEGRATION_VERSION = "0.7.201"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
@@ -317,6 +317,12 @@ MAINTENANCE_SOURCE_MIXING = "mixing"
 REPORT_SCORE_LOG_MAX = 400          # one row per local day, newest first
 REPORT_EVENTS_MAX = 400             # the month of "what happened", newest first
 REPORT_EVENT_TYPES = ("control", "warning", "critical", "error")
+REPORT_EVENT_REPEAT_HOURS = 6        # an identical line inside this window bumps a count, never a new row
+# Stage E (0.7.201): the schedule and the stored snapshots.
+REPORT_SCHEDULE_DEFAULT_TIME = "07:00"
+REPORT_ITEMS_WEEKLY_MAX = 26
+REPORT_ITEMS_MONTHLY_MAX = 12
+REPORT_SCHEDULE_UNSUB = "report_schedule_unsub"
 MAINTENANCE_MIXING_RETEST_TASK_ID = "mixing_retest"
 
 # Maintenance Tasks V2 — HA-native reminders. A single daily tick (at this local
@@ -1477,7 +1483,9 @@ DEFAULT_CORE_CONFIG = {
     "reports": {
         "weekStart": 0,                     # 0 = Monday … 6 = Sunday (Reece: user-configurable, default Mon–Sun)
         "scoreLog": [],                     # [{date, at, total, parts{category: score}}] newest first
-        "events": [],                       # [{at, message, type, kind}] newest first
+        "events": [],                       # [{at, message, type, kind, count}] newest first
+        "schedule": {"enabled": True, "time": REPORT_SCHEDULE_DEFAULT_TIME, "push": True},
+        "items": [],                        # stored snapshots (report.snapshot), newest first, 26 weekly + 12 monthly
     },
     "livestock": {
         "corals": {},

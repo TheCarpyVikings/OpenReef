@@ -325,6 +325,99 @@ def test_ws_rec_snooze_stores_and_lifts():
     assert incoming["reports"]["snoozedRecs"] == {"a": "2099-01-01T00:00:00+00:00"}, "snoozes ride the guard"
 
 
+def test_period_bounds_anchor_reads_any_past_period():
+    anchored = report.period_bounds(NOW, 0, "week", anchor=datetime(2026, 8, 20).date())
+    assert (anchored["start"].date().isoformat(), anchored["end"].date().isoformat(), anchored["partial"]) == ("2026-08-17", "2026-08-24", False)
+    this_week = report.period_bounds(NOW, 0, "week", anchor=NOW.date())
+    assert this_week["start"].date().isoformat() == "2026-09-14" and this_week["partial"]
+    month = report.period_bounds(NOW, 0, "month", anchor=datetime(2026, 7, 9).date())
+    assert (month["start"].date().isoformat(), month["end"].date().isoformat()) == ("2026-07-01", "2026-08-01")
+
+
+def test_snapshot_is_compact_and_push_text_carries_the_headline():
+    out = _busy_report()
+    snap = report.snapshot(out)
+    assert snap["id"] == "week:2026-09-07" and snap["kind"] == "week" and snap["label"] == "7–13 September 2026"
+    assert snap["weekScore"]["total"] == out["score"]["total"] and snap["did"]["done"] == 2
+    assert [w["id"] for w in snap["water"]][:2] == ["alkalinity", "calcium"] and snap["recommendations"][0]["id"] == "range_nitrate"
+    import json
+    assert len(json.dumps(snap)) < 2500, len(json.dumps(snap))
+    title, message = report.push_text(out)
+    assert title == "OpenReef Weekly Reef Report · 7–13 September 2026"
+    lines = message.split("\n")
+    assert lines[0].startswith(f"Week Score {out['score']['total']} (condition") and "Reef Health avg 75" in lines[0]
+    assert lines[1] == out["headline"]["verdict"] and lines[2] == "2 chores (50 % on time) · 10 L water changed · 2 tests"
+    assert lines[3] == "Top: Bring nitrate back into range" and lines[-1] == "Open OpenReef → Home → Reef Report."
+
+
+def test_store_snapshot_replaces_caps_and_rides_the_guard():
+    cfg = integration._normalise_core_config({})
+    out = _busy_report()
+    integration._report_store_snapshot(cfg, out)
+    integration._report_store_snapshot(cfg, out)
+    assert len(cfg["reports"]["items"]) == 1, "the same period stored twice is one row"
+    for weeks_back in range(1, 40):
+        older = dict(out, period={**out["period"], "start": (START - timedelta(days=7 * weeks_back)).isoformat(), "kind": "week"})
+        integration._report_store_snapshot(cfg, older)
+    for months_back in range(1, 20):
+        older = dict(out, period={**out["period"], "start": (START - timedelta(days=31 * months_back)).isoformat(), "kind": "month"})
+        integration._report_store_snapshot(cfg, older)
+    kinds = [r["kind"] for r in cfg["reports"]["items"]]
+    assert kinds.count("week") == integration.REPORT_ITEMS_WEEKLY_MAX and kinds.count("month") == integration.REPORT_ITEMS_MONTHLY_MAX
+    assert cfg["reports"]["items"][0]["id"] == "week:2026-09-07", "newest first"
+    stored = {"reports": {"items": [{"id": "week:2026-09-07", "kind": "week", "start": "2026-09-07"}], "scoreLog": [], "events": [], "snoozedRecs": {}}}
+    incoming = {"reports": {"weekStart": 0, "items": [], "scoreLog": [], "events": [], "snoozedRecs": {}, "schedule": {"enabled": False, "time": "08:00", "push": True}}}
+    integration._reports_preserve_runtime(stored, incoming)
+    assert incoming["reports"]["items"][0]["id"] == "week:2026-09-07" and incoming["reports"]["schedule"]["enabled"] is False, "snapshots are the server's, the schedule is the keeper's"
+
+
+def test_due_kinds_catch_up_and_the_tick_stores_and_pushes():
+    cfg = integration._normalise_core_config({})
+    assert integration._report_due_kinds(cfg, NOW) == ["week", "month"], "a fresh install owes both"
+    cfg["reports"]["items"] = [{"id": "week:2026-09-07", "kind": "week", "start": "2026-09-07"}]
+    assert integration._report_due_kinds(cfg, NOW) == ["month"]
+    entry = FakeEntry(options={CONF_SETTINGS: {
+        "reports": {"items": [{"id": "month:2026-08-01", "kind": "month", "start": "2026-08-01"}]},
+        "maintenance": {"enabled": True, "tasks": {}, "completions": {}, "reminders": {"enabled": True, "time": "09:00", "notifyTarget": "mobile_app_pixel", "persistent": True}},
+    }})
+    hass = FakeHass(entries=[entry])
+    made = run(integration._async_report_tick(hass, entry, datetime.now(timezone.utc)))
+    assert made == ["week"]
+    items = entry.options[CONF_SETTINGS]["reports"]["items"]
+    assert [i["kind"] for i in items] == ["week", "month"] and items[0]["generatedAt"]
+    pushes = [c for c in hass.services.calls if c.domain == "notify"]
+    assert len(pushes) == 1 and pushes[0].service == "mobile_app_pixel" and "Reef Report" in pushes[0].data["title"]
+    assert entry.options[CONF_SETTINGS]["activity"][0]["message"].startswith("Weekly Reef Report ready")
+    assert entry.options[CONF_SETTINGS]["reports"]["events"][0]["kind"] == "report"
+    assert run(integration._async_report_tick(hass, entry, datetime.now(timezone.utc))) == [], "stored: nothing owed"
+    # Push off: the digest carries one line instead, the day it was written.
+    entry.options[CONF_SETTINGS]["reports"]["schedule"]["push"] = False
+    line = integration._report_digest_line(entry.options[CONF_SETTINGS], datetime.now(timezone.utc))
+    assert line.startswith("the weekly Reef Report is ready")
+    assert integration._report_digest_line(entry.options[CONF_SETTINGS], datetime.now(timezone.utc) + timedelta(days=1)) == ""
+    entry.options[CONF_SETTINGS]["reports"]["schedule"]["enabled"] = False
+    del entry.options[CONF_SETTINGS]["reports"]["items"][:]
+    assert run(integration._async_report_tick(hass, entry, datetime.now(timezone.utc))) == [], "the schedule off writes nothing"
+
+
+def test_ws_list_generate_and_anchor():
+    entry = FakeEntry(options={CONF_SETTINGS: {"reports": {"weekStart": 0, "schedule": {"enabled": True, "time": "07:00", "push": True}}}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_report_list(hass, conn, {"id": 1}))
+    assert conn.results[-1].payload["items"] == [] and conn.results[-1].payload["schedule"]["time"] == "07:00"
+    run(integration.websocket_report_generate(hass, conn, {"id": 2}))
+    assert not conn.errors and conn.results[-1].payload["stored"]["kind"] == "week"
+    assert not [c for c in hass.services.calls if c.domain == "notify"], "storing by hand never pushes"
+    run(integration.websocket_report_list(hass, conn, {"id": 3}))
+    assert len(conn.results[-1].payload["items"]) == 1
+    run(integration.websocket_report_compile(hass, conn, {"id": 4}))
+    assert conn.results[-1].payload["stored"]["kind"] == "week", "the compile says when its period is stored"
+    run(integration.websocket_report_compile(hass, conn, {"id": 5, "anchor": "2026-06-10"}))
+    assert conn.results[-1].payload["period"]["start"].startswith("2026-06-08") and conn.results[-1].payload["stored"] is None
+    run(integration.websocket_report_compile(hass, conn, {"id": 6, "anchor": "yesterday"}))
+    assert conn.errors[-1].code == "invalid_anchor"
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

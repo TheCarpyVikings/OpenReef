@@ -175,14 +175,16 @@ test("test_load_hands_the_recorder_back_in_when_the_backend_read_tests_only", as
   const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [], events: [] },
     sensors: { alkalinity: { entity_id: "sensor.trident_alk", enabled: true }, calcium: { entity_id: "", enabled: true } } });
   panel._render = () => {};
-  panel._hass = { callWS: async (payload) => { calls.push(payload); return { ...fixtureReport(), readingsSource: payload.readings ? "panel" : "tests" }; } };
+  panel._hass = { callWS: async (payload) => { calls.push(payload); if (payload.type === "openreef/report_list") return { items: [{ id: "week:2026-09-07", kind: "week", start: "2026-09-07", label: "7–13 September 2026", weekScore: { total: 70 } }] }; return { ...fixtureReport(), readingsSource: payload.readings ? "panel" : "tests" }; } };
   panel._fetchHistoryTrendPoints = async (entityId) => [{ time: Date.parse("2026-09-10T09:00:00Z"), value: 8.3 }];
   panel._report = { open: true, loading: false, error: "", data: null, at: 0, period: "week", which: "previous" };
   await panel._reportLoad(true);
-  assertEqual(calls.length, 2, "compile, then compile again with the panel's readings");
-  assertEqual(calls[1].readings.alkalinity[0].v, 8.3);
-  assert(!calls[1].readings.calcium, "an unmapped sensor sends nothing");
+  const compiles = calls.filter((c) => c.type === "openreef/report_compile");
+  assertEqual(compiles.length, 2, "compile, then compile again with the panel's readings");
+  assertEqual(compiles[1].readings.alkalinity[0].v, 8.3);
+  assert(!compiles[1].readings.calcium, "an unmapped sensor sends nothing");
   assertEqual(panel._report.data.readingsSource, "panel");
+  assertEqual(panel._report.items.length, 1, "the stored snapshots ride along");
   assert(!panel._report.loading && !panel._report.error);
   panel._hass = { callWS: async () => { throw new Error("no backend"); } };
   await panel._reportLoad(true);
@@ -227,6 +229,39 @@ test("test_score_card_explains_its_parts_and_recommendations_render_with_snooze"
   assertEqual(calls[0].type, "openreef/report_rec_snooze");
   assertEqual(calls[0].rec_id, "test_alkalinity");
   assertEqual(calls[1].type, "openreef/report_compile", "and the report reloads");
+});
+
+test("test_settings_card_timeline_anchor_and_store", async () => {
+  const panel = await makePanel({ reports: { weekStart: 6, scoreLog: [], events: [], schedule: { enabled: true, time: "06:30", push: false }, items: [] }, captures: [] });
+  const card = panel._reportSettingsCard();
+  assert(card.includes('data-scope="reports" data-field="weekStart"') && card.includes('<option value="6" selected>Sunday'));
+  assert(card.includes('data-scope="reports-schedule" data-field="time" value="06:30"'));
+  assert(card.includes('data-field="push" >') || card.includes('data-field="push" checked') === false, "push off renders unchecked");
+  const data = fixtureReport();
+  panel._report = { open: true, loading: false, error: "", data, at: Date.now(), period: "week", which: "previous", anchor: "", items: [
+    { id: "week:2026-09-07", kind: "week", start: "2026-09-07", label: "7–13 September 2026", generatedAt: "2026-09-14T07:00:00Z", verdict: "A steady week.", weekScore: { total: 70 } },
+    { id: "week:2026-08-31", kind: "week", start: "2026-08-31", label: "31 Aug – 6 Sep 2026", generatedAt: "2026-09-07T07:00:00Z", verdict: "Slipping.", weekScore: { total: 55 } },
+    { id: "month:2026-08-01", kind: "month", start: "2026-08-01", label: "August 2026", generatedAt: "2026-09-01T07:00:00Z", verdict: "", weekScore: { total: 61 } },
+  ] };
+  let html = panel._reportDialog();
+  assert(html.includes("Past weeks") && html.includes("2 stored"), "only this kind's snapshots");
+  assert(html.includes('data-action="report-anchor" data-id="2026-08-31" data-kind="week"') && html.includes(">55<"));
+  assert(html.includes('class="maint-row open"'), "the viewed week is highlighted");
+  assert(html.includes("this week stored") && !html.includes('data-action="report-store"'), "a stored week needs no store button");
+  assert((html.match(/report-spark-line/g) || []).length >= 3, "the scores across weeks draw a line");
+  data.period.start = "2026-09-14T00:00:00Z"; data.stored = null;
+  html = panel._reportDialog();
+  assert(html.includes('data-action="report-store"'), "an unstored complete week offers Store");
+  data.period.partial = true;
+  assert(!panel._reportDialog().includes('data-action="report-store"'), "never store a period in progress");
+  data.happened.rows[0].count = 397;
+  assert(panel._reportDialog().includes("×397"));
+  const calls = [];
+  panel._render = () => {};
+  panel._hass = { callWS: async (payload) => { calls.push(payload); return payload.type === "openreef/report_list" ? { items: [] } : data; } };
+  await panel._reportStoreNow();
+  assertEqual(calls[0].type, "openreef/report_generate");
+  assertEqual(calls[0].which, "previous");
 });
 
 await runTests();

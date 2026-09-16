@@ -89,17 +89,21 @@ def _in(at: datetime | None, start: datetime, end: datetime) -> bool:
 # --- the window ---------------------------------------------------------------
 
 def period_bounds(now_local: datetime, week_start: int = 0, kind: str = "week",
-                  which: str = "previous") -> dict[str, Any]:
+                  which: str = "previous", anchor: date | None = None) -> dict[str, Any]:
     """The report window in the keeper's zone. ``kind`` week|month; ``which``
     previous (the last complete period) or current (the one in progress — a
-    partial report, flagged). End is exclusive."""
+    partial report, flagged). ``anchor`` picks the period containing that
+    date instead (a stored week re-read from the ledgers). End is exclusive."""
     tz = now_local.tzinfo
     today = now_local.date()
     week_start = int(week_start) if isinstance(week_start, (int, float)) else 0
     week_start = max(0, min(6, week_start))
+    if anchor is not None:
+        which = "current" if anchor >= today else "anchored"
+        today = anchor
     if kind == "month":
         first_this = today.replace(day=1)
-        if which == "current":
+        if which == "current" or which == "anchored":
             start_d = first_this
             end_d = (first_this.replace(day=28) + timedelta(days=4)).replace(day=1)
         else:
@@ -109,13 +113,13 @@ def period_bounds(now_local: datetime, week_start: int = 0, kind: str = "week",
         kind = "week"
         offset = (today.weekday() - week_start) % 7
         this_start = today - timedelta(days=offset)
-        if which == "current":
+        if which in ("current", "anchored"):
             start_d, end_d = this_start, this_start + timedelta(days=7)
         else:
             start_d, end_d = this_start - timedelta(days=7), this_start
     start = datetime(start_d.year, start_d.month, start_d.day, tzinfo=tz)
     end = datetime(end_d.year, end_d.month, end_d.day, tzinfo=tz)
-    partial = which == "current"
+    partial = which == "current" or (anchor is not None and end_d > now_local.date())
     return {"kind": kind, "which": "current" if partial else "previous", "start": start, "end": end,
             "partial": partial, "label": _period_label(start_d, end_d - timedelta(days=1), kind),
             "weekStart": week_start, "days": (end_d - start_d).days}
@@ -409,7 +413,8 @@ def events_section(events: Any, start: datetime, end: datetime, limit: int = 40)
         at = _parse(row.get("at"))
         if _in(at, start, end):
             rows.append({"at": at.isoformat(), "message": str(row.get("message") or ""),
-                         "type": str(row.get("type") or "info"), "kind": row.get("kind")})
+                         "type": str(row.get("type") or "info"), "kind": row.get("kind"),
+                         "count": max(1, int(_f(row.get("count"), 1)))})
     rows.sort(key=lambda r: r["at"], reverse=True)
     types: dict[str, int] = {}
     for r in rows:
@@ -710,6 +715,67 @@ def recommend(report: dict[str, Any], snoozed: Any = None, now: datetime | None 
     for r in kept:
         r.pop("priority", None)
     return {"items": kept, "calm": calm, "snoozed": sorted(hidden)}
+
+
+def snapshot(report: dict[str, Any]) -> dict[str, Any]:
+    """The compact record a report leaves behind (brief §2.5): the headline
+    numbers, the counts, one line per parameter, the recommendations by
+    title — a few hundred bytes, kept for 26 weeks / 12 months where the
+    ledgers it read will have rolled over."""
+    period = report.get("period") or {}
+    score = (report.get("headline") or {}).get("score") or {}
+    ws = report.get("score") or {}
+    did = report.get("did") or {}
+    m = did.get("maintenance") or {}
+    start = str(period.get("start") or "")
+    return {
+        "id": f"{period.get('kind', 'week')}:{start[:10]}",
+        "kind": str(period.get("kind") or "week"), "start": start, "end": str(period.get("end") or ""),
+        "label": str(period.get("label") or ""), "generatedAt": str(report.get("generatedAt") or ""),
+        "weekScore": {"total": ws.get("total"), "condition": ws.get("condition"), "consistency": ws.get("consistency")},
+        "health": {"average": score.get("average"), "latest": score.get("latest"), "delta": score.get("delta"), "stamps": score.get("stamps")},
+        "verdict": str((report.get("headline") or {}).get("verdict") or ""),
+        "did": {"done": m.get("done", 0), "skipped": m.get("skipped", 0), "onSchedule": m.get("onSchedule"),
+                "waterChangedL": m.get("waterChangedL"), "awcRuns": (did.get("awc") or {}).get("runs", 0),
+                "tests": (did.get("tests") or {}).get("count", 0), "feeds": (did.get("feeds") or {}).get("count", 0),
+                "hatches": did.get("hatches", 0), "cultureFeeds": did.get("cultureFeeds", 0), "coralCheckins": did.get("coralCheckins", 0)},
+        "water": [{"id": prm.get("id"), "latest": prm.get("latest"), "band": prm.get("band"), "inRange": prm.get("inRange"),
+                   "consumption": (prm.get("consumption") or {}).get("perDay")} for prm in (report.get("water") or {}).get("parameters") or []],
+        "recommendations": [{"id": r.get("id"), "title": r.get("title")} for r in (report.get("recommendations") or {}).get("items") or []],
+        "warnings": int(((report.get("happened") or {}).get("byType") or {}).get("warning") or 0),
+        "nextCount": int((report.get("next") or {}).get("count") or 0),
+        "notes": list(report.get("notes") or [])[:4],
+    }
+
+
+def push_text(report: dict[str, Any]) -> tuple[str, str]:
+    """The headline block as a phone push (decision 4): score, delta, verdict,
+    the counts, the top recommendation, where to read it."""
+    period = report.get("period") or {}
+    ws = report.get("score") or {}
+    score = (report.get("headline") or {}).get("score") or {}
+    did = report.get("did") or {}
+    m = did.get("maintenance") or {}
+    kind = "Monthly" if period.get("kind") == "month" else "Weekly"
+    total = ws.get("total")
+    title = f"OpenReef {kind} Reef Report · {period.get('label', '')}".strip()
+    head = f"Week Score {total}" if total is not None and period.get("kind") != "month" else (f"Score {total}" if total is not None else "No score yet")
+    if ws.get("condition") is not None and ws.get("consistency") is not None:
+        head += f" (condition {ws['condition']} · consistency {ws['consistency']})"
+    if score.get("average") is not None:
+        head += f" · Reef Health avg {int(score['average'])}"
+        if score.get("delta") is not None and score["delta"] != 0:
+            head += f", {'up' if score['delta'] > 0 else 'down'} {abs(int(score['delta']))}"
+    counts = [f"{m.get('done', 0)} chores" + (f" ({int(m['onSchedule'])} % on time)" if m.get("onSchedule") is not None else "")]
+    if m.get("waterChangedL"):
+        counts.append(f"{m['waterChangedL']:g} L water changed")
+    counts.append(f"{(did.get('tests') or {}).get('count', 0)} tests")
+    recs = (report.get("recommendations") or {}).get("items") or []
+    lines = [head, (report.get("headline") or {}).get("verdict") or "", " · ".join(counts)]
+    if recs and recs[0].get("id") != "keep_rhythm":
+        lines.append(f"Top: {recs[0].get('title')}")
+    lines.append("Open OpenReef → Home → Reef Report.")
+    return title, "\n".join(line for line in lines if line)
 
 
 def verdict(report: dict[str, Any]) -> str:

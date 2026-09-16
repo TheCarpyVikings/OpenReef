@@ -124,8 +124,13 @@ from .const import (
     MANUAL_TEST_PARAMETERS,
     MAINTENANCE_MIXING_RETEST_TASK_ID,
     MAINTENANCE_SOURCE_MIXING,
+    REPORT_EVENT_REPEAT_HOURS,
     REPORT_EVENT_TYPES,
     REPORT_EVENTS_MAX,
+    REPORT_ITEMS_MONTHLY_MAX,
+    REPORT_ITEMS_WEEKLY_MAX,
+    REPORT_SCHEDULE_DEFAULT_TIME,
+    REPORT_SCHEDULE_UNSUB,
     REPORT_SCORE_LOG_MAX,
     MIXING_CAL_CAP_MIN,
     MIXING_CAL_MIN_SECONDS,
@@ -5777,7 +5782,10 @@ async def _async_fire_maintenance_reminder(
     current_ids = ({item["id"] for item in push_items} | {nag["id"] for nag in shelf_nags}
                    | {nag["id"] for nag in salt_nags} | {nag["id"] for nag in coral_nags})
     last_store[entry.entry_id] = current_ids
-    if not push_items and not shelf_nags and not salt_nags and not coral_nags:
+    # The Reef Report's fallback line (Stage E, decision 4): its own push off,
+    # one line here the day it was generated.
+    report_line = _report_digest_line(latest_config, now)
+    if not push_items and not shelf_nags and not salt_nags and not coral_nags and not report_line:
         return
     labels = ", ".join(item["label"] for item in push_items)
     shelf_line = ", ".join(f"{nag['label']} ({nag['detail']})" for nag in shelf_nags[:6])
@@ -5807,6 +5815,8 @@ async def _async_fire_maintenance_reminder(
             bits.append("salt is out" if salt_nags[0]["severity"] == "critical" else "salt running low")
         for nag in coral_nags:
             bits.append(nag["detail"].split(" — ", 1)[0] + (" coral check-ins" if nag["id"] == "coral_check" else " target feeds"))
+        if report_line:
+            bits.append(report_line)
         parts = [labels]
         if shelf_line:
             parts.append(f"Bottles: {shelf_line}")
@@ -6330,7 +6340,19 @@ async def _async_set_ato_duty_cycle_state(
         )
         changed.append(_equipment_label(equipment_id, mapped))
 
-    if not changed and not unavailable:
+    # An unavailable ATO is said ONCE per window and state (0.7.201). It used
+    # to be said every tick: the warning saved the config, the save re-armed
+    # the scheduler, re-arming ran the handler again at once, and with the
+    # switch still unavailable after a restart that was hundreds of identical
+    # lines in the same minute — Reece's event ledger held 397 of them.
+    logged_unavailable = False
+    if unavailable:
+        memo = hass.data.setdefault(DOMAIN, {}).setdefault(ATO_DUTY_CYCLE_LAST, {}).setdefault(entry.entry_id, {})
+        key = f"{window_key}:{target_state}"
+        if memo.get("unavailable_logged") != key:
+            memo["unavailable_logged"] = key
+            logged_unavailable = True
+    if not changed and not logged_unavailable:
         return
 
     if changed:
@@ -6339,7 +6361,7 @@ async def _async_set_ato_duty_cycle_state(
             f"ATO safety window {reason}: {', '.join(changed)} turned {target_state}",
             "control",
         )
-    if unavailable:
+    if logged_unavailable:
         _append_activity(
             latest_config,
             f"ATO safety window skipped unavailable ATO: {', '.join(unavailable)}",
@@ -6609,6 +6631,7 @@ async def _async_save_config(
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     await _async_schedule_maintenance_reminders(hass, entry, normalised)
+    await _async_schedule_report(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
     await _async_schedule_watchdog(hass, entry, normalised)
     await _async_schedule_awc(hass, entry, normalised)
@@ -6685,8 +6708,19 @@ def _append_report_event(config: dict[str, Any], message: str, event_type: str,
     events = reports.get("events")
     if not isinstance(events, list):
         events = []
-    row: dict[str, Any] = {"at": stamp or datetime.now(timezone.utc).isoformat(),
-                           "message": str(message)[:200], "type": str(event_type)}
+    at = stamp or datetime.now(timezone.utc).isoformat()
+    text = str(message)[:200]
+    # The same line again inside the repeat window bumps a count on the row
+    # it repeats — a flood is one row that says "×397", never 397 rows.
+    newest = events[0] if events and isinstance(events[0], dict) else None
+    if newest is not None and newest.get("message") == text and newest.get("type") == str(event_type):
+        last_at = _parse_datetime(newest.get("lastAt") or newest.get("at"))
+        now_at = _parse_datetime(at)
+        if last_at is not None and now_at is not None and abs((now_at - last_at).total_seconds()) <= REPORT_EVENT_REPEAT_HOURS * 3600:
+            newest["count"] = int(newest.get("count") or 1) + 1
+            newest["lastAt"] = at
+            return
+    row: dict[str, Any] = {"at": at, "message": text, "type": str(event_type)}
     if kind:
         row["kind"] = str(kind)[:40]
     events.insert(0, row)
@@ -6727,9 +6761,46 @@ def _normalise_reports(config: dict[str, Any]) -> None:
                "type": str(raw.get("type") or "info")}
         if raw.get("kind"):
             row["kind"] = str(raw.get("kind"))[:40]
+        count = raw.get("count")
+        if isinstance(count, (int, float)) and not isinstance(count, bool) and count > 1:
+            row["count"] = int(count)
+            row["lastAt"] = str(raw.get("lastAt") or raw.get("at"))
         events.append(row)
     events.sort(key=lambda r: _parse_datetime(r["at"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    reports["events"] = events[:REPORT_EVENTS_MAX]
+    # Consecutive repeats of one line collapse into a counted row (0.7.201) —
+    # the one-shot clean-up for a ledger that already holds a flood.
+    collapsed: list[dict[str, Any]] = []
+    for row in events:
+        prev = collapsed[-1] if collapsed else None
+        if prev is not None and prev["message"] == row["message"] and prev["type"] == row["type"]:
+            prev["count"] = int(prev.get("count") or 1) + int(row.get("count") or 1)
+            prev.setdefault("lastAt", prev["at"])
+            prev["at"] = row["at"]          # the run's first occurrence (rows run newest first)
+            continue
+        collapsed.append(row)
+    reports["events"] = collapsed[:REPORT_EVENTS_MAX]
+    # The schedule (Stage E): a daily tick at this time generates the report
+    # for any period that has ended and is not stored yet.
+    schedule = reports.get("schedule") if isinstance(reports.get("schedule"), dict) else {}
+    time_value = schedule.get("time")
+    if not (isinstance(time_value, str) and re.match(r"^([01]\d|2[0-3]):[0-5]\d$", time_value)):
+        time_value = REPORT_SCHEDULE_DEFAULT_TIME
+    reports["schedule"] = {"enabled": bool(schedule.get("enabled", True)), "time": time_value,
+                           "push": bool(schedule.get("push", True))}
+    items: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for raw in reports.get("items") if isinstance(reports.get("items"), list) else []:
+        if not isinstance(raw, dict) or raw.get("kind") not in ("week", "month") or not raw.get("start"):
+            continue
+        rid = str(raw.get("id") or f"{raw['kind']}:{str(raw['start'])[:10]}")
+        if rid in seen_ids:
+            continue
+        seen_ids.add(rid)
+        items.append({**raw, "id": rid})
+    items.sort(key=lambda r: str(r.get("start")), reverse=True)
+    reports["items"] = ([r for r in items if r["kind"] == "week"][:REPORT_ITEMS_WEEKLY_MAX]
+                        + [r for r in items if r["kind"] == "month"][:REPORT_ITEMS_MONTHLY_MAX])
+    reports["items"].sort(key=lambda r: str(r.get("start")), reverse=True)
     # Snoozed recommendations (Stage D): id -> until; expired ones drop.
     now = datetime.now(timezone.utc)
     snoozed_raw = reports.get("snoozedRecs") if isinstance(reports.get("snoozedRecs"), dict) else {}
@@ -6752,7 +6823,7 @@ def _reports_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
     if not isinstance(target, dict):
         target = {}
         incoming["reports"] = target
-    _copy_runtime_fields(stored_reports, target, ("scoreLog", "events", "snoozedRecs"))
+    _copy_runtime_fields(stored_reports, target, ("scoreLog", "events", "snoozedRecs", "items"))
 
 
 def _mode_label(config: dict[str, Any], mode_id: str) -> str:
@@ -10823,10 +10894,190 @@ async def websocket_coral_feed(
     _awc_send(connection, msg, hass, config, summary=_livestock_summary_payload(config, now))
 
 
+def _report_schedule(config: dict[str, Any]) -> dict[str, Any]:
+    reports = config.get("reports") if isinstance(config.get("reports"), dict) else {}
+    schedule = reports.get("schedule") if isinstance(reports.get("schedule"), dict) else {}
+    return {"enabled": bool(schedule.get("enabled", True)),
+            "time": str(schedule.get("time") or REPORT_SCHEDULE_DEFAULT_TIME),
+            "push": bool(schedule.get("push", True))}
+
+
+def _report_schedule_time(config: dict[str, Any]) -> tuple[int, int]:
+    value = _report_schedule(config)["time"]
+    if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", value):
+        value = REPORT_SCHEDULE_DEFAULT_TIME
+    hour, _, minute = value.partition(":")
+    return int(hour), int(minute)
+
+
+def _report_items(config: dict[str, Any]) -> list[dict[str, Any]]:
+    reports = config.get("reports") if isinstance(config.get("reports"), dict) else {}
+    return [r for r in (reports.get("items") or []) if isinstance(r, dict)]
+
+
+def _report_store_snapshot(config: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    """Keep the report's compact record (replacing an earlier one for the
+    same period); the normaliser sorts and caps."""
+    snap = report_engine.snapshot(report)
+    reports = _reports_block(config)
+    items = [r for r in (reports.get("items") or []) if isinstance(r, dict) and r.get("id") != snap["id"]]
+    items.insert(0, snap)
+    reports["items"] = items
+    _normalise_reports(config)
+    return snap
+
+
+def _report_due_kinds(config: dict[str, Any], now_local: datetime) -> list[str]:
+    """Which periods have ended and are not stored yet — the weekly one by the
+    keeper's week start, the monthly one on the 1st — so a tick missed (HA
+    off on Monday morning) is caught up the next morning, and a fresh
+    install gets its first report the next morning too."""
+    reports = config.get("reports") if isinstance(config.get("reports"), dict) else {}
+    week_start = reports.get("weekStart", 0)
+    ids = {r.get("id") for r in _report_items(config)}
+    due: list[str] = []
+    for kind in ("week", "month"):
+        period = report_engine.period_bounds(now_local, week_start, kind, "previous")
+        rid = f"{kind}:{period['start'].date().isoformat()}"
+        if rid not in ids:
+            due.append(kind)
+    return due
+
+
+async def _async_report_generate(hass: HomeAssistant, entry: OpenReefConfigEntry, kind: str,
+                                 now_utc: datetime | None = None, *, push: bool = True,
+                                 which: str = "previous") -> dict[str, Any]:
+    """Compile, store, persist and (on the schedule) push one report."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_local = dt_util.as_local(now_utc)
+    if not isinstance(now_local, datetime):
+        now_local = now_utc
+    config = _config_from_entry(entry)
+    period = report_engine.period_bounds(now_local, (config.get("reports") or {}).get("weekStart", 0), kind, which)
+    readings = await _report_recorder_readings(
+        hass, config, tuple(MANUAL_TEST_PARAMETERS),
+        period["start"] - timedelta(days=report_engine.TREND_DAYS), period["end"])
+    report = report_engine.compile_period(_report_context(config, now_utc, now_local, period, readings))
+    report["readingsSource"] = "recorder" if readings else "tests"
+    snap = _report_store_snapshot(config, report)
+    total = (report.get("score") or {}).get("total")
+    label = "Monthly" if kind == "month" else "Weekly"
+    _append_activity(config, f"{label} Reef Report ready — {period['label']}"
+                     + (f", score {total}" if total is not None else ""), "info", kind="report")
+    _persist_entry_config(hass, entry, config)
+    schedule = _report_schedule(config)
+    target = str(((config.get("maintenance") or {}).get("reminders") or {}).get("notifyTarget") or "").strip()
+    if push and schedule["push"] and target:
+        title, message = report_engine.push_text(report)
+        try:
+            await _async_push_actionable(hass, target, title, message, [], tag=f"openreef_report_{kind}")
+        except Exception as err:  # noqa: BLE001 - a push must never lose the report
+            _LOGGER.warning("Reef Report: the push could not be sent: %s", err)
+    report["stored"] = snap
+    return report
+
+
+async def _async_report_tick(hass: HomeAssistant, entry: OpenReefConfigEntry, now: datetime) -> list[str]:
+    """The daily tick: generate every period that has ended and is not
+    stored. Returns the kinds generated (unit-testable)."""
+    config = _config_from_entry(entry)
+    if not _report_schedule(config)["enabled"]:
+        return []
+    now_local = dt_util.as_local(now)
+    if not isinstance(now_local, datetime):
+        now_local = now
+    made: list[str] = []
+    for kind in _report_due_kinds(config, now_local):
+        try:
+            await _async_report_generate(hass, entry, kind, now)
+            made.append(kind)
+        except Exception as err:  # noqa: BLE001 - one bad period must not stop the other
+            _LOGGER.warning("Reef Report: could not generate the %s report: %s", kind, err)
+    return made
+
+
+def _report_digest_line(config: dict[str, Any], now: datetime) -> str:
+    """The digest's fallback line (decision 4): a report generated today
+    while its own push is off gets one line in the maintenance digest."""
+    if _report_schedule(config)["push"]:
+        return ""
+    today = now.date().isoformat()
+    for item in _report_items(config):
+        if str(item.get("generatedAt") or "")[:10] == today:
+            total = (item.get("weekScore") or {}).get("total")
+            kind = "monthly" if item.get("kind") == "month" else "weekly"
+            return f"the {kind} Reef Report is ready" + (f" (score {total})" if total is not None else "")
+    return ""
+
+
+def _clear_report_schedule(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(REPORT_SCHEDULE_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_schedule_report(hass: HomeAssistant, entry: OpenReefConfigEntry | None,
+                                 config: dict[str, Any] | None = None) -> None:
+    """One daily tick at the report time (Stage E), re-armed on every save
+    like the maintenance reminder."""
+    _clear_report_schedule(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    if not _report_schedule(config)["enabled"]:
+        return
+
+    async def _handle_report_tick(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_report_tick(hass, latest_entry, now)
+
+    hour, minute = _report_schedule_time(config)
+    hass.data.setdefault(DOMAIN, {})[REPORT_SCHEDULE_UNSUB] = async_track_time_change(
+        hass, _handle_report_tick, hour=hour, minute=minute, second=0)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/report_list"})
+@websocket_api.async_response
+async def websocket_report_list(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The stored snapshots, newest first, and the schedule."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    connection.send_result(msg["id"], {"items": _report_items(config), "schedule": _report_schedule(config),
+                                       "weekStart": (config.get("reports") or {}).get("weekStart", 0)})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/report_generate",
+    vol.Optional("period"): vol.In(("week", "month")),
+    vol.Optional("which"): vol.In(("previous", "current")),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_report_generate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Store this period's report now (no push — the keeper is looking at it)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    report = await _async_report_generate(hass, entry, str(msg.get("period") or "week"), push=False,
+                                          which=str(msg.get("which") or "previous"))
+    connection.send_result(msg["id"], report)
+
+
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/report_compile",
     vol.Optional("period"): vol.In(("week", "month")),
     vol.Optional("which"): vol.In(("previous", "current")),
+    vol.Optional("anchor"): cv.string,
     vol.Optional("readings"): dict,
 })
 @websocket_api.async_response
@@ -10846,9 +11097,16 @@ async def websocket_report_compile(
     now_local = dt_util.as_local(now_utc)
     if not isinstance(now_local, datetime):
         now_local = now_utc
+    anchor_date = None
+    if msg.get("anchor"):
+        try:
+            anchor_date = date.fromisoformat(str(msg["anchor"])[:10])
+        except ValueError:
+            connection.send_error(msg["id"], "invalid_anchor", "anchor must be YYYY-MM-DD")
+            return
     period = report_engine.period_bounds(
         now_local, (config.get("reports") or {}).get("weekStart", 0),
-        str(msg.get("period") or "week"), str(msg.get("which") or "previous"))
+        str(msg.get("period") or "week"), str(msg.get("which") or "previous"), anchor=anchor_date)
     readings = msg.get("readings") if isinstance(msg.get("readings"), dict) else {}
     if not readings:
         readings = await _report_recorder_readings(
@@ -10857,6 +11115,8 @@ async def websocket_report_compile(
     ctx = _report_context(config, now_utc, now_local, period, readings)
     report = report_engine.compile_period(ctx)
     report["readingsSource"] = "panel" if msg.get("readings") else ("recorder" if readings else "tests")
+    stored_id = f"{period['kind']}:{period['start'].date().isoformat()}"
+    report["stored"] = next((r for r in _report_items(config) if r.get("id") == stored_id), None)
     connection.send_result(msg["id"], report)
 
 
@@ -23639,6 +23899,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_report_compile)
     websocket_api.async_register_command(hass, websocket_report_score_stamp)
     websocket_api.async_register_command(hass, websocket_report_rec_snooze)
+    websocket_api.async_register_command(hass, websocket_report_list)
+    websocket_api.async_register_command(hass, websocket_report_generate)
     websocket_api.async_register_command(hass, websocket_report_events)
     websocket_api.async_register_command(hass, websocket_coral_status)
     websocket_api.async_register_command(hass, websocket_search_entities)
@@ -23844,6 +24106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_ato_duty_cycle(hass, entry, normalised)
     await _async_schedule_wavemaker_reminders(hass, entry, normalised)
     await _async_schedule_maintenance_reminders(hass, entry, normalised)
+    await _async_schedule_report(hass, entry, normalised)
     await _async_schedule_timelapse(hass, entry, normalised)
     await _async_schedule_watchdog(hass, entry, normalised)
     await _async_awc_resume_on_startup(hass, entry, normalised)

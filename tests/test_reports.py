@@ -54,7 +54,7 @@ def test_normalise_reports_coerces_garbage_and_keeps_one_score_per_day():
     assert reports["scoreLog"][0]["total"] == 100, "clamped"
     assert len(reports["events"]) == 1 and len(reports["events"][0]["message"]) == 200
     empty = integration._normalise_core_config({"reports": "garbage"})["reports"]
-    assert empty == {"weekStart": 0, "scoreLog": [], "events": [], "snoozedRecs": {}}
+    assert empty == {"weekStart": 0, "scoreLog": [], "events": [], "snoozedRecs": {}, "schedule": {"enabled": True, "time": "07:00", "push": True}, "items": []}
 
 
 def test_activity_choke_point_mirrors_events_but_not_plain_info():
@@ -70,6 +70,26 @@ def test_activity_choke_point_mirrors_events_but_not_plain_info():
     for i in range(integration.REPORT_EVENTS_MAX + 20):
         integration._append_activity(cfg, f"tick {i}", "control")
     assert len(cfg["reports"]["events"]) == integration.REPORT_EVENTS_MAX
+
+
+def test_repeated_events_count_up_instead_of_flooding():
+    """Reece's ledger (2026-09-16): 397 of 400 rows were the same ATO line."""
+    cfg = integration._normalise_core_config({})
+    for _ in range(50):
+        integration._append_activity(cfg, "ATO safety window skipped unavailable ATO: ATO", "warning")
+    integration._append_activity(cfg, "Return pump switched on", "control")
+    integration._append_activity(cfg, "ATO safety window skipped unavailable ATO: ATO", "warning")
+    events = cfg["reports"]["events"]
+    assert [(e["message"][:3], e.get("count", 1)) for e in events] == [("ATO", 1), ("Ret", 1), ("ATO", 50)]
+    assert events[2]["lastAt"] >= events[2]["at"]
+    assert len(cfg["activity"]) == 52, "the activity feed is the audit trail and keeps every line"
+    # A stored flood collapses once on load.
+    stamp = datetime.now(timezone.utc)
+    flood = [{"at": (stamp - timedelta(seconds=i)).isoformat(), "message": "same", "type": "warning"} for i in range(397)]
+    flood.append({"at": (stamp - timedelta(hours=2)).isoformat(), "message": "other", "type": "control"})
+    cleaned = integration._normalise_core_config({"reports": {"events": flood}})["reports"]["events"]
+    assert len(cleaned) == 2 and cleaned[0]["count"] == 397 and cleaned[1]["message"] == "other"
+    assert cleaned[0]["at"] == flood[396]["at"] and cleaned[0]["lastAt"] == flood[0]["at"], "the run keeps its first and last stamps"
 
 
 def test_report_ledgers_survive_a_stale_save():

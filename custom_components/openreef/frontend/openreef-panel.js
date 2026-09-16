@@ -144,7 +144,7 @@ class OpenReefPanel extends HTMLElement {
     this._reportStampedDate = "";         // 0.7.197: the local day the Reef Health stamp went up
     this._reportStampedAt = 0;
     // The Reef Report viewer (Stage C, 0.7.199): a dialog off Home.
-    this._report = { open: false, loading: false, error: "", data: null, at: 0, period: "week", which: "previous" };
+    this._report = { open: false, loading: false, error: "", data: null, at: 0, period: "week", which: "previous", anchor: "", items: [] };
     // Per-task completion-form drafts (done-at / volume / unit). Echoed back into
     // the inputs on render so a background hass update re-render doesn't wipe
     // half-typed values the moment the field loses focus.
@@ -1343,9 +1343,18 @@ class OpenReefPanel extends HTMLElement {
       if (action === "report-period" || action === "report-which") {
         if (action === "report-period") this._report.period = id === "month" ? "month" : "week";
         else this._report.which = id === "current" ? "current" : "previous";
+        this._report.anchor = "";
         this._reportLoad(true);
         this._render();
       }
+      if (action === "report-anchor") {
+        // A stored period from the timeline: re-read from the ledgers.
+        this._report.anchor = id;
+        this._report.period = target.dataset.kind === "month" ? "month" : "week";
+        this._reportLoad(true);
+        this._render();
+      }
+      if (action === "report-store") this._reportStoreNow();
       if (action === "report-refresh") {
         this._reportLoad(true);
         this._render();
@@ -2631,6 +2640,15 @@ class OpenReefPanel extends HTMLElement {
         this._config.maintenance = this._config.maintenance || { enabled: true, tasks: {}, completions: {} };
         this._config.maintenance.reminders = this._config.maintenance.reminders || {};
         this._config.maintenance.reminders[field] = value;
+      }
+      if (scope === "reports") {
+        this._config.reports = this._config.reports || { weekStart: 0, scoreLog: [], events: [], schedule: {}, items: [] };
+        this._config.reports[field] = field === "weekStart" ? Math.max(0, Math.min(6, Number(value) || 0)) : value;
+      }
+      if (scope === "reports-schedule") {
+        this._config.reports = this._config.reports || { weekStart: 0, scoreLog: [], events: [], schedule: {}, items: [] };
+        this._config.reports.schedule = this._config.reports.schedule || {};
+        this._config.reports.schedule[field] = value;
       }
       if (scope === "pulse") {
         this._config.pulse = this._config.pulse || {};
@@ -6860,7 +6878,14 @@ class OpenReefPanel extends HTMLElement {
     this._render();
     try {
       const msg = { type: "openreef/report_compile", period: st.period, which: st.which };
+      if (st.anchor) msg.anchor = st.anchor;
       let data = await this._callWS(msg);
+      try {
+        const listed = await this._callWS({ type: "openreef/report_list" });
+        st.items = Array.isArray(listed?.items) ? listed.items : [];
+      } catch {
+        st.items = st.items || [];
+      }
       if (data?.readingsSource === "tests") {
         const readings = await this._reportPanelReadings(data);
         if (readings) data = await this._callWS({ ...msg, readings });
@@ -6918,6 +6943,70 @@ class OpenReefPanel extends HTMLElement {
     const last = pts[pts.length - 1];
     const dots = pts.map((p) => `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="5" class="report-spark-hit"><title>${this._escape(`${new Date(p.t).toLocaleDateString([], { day: "numeric", month: "short" })} · ${p.v}`)}</title></circle>`).join("");
     return `<svg class="report-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${this._escape(opts.label || "trend")}">${band}<polyline class="report-spark-line" points="${line}"></polyline>${dots}<circle class="report-spark-dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3"></circle></svg>`;
+  }
+
+  async _reportStoreNow() {
+    const st = this._report;
+    try {
+      await this._callWS({ type: "openreef/report_generate", period: st.period, which: st.which === "current" ? "current" : "previous" });
+      await this._reportLoad(true);
+    } catch (err) {
+      st.error = (err && err.message) || "Could not store the report.";
+      this._render();
+    }
+  }
+
+  // Settings → Maintenance: the report's week start and its Monday tick.
+  _reportSettingsCard() {
+    const reports = this._config?.reports || {};
+    const schedule = reports.schedule || {};
+    const weekStart = Math.max(0, Math.min(6, Number(reports.weekStart) || 0));
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    return `
+        <div class="setting-card subtle-card report-settings">
+          <div class="section-head"><div><p class="eyebrow">Reef Report</p><h3>The week, written up</h3></div></div>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="reports-schedule" data-field="enabled" ${schedule.enabled === false ? "" : "checked"}>
+            <span><strong>Write the report on a schedule</strong><small>The weekly report the morning the week turns, the monthly one on the 1st — stored on Home under Reef Report. A missed morning is caught up the next.</small></span>
+          </label>
+          <div class="mini-grid">
+            <label>Week starts on<select data-scope="reports" data-field="weekStart">${days.map((d, i) => `<option value="${i}" ${i === weekStart ? "selected" : ""}>${d}</option>`).join("")}</select></label>
+            <label>Report time<input type="time" data-scope="reports-schedule" data-field="time" value="${this._escape(schedule.time || "07:00")}"></label>
+          </div>
+          <label class="toggle-card">
+            <input type="checkbox" data-scope="reports-schedule" data-field="push" ${schedule.push === false ? "" : "checked"}>
+            <span><strong>Push the headline</strong><small>Score, verdict, the counts and the top recommendation to the reminders' push target the morning it is written. Off: one line in that day's maintenance digest instead.</small></span>
+          </label>
+        </div>`;
+  }
+
+  _reportTimeline(r) {
+    const st = this._report || {};
+    const kind = st.period === "month" ? "month" : "week";
+    const items = (Array.isArray(st.items) ? st.items : []).filter((it) => it?.kind === kind);
+    const currentId = `${r?.period?.kind || kind}:${String(r?.period?.start || "").slice(0, 10)}`;
+    const stored = r?.stored || items.find((it) => it.id === currentId) || null;
+    const storeBtn = r && !r.period?.partial && !stored
+      ? `<button class="secondary compact-button" data-action="report-store" ${st.loading ? "disabled" : ""}>Store this ${kind}</button>` : "";
+    const series = [...items].reverse().filter((it) => Number.isFinite(Number(it.weekScore?.total)))
+      .map((it) => ({ t: it.start, v: Number(it.weekScore.total) }));
+    return `
+      <section class="report-section report-timeline">
+        <div class="report-section-head"><p class="eyebrow">Past ${kind === "month" ? "months" : "weeks"}</p><small class="muted">${items.length ? `${items.length} stored` : "nothing stored yet"}${stored ? ` · this ${kind} stored ${this._escape(this._formatActivityTime(stored.generatedAt))}` : ""}</small>${storeBtn}</div>
+        ${series.length > 1 ? this._reportSparkline(series, null, { width: 320, height: 48, label: `${kind} scores` }) : ""}
+        ${items.length ? `<div class="maint-group">${items.slice(0, 12).map((it) => `
+          <div class="maint-row ${it.id === currentId ? "open" : "ok"}">
+            <div class="maint-row-line">
+              <button class="maint-row-main" data-action="report-anchor" data-id="${this._escape(String(it.start).slice(0, 10))}" data-kind="${this._escape(it.kind)}">
+                <strong>${this._escape(it.label)}</strong>
+                <span class="maint-when">${this._escape(it.verdict || "")}</span>
+              </button>
+              <div class="maint-row-side">
+                ${Number.isFinite(Number(it.weekScore?.total)) ? `<span class="pill ${it.weekScore.total >= 80 ? "ok" : it.weekScore.total >= 60 ? "warning" : "critical"}">${it.weekScore.total}</span>` : `<span class="pill unknown">—</span>`}
+              </div>
+            </div>
+          </div>`).join("")}</div>` : `<p class="muted">The first report is written the morning after the ${kind} turns — or store this one now.</p>`}
+      </section>`;
   }
 
   async _reportSnoozeRec(recId, days = 30) {
@@ -7120,7 +7209,7 @@ class OpenReefPanel extends HTMLElement {
       <section class="report-section">
         <div class="report-section-head"><p class="eyebrow">What happened</p><small class="muted">${ev.count || 0} event${ev.count === 1 ? "" : "s"}${ev.byType?.warning ? ` · ${ev.byType.warning} warning${ev.byType.warning === 1 ? "" : "s"}` : ""}</small></div>
         ${rows.length ? `<div class="activity-list report-events">${rows.map((e) => `
-          <div class="activity-item ${this._escape(e.type || "info")}"><span>${this._escape(this._formatActivityTime(e.at))}</span><strong>${this._escape(e.message)}</strong></div>`).join("")}</div>` : `<p class="muted">Nothing on the log for this period.</p>`}
+          <div class="activity-item ${this._escape(e.type || "info")}"><span>${this._escape(this._formatActivityTime(e.at))}</span><strong>${this._escape(e.message)}${Number(e.count) > 1 ? ` <span class="pill unknown">×${Number(e.count)}</span>` : ""}</strong></div>`).join("")}</div>` : `<p class="muted">Nothing on the log for this period.</p>`}
       </section>`;
   }
 
@@ -7167,6 +7256,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._reportHappened(r)}
         ${this._reportNext(r)}
         ${Array.isArray(r.notes) && r.notes.length ? `<section class="report-section"><div class="report-section-head"><p class="eyebrow">Notes</p></div><ul class="report-list report-notes">${r.notes.map((n) => `<li>${this._escape(n)}</li>`).join("")}</ul></section>` : ""}
+        ${this._reportTimeline(r)}
         <p class="muted report-foot">Compiled ${this._escape(this._formatActivityTime(r.generatedAt))} · readings from ${this._escape(r.readingsSource === "recorder" ? "the recorder" : r.readingsSource === "panel" ? "the recorder (via the panel)" : "manual tests only")}.</p>`;
     }
     return `
@@ -7176,7 +7266,7 @@ class OpenReefPanel extends HTMLElement {
           <div class="live-trend-head">
             <div>
               <p class="eyebrow">Reef Report</p>
-              <div class="live-trend-title"><h2>${this._escape(r?.period?.label || (st.period === "month" ? "Month" : "Week"))}</h2>${r?.period?.partial ? `<span class="pill warning">in progress</span>` : ""}</div>
+              <div class="live-trend-title"><h2>${this._escape(r?.period?.label || (st.period === "month" ? "Month" : "Week"))}</h2>${r?.period?.partial ? `<span class="pill warning">in progress</span>` : r?.stored ? `<span class="pill ok">stored</span>` : ""}</div>
             </div>
           </div>
           ${controls}
@@ -31306,6 +31396,7 @@ const rigSteps = [
             <small>Every completed AWC run is recorded against your water-change task — tagged <em>auto</em> in the history and shown as its own colour in the weekly chart. Runs on the same day are merged into one entry. Turn this off to chart only the changes you log by hand.</small>
           </span>
         </label>
+        ${this._reportSettingsCard()}
         <div class="setting-card subtle-card">
           <div class="section-head"><div><p class="eyebrow">Reminders</p><h3>HA-native nudges — free, unlimited, no app paywall</h3></div></div>
           <label class="toggle-card">
@@ -34050,6 +34141,8 @@ ${parts.buttons}
         .report-why-toggle { justify-self: start; margin-top: 4px; }
         .report-rec h4 { font-size: 15px; }
         .report-rec .button-row { flex-wrap: wrap; gap: 6px; }
+        .report-timeline .report-section-head .compact-button { margin-left: auto; }
+        .report-settings .mini-grid select, .report-settings .mini-grid input { width: 100%; }
         .report-score { border: 1px solid #24364a; border-radius: 10px; padding: 14px; background: rgba(11, 23, 36, .72); display: grid; gap: 4px; }
         .report-score.ok { border-color: #22c55e; } .report-score.warning { border-color: #eab308; } .report-score.critical { border-color: #ef4444; }
         .report-score small { color: #94a3b8; }

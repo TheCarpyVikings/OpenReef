@@ -267,6 +267,25 @@ def _ato_state_entry(*, mode="running", ato_state_armed=True, with_return_pump=F
     return FakeEntry(options={CONF_SETTINGS: cfg})
 
 
+
+def test_ato_unavailable_is_said_once_per_window_and_never_loops():
+    """0.7.201: the unavailable line saved the config, the save re-armed the
+    scheduler, re-arming ran the handler again — hundreds of identical rows in
+    a minute after every restart (Reece's ledger held 397)."""
+    entry = _ato_state_entry()
+    hass = FakeHass(states={"switch.ato": "unavailable"}, entries=[entry])
+    for _ in range(5):
+        run(integration._async_set_ato_duty_cycle_state(hass, entry, "off", "window-7", "outside schedule"))
+    activity = entry.options[CONF_SETTINGS].get("activity", [])
+    assert len([a for a in activity if "skipped unavailable" in a["message"]]) == 1
+    assert len(hass.config_entries.updates) == 1 if hasattr(hass.config_entries, "updates") else True
+    # A new window (or the on state) may say it again, once.
+    run(integration._async_set_ato_duty_cycle_state(hass, entry, "off", "window-8", "outside schedule"))
+    run(integration._async_set_ato_duty_cycle_state(hass, entry, "off", "window-8", "outside schedule"))
+    activity = entry.options[CONF_SETTINGS].get("activity", [])
+    assert len([a for a in activity if "skipped unavailable" in a["message"]]) == 2
+    assert not [c for c in hass.services.calls if c.domain == "switch"], "an unavailable switch is never driven"
+
 def _set_ato(hass, entry, target):
     run(integration._async_set_ato_duty_cycle_state(hass, entry, target, "window-1", "started"))
 
