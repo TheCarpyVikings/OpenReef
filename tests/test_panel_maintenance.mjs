@@ -503,4 +503,67 @@ test("test_rows_expand_in_place_and_views_switch", async () => {
   }
 });
 
+// --- 0.7.196: the maintenance log + the Trends link on a card ---------------
+
+test("test_log_lists_every_completion_newest_first_by_day_with_filters", async () => {
+  const now = localMorning();
+  const restore = freezeTime(now);
+  try {
+    const daily = (label, days, extra = {}) => ({ label, enabled: true, cadenceDays: days, criticalAfterDays: days * 2, scheduleMode: "interval", ...extra });
+    const panel = await makePanel(multiConfig({
+      water: daily("Water change", 7, { logsVolume: true }),
+      sock: daily("Filter sock", 7),
+      old: { ...daily("Old chore", 7), enabled: false },
+    }, {
+      water: [{ id: "w1", timestamp: hoursFrom(now, -3), volume: 10, volumeUnit: "L", source: "awc" },
+              { id: "w2", timestamp: hoursFrom(now, -30), volume: 12, volumeUnit: "L", newWater: { ppt: 35 }, notes: "matched" }],
+      sock: [{ id: "s1", timestamp: hoursFrom(now, -26), skipped: true }, { id: "s2", timestamp: hoursFrom(now, -24 * 40) }],
+      old: [{ id: "o1", timestamp: hoursFrom(now, -5) }],
+    }));
+    const all = panel._maintenanceLogEntries();
+    assertEqual(all.map((r) => r.entry.id).join(","), "w1,o1,s1,w2,s2", "newest first, untracked tasks included");
+    assertEqual(all[0].source, "awc");
+    assertEqual(all[1].source, "hand");
+    panel._maintLog = { days: 30, task: "", source: "", limit: 80 };
+    assertEqual(panel._maintenanceLogFiltered().length, 4, "the 40-day-old sock falls outside 30 days");
+    panel._maintLog.source = "awc";
+    assertEqual(panel._maintenanceLogFiltered().map((r) => r.entry.id).join(","), "w1");
+    panel._maintLog = { days: 0, task: "sock", source: "", limit: 80 };
+    assertEqual(panel._maintenanceLogFiltered().map((r) => r.entry.id).join(","), "s1,s2");
+    panel._maintLog = { days: 30, task: "", source: "", limit: 80 };
+    const html = panel._maintenanceLogView();
+    assert(html.indexOf("Today") < html.indexOf("Yesterday"), "days run newest first");
+    assert(html.includes("3 done · 1 skipped · 22 L of water changed"), html.match(/muted">[^<]*/)?.[0]);
+    assert(html.includes("auto water change") && html.includes(">skipped<") && html.includes("new water 35 ppt") && html.includes("matched"), "rows carry source, skip, new water and notes");
+    assert(html.includes('data-action="maintenance-open-task" data-id="water"'), "a row is a way to its task");
+    assert(html.includes('<option value="old"'), "untracked tasks stay in the picker — history outlives the toggle");
+    panel._maintLog = { days: 0, task: "", source: "", limit: 20 };
+    for (let i = 0; i < 30; i += 1) panel._config.maintenance.completions.sock.push({ id: `x${i}`, timestamp: hoursFrom(now, -100 - i) });
+    assert(panel._maintenanceLogView().includes("Show 15 more (15 left)"), "the list pages");
+  } finally {
+    restore();
+  }
+});
+
+test("test_task_card_links_to_its_trend_when_there_is_one", async () => {
+  const now = localMorning();
+  const restore = freezeTime(now);
+  try {
+    const one = await makePanel(configForCase({ completions: [{ id: "a", timestamp: hoursFrom(now, -24) }] }));
+    assert(!one._maintenanceTaskCard("subject").includes('data-action="maintenance-trend"'), "one completion is no interval");
+    const two = await makePanel(configForCase({ completions: [{ id: "a", timestamp: hoursFrom(now, -24) }, { id: "b", timestamp: hoursFrom(now, -24 * 8) }] }));
+    assert(two._maintenanceTaskCard("subject").includes('data-action="maintenance-trend" data-id="subject"'));
+    assertEqual(two._maintenanceTrendAnchor("subject"), "or-maint-trend-subject");
+    assert(two._maintenanceCadenceCard().includes('id="or-maint-trend-subject"'), "the trend card is the anchor");
+    const vol = await makePanel(configForCase({ task: { logsVolume: true }, completions: [{ id: "a", timestamp: hoursFrom(now, -24), volume: 10, volumeUnit: "L" }] }));
+    assertEqual(vol._maintenanceTrendAnchor("subject"), "or-maint-trend-water", "a lone volume points at the water chart");
+    assert(vol._maintenanceWaterChangeCard().includes('id="or-maint-trend-water"'));
+    assertEqual(vol._maintenanceViewId(), "upcoming");
+    vol._maintenanceView = "log";
+    assert(vol._maintenanceViewBody().includes("Maintenance log"));
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

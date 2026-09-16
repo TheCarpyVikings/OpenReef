@@ -140,6 +140,7 @@ class OpenReefPanel extends HTMLElement {
     this._maintenanceView = "upcoming";   // 0.7.195: upcoming | tasks | trends
     this._maintenanceExpanded = "";       // the one row open to its full card
     this._maintenanceLaterOpen = false;   // "Later this week" folded by default
+    this._maintLog = { days: 30, task: "", source: "", limit: 80 };   // 0.7.196 log filters
     // Per-task completion-form drafts (done-at / volume / unit). Echoed back into
     // the inputs on render so a background hass update re-render doesn't wipe
     // half-typed values the moment the field loses focus.
@@ -1608,6 +1609,32 @@ class OpenReefPanel extends HTMLElement {
         this._maintenanceLaterOpen = this._maintenanceLaterOpen !== true;
         this._render();
       }
+      if (action === "maintenance-trend") {
+        this._maintenanceView = "trends";
+        this._render();
+        const anchor = this._maintenanceTrendAnchor(id);
+        requestAnimationFrame(() => this.shadowRoot.getElementById(anchor)?.scrollIntoView({ block: "center", behavior: "smooth" }));
+      }
+      if (action === "maintenance-open-task") {
+        this._maintenanceView = "tasks";
+        this._maintenanceExpanded = id;
+        this._render();
+        requestAnimationFrame(() => this.shadowRoot.getElementById(`or-maint-task-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+      }
+      if (action === "maintenance-log-days") {
+        this._maintLogState().days = Number(id) || 0;
+        this._maintLogState().limit = 80;
+        this._render();
+      }
+      if (action === "maintenance-log-source") {
+        this._maintLogState().source = id || "";
+        this._maintLogState().limit = 80;
+        this._render();
+      }
+      if (action === "maintenance-log-more") {
+        this._maintLogState().limit = (Number(this._maintLogState().limit) || 80) + 80;
+        this._render();
+      }
       if (action === "maintenance-step") this._toggleMaintenanceStep(target.dataset.id, Number(target.dataset.index));
       if (action === "maintenance-usual-steps") this._maintenanceUsualSteps(target.dataset.id);
       if (action === "skip-task") this._skipTask(id);
@@ -2290,6 +2317,12 @@ class OpenReefPanel extends HTMLElement {
       // Maintenance completion-form fields are ephemeral (not part of config) —
       // stash the raw typing in a draft store so a re-render echoes it back
       // instead of clearing the input. Cleared when the completion is logged.
+      if (target.dataset.maintLog) {
+        this._maintLogState()[target.dataset.maintLog] = target.value;
+        this._maintLogState().limit = 80;
+        this._render();
+        return;
+      }
       if (target.dataset.maintDraft) {
         const draftId = target.dataset.id;
         this._maintenanceDrafts[draftId] = this._maintenanceDrafts[draftId] || {};
@@ -29778,13 +29811,25 @@ const rigSteps = [
   // card: "take me to the relevant task" without a scroll hunt.
   // ---------------------------------------------------------------------------
   _maintenanceViewId() {
-    return ["upcoming", "tasks", "trends"].includes(this._maintenanceView) ? this._maintenanceView : "upcoming";
+    return ["upcoming", "tasks", "trends", "log"].includes(this._maintenanceView) ? this._maintenanceView : "upcoming";
+  }
+
+  // Whether the Trends view has a card for this task: a cadence chart needs one
+  // interval; the water-change chart needs a logged volume.
+  _maintenanceHasTrend(id) {
+    if (this._maintenanceIntervals(id).length >= 1) return true;
+    return this._maintenanceVolumeTasks().some(([vid]) => vid === id);
+  }
+
+  _maintenanceTrendAnchor(id) {
+    if (this._maintenanceIntervals(id).length >= 1) return `or-maint-trend-${id}`;
+    return "or-maint-trend-water";
   }
 
   _maintenanceViewSwitch() {
     const active = this._maintenanceViewId();
     const enabled = this._maintenanceTaskList().filter(([id]) => this._maintenanceTask(id).enabled).length;
-    const views = [["upcoming", `Coming up (${this._maintenanceUpcoming(7).length})`], ["tasks", `All tasks (${enabled})`], ["trends", "Trends"]];
+    const views = [["upcoming", `Coming up (${this._maintenanceUpcoming(7).length})`], ["tasks", `All tasks (${enabled})`], ["trends", "Trends"], ["log", "Log"]];
     return `
       <div class="maint-views" role="tablist">
         ${views.map(([vid, label]) => `<button class="maint-view${active === vid ? " active" : ""}" role="tab" aria-selected="${active === vid}" data-action="maintenance-view" data-id="${vid}">${this._escape(label)}</button>`).join("")}
@@ -29795,7 +29840,134 @@ const rigSteps = [
     const view = this._maintenanceViewId();
     if (view === "tasks") return this._maintenanceTasksView();
     if (view === "trends") return this._maintenanceTrendsSection() || `<p class="muted">Trends appear once a task has a few completions behind it.</p>`;
+    if (view === "log") return this._maintenanceLogView();
     return this._maintenanceUpcomingSection();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Maintenance log (0.7.196): every completion across every task, newest
+  // first, by day — the ledger a keeper checks back through ("what did I
+  // actually do?") and the raw material the weekly report will read.
+  // ---------------------------------------------------------------------------
+  _maintLogState() {
+    if (!this._maintLog) this._maintLog = { days: 30, task: "", source: "", limit: 80 };
+    return this._maintLog;
+  }
+
+  // Who logged an entry: a hand tick has no source; engines stamp theirs.
+  _maintenanceEntrySource(entry) {
+    return entry?.source ? String(entry.source) : "hand";
+  }
+
+  _maintenanceSourceLabel(source) {
+    return { hand: "by hand", awc: "auto water change", hatchery: "hatchery", cultures: "cultures", shelf: "food shelf", mixing: "mixing station" }[source] || source;
+  }
+
+  // Every completion of every task (tracked or not — history outlives a
+  // toggle), flattened and newest first. No window applied here.
+  _maintenanceLogEntries() {
+    const config = this._maintenanceConfig();
+    const ids = new Set([...Object.keys(config.tasks || {}), ...Object.keys(config.completions || {})]);
+    const rows = [];
+    for (const id of ids) {
+      const task = this._maintenanceTask(id);
+      const label = task.label || String(config.tasks?.[id]?.label || id);
+      for (const entry of this._maintenanceCompletions(id)) {
+        const ms = this._maintenanceCompletionTime(entry);
+        if (!ms) continue;
+        rows.push({ id, label, entry, ms, source: this._maintenanceEntrySource(entry), tracked: task.enabled === true });
+      }
+    }
+    return rows.sort((a, b) => b.ms - a.ms);
+  }
+
+  _maintenanceLogFiltered() {
+    const st = this._maintLogState();
+    const days = Number(st.days) || 0;
+    const since = days > 0 ? Date.now() - days * 86400000 : 0;
+    return this._maintenanceLogEntries().filter((row) =>
+      row.ms >= since && (!st.task || row.id === st.task) && (!st.source || row.source === st.source));
+  }
+
+  _maintenanceDayLabel(ms) {
+    const at = new Date(ms);
+    const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const diff = Math.round((dayStart(new Date()) - dayStart(at)) / 86400000);
+    const date = at.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
+    return diff === 0 ? `Today · ${date}` : diff === 1 ? `Yesterday · ${date}` : date;
+  }
+
+  _maintenanceLogRow(row) {
+    const { id, label, entry, ms, source } = row;
+    const tankVol = this._maintenanceTankVolumeLitres();
+    const { litres, pct } = this._maintenanceVolumeParts(entry, tankVol);
+    const parts = [];
+    if (litres !== null) parts.push(`${this._maintenanceVolNum(litres)} L`);
+    if (pct !== null) parts.push(`${this._maintenanceVolNum(pct)}%`);
+    const time = new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return `
+      <div class="maint-row ${entry.skipped ? "skipped" : "ok"} maint-log-row">
+        <div class="maint-row-line">
+          <span class="maint-log-time">${this._escape(time)}</span>
+          <button class="maint-row-main" data-action="maintenance-open-task" data-id="${this._escape(id)}" title="Open this task">
+            <strong>${this._escape(label)}</strong>
+            ${parts.length ? `<span class="maint-when">${this._escape(parts.join(" · "))}</span>` : ""}
+            ${entry.newWater ? `<span class="maint-when">${this._escape(`new water ${this._maintenanceNewWaterText(entry.newWater)}`)}</span>` : ""}
+            ${entry.notes ? `<span class="maint-when maint-log-note">${this._escape(entry.notes)}</span>` : ""}
+          </button>
+          <div class="maint-row-side">
+            ${entry.skipped ? `<span class="pill warning">skipped</span>` : ""}
+            ${source !== "hand" ? `<span class="pill auto">${this._escape(this._maintenanceSourceLabel(source))}</span>` : ""}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  _maintenanceLogView() {
+    const st = this._maintLogState();
+    const all = this._maintenanceLogEntries();
+    if (!all.length) return `<p class="muted">Nothing logged yet — every Mark done lands here.</p>`;
+    const rows = this._maintenanceLogFiltered();
+    const shown = rows.slice(0, Math.max(20, Number(st.limit) || 80));
+    const done = rows.filter((r) => !r.entry.skipped).length;
+    const skipped = rows.length - done;
+    const tankVol = this._maintenanceTankVolumeLitres();
+    const litres = rows.filter((r) => !r.entry.skipped)
+      .reduce((sum, r) => sum + (this._maintenanceVolumeParts(r.entry, tankVol).litres || 0), 0);
+    const summary = [`${done} done`, skipped ? `${skipped} skipped` : "", litres > 0 ? `${this._maintenanceVolNum(litres)} L of water changed` : ""].filter(Boolean).join(" · ");
+    const windows = [[7, "7 days"], [30, "30 days"], [90, "90 days"], [0, "All"]];
+    const sources = ["hand", "awc", "hatchery", "cultures", "shelf", "mixing"].filter((src) => all.some((r) => r.source === src));
+    const taskOptions = [...new Map(all.map((r) => [r.id, r.label])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    const chip = (action, value, label, active) => `<button class="maint-view${active ? " active" : ""}" data-action="${action}" data-id="${this._escape(String(value))}">${this._escape(label)}</button>`;
+    // Day groups, newest first.
+    const groups = [];
+    for (const row of shown) {
+      const label = this._maintenanceDayLabel(row.ms);
+      const last = groups[groups.length - 1];
+      if (last && last.label === label) last.rows.push(row); else groups.push({ label, rows: [row] });
+    }
+    return `
+      <section class="setting-card subtle-card maint-log">
+        <div class="section-head">
+          <div><p class="eyebrow">Maintenance log</p><h3>What you have done</h3><p class="muted">${this._escape(summary || "Nothing in this window.")}</p></div>
+        </div>
+        <div class="maint-log-filters">
+          <div class="maint-views">${windows.map(([d, label]) => chip("maintenance-log-days", d, label, Number(st.days) === d)).join("")}</div>
+          ${sources.length > 1 ? `<div class="maint-views">${chip("maintenance-log-source", "", "Everyone", !st.source)}${sources.map((src) => chip("maintenance-log-source", src, this._maintenanceSourceLabel(src), st.source === src)).join("")}</div>` : ""}
+          <label class="maint-log-task">Task
+            <select data-maint-log="task">
+              <option value="" ${st.task ? "" : "selected"}>All tasks</option>
+              ${taskOptions.map(([id, label]) => `<option value="${this._escape(id)}" ${st.task === id ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        ${groups.length ? groups.map((group) => `
+          <div class="maint-group">
+            <div class="maint-group-head"><h4>${this._escape(group.label)}</h4><small>${group.rows.length} ${group.rows.length === 1 ? "entry" : "entries"}</small></div>
+            ${group.rows.map((row) => this._maintenanceLogRow(row)).join("")}
+          </div>`).join("") : `<p class="muted">Nothing in this window — widen it or clear the filters.</p>`}
+        ${rows.length > shown.length ? `<div class="button-row"><button class="secondary compact-button" data-action="maintenance-log-more">Show ${Math.min(80, rows.length - shown.length)} more (${rows.length - shown.length} left)</button></div>` : ""}
+      </section>`;
   }
 
   _maintenanceEntry(id) {
@@ -30155,7 +30327,7 @@ const rigSteps = [
         </div>` : "";
 
     return `
-      <section class="setting-card subtle-card">
+      <section class="setting-card subtle-card" id="or-maint-trend-water">
         <div class="section-head">
           <div>
             <p class="eyebrow">Trends</p>
@@ -30285,7 +30457,7 @@ const rigSteps = [
             : `${this._format(driftAbs, 1)} day${driftAbs >= 1.95 ? "s" : ""} ${drift > 0 ? "late" : "early"} on average`;
         const streak = this._maintenanceStreakLabel(this._maintenanceStreak(id, task));
         return `
-          <article class="metric-card maint-cadence-card">
+          <article class="metric-card maint-cadence-card" id="or-maint-trend-${this._escape(id)}">
             <div class="maint-cadence-head">
               <strong>${this._escape(task.label)}</strong>
               <span class="pill ${status}">${this._escape(hourly ? `${this._format(avg * 24, 1)} h avg` : `${this._format(avg, 1)} d avg`)}</span>
@@ -30552,6 +30724,7 @@ const rigSteps = [
           ` : ""}
           ${snoozed ? `<button class="secondary compact-button" data-action="resume-task" data-id="${this._escape(id)}">Resume now</button>` : ""}
           <button class="secondary compact-button" data-action="toggle-task-history" data-id="${this._escape(id)}">${open ? "Hide history" : `History (${completions.length})`}</button>
+          ${this._maintenanceHasTrend(id) ? `<button class="secondary compact-button" data-action="maintenance-trend" data-id="${this._escape(id)}">Trends</button>` : ""}
         </div>
         ${open ? `
           <div class="manual-history">
@@ -33408,6 +33581,12 @@ ${parts.buttons}
         .maint-row.open > .manual-test-card { border: 0; border-top: 1px solid #24364a; border-radius: 0 0 8px 8px; min-height: 0; }
         .maint-later-toggle { margin-left: auto; }
         @media (max-width: 640px) { .maint-row-main { flex-basis: 120px; } .maint-row-line { padding: 4px 8px; } }
+        .maint-log-filters { display: grid; gap: 8px; }
+        .maint-log-task { display: flex; align-items: center; gap: 8px; color: #94a3b8; font-size: 13px; }
+        .maint-log-task select { width: auto; max-width: 100%; }
+        .maint-log-time { font-variant-numeric: tabular-nums; color: #94a3b8; min-width: 44px; }
+        .maint-row.skipped { opacity: .7; }
+        .maint-log-note { font-style: italic; }
         .manual-schedule-card.manual-enabled { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .88)); }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }
