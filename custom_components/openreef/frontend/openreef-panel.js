@@ -143,6 +143,8 @@ class OpenReefPanel extends HTMLElement {
     this._maintLog = { days: 30, task: "", source: "", limit: 80 };   // 0.7.196 log filters
     this._reportStampedDate = "";         // 0.7.197: the local day the Reef Health stamp went up
     this._reportStampedAt = 0;
+    // The Reef Report viewer (Stage C, 0.7.199): a dialog off Home.
+    this._report = { open: false, loading: false, error: "", data: null, at: 0, period: "week", which: "previous" };
     // Per-task completion-form drafts (done-at / volume / unit). Echoed back into
     // the inputs on render so a background hass update re-render doesn't wipe
     // half-typed values the moment the field loses focus.
@@ -1233,6 +1235,7 @@ class OpenReefPanel extends HTMLElement {
         this._coolingDialogOpen = false;
         this._awcPumpsDialogOpen = false;
         this._systemCheckDialogOpen = false;
+        if (this._report) this._report.open = false;
         this._coralDialogOpen = false;
         // The coral diary (0.7.192): which colony's record is open, the
         // check-in and feed drafts, the round's queue and the tab's filter.
@@ -1327,6 +1330,35 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cooling-close") {
         this._coolingDialogOpen = false;
         this._render();
+      }
+      if (action === "report-open") {
+        this._report.open = true;
+        this._reportLoad(false);
+        this._render();
+      }
+      if (action === "report-close") {
+        this._report.open = false;
+        this._render();
+      }
+      if (action === "report-period" || action === "report-which") {
+        if (action === "report-period") this._report.period = id === "month" ? "month" : "week";
+        else this._report.which = id === "current" ? "current" : "previous";
+        this._reportLoad(true);
+        this._render();
+      }
+      if (action === "report-refresh") {
+        this._reportLoad(true);
+        this._render();
+      }
+      if (action === "report-task") {
+        // A row in the plan is the way to its task: the Maintenance tab, All
+        // tasks, that row open.
+        this._report.open = false;
+        this._maintenanceView = "tasks";
+        this._maintenanceExpanded = id;
+        this._activeTab = "maintenance";
+        this._render();
+        requestAnimationFrame(() => this.shadowRoot.getElementById(`or-maint-task-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
       }
       if (action === "cooling-dehum") this._coolingActuator("dehumidifier", id);
       if (action === "cooling-vent") this._coolingActuator("vent", id);
@@ -4585,6 +4617,7 @@ class OpenReefPanel extends HTMLElement {
       cameras: saved.cameras === true || (this._cameraList().some(([, c]) => c.entity_id) && saved.cameras !== false),
       maintenance: saved.maintenance === true || (this._maintenanceConfig().enabled && this._maintenanceTaskList().some(([id]) => this._maintenanceTask(id).enabled) && saved.maintenance !== false),
       corals: saved.corals === true || (Object.keys(this._config?.livestock?.corals || {}).length > 0 && saved.corals !== false),
+      report: saved.report !== false,
     };
   }
 
@@ -4599,6 +4632,7 @@ class OpenReefPanel extends HTMLElement {
       ["energy", "Energy", "Show energy and cost summaries in Mission Control."],
       ["maintenance", "Maintenance", "Show how many maintenance tasks are due or overdue."],
       ["corals", "Corals", "Show the coral diary: colonies that need you, check-ins and feeds due."],
+      ["report", "Reef Report", "Show last week's score and open the weekly report."],
     ];
   }
 
@@ -6774,6 +6808,318 @@ class OpenReefPanel extends HTMLElement {
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // The Reef Report viewer (Stage C, 0.7.199 — docs/reef-report-brainstorm.md).
+  // The backend compiles (report.py); this renders every section, links the
+  // plan's rows to their tasks and picks the photo of the week. Sensor history
+  // for the Water section: the backend reads the recorder; when it answers
+  // "tests" the panel fetches the history itself, the way Live Stats does, and
+  // hands it back in — the Trident numbers are never guessed at.
+  // ---------------------------------------------------------------------------
+  _reportLocalWeekBounds(which = "previous") {
+    const weekStart = Math.max(0, Math.min(6, Number(this._config?.reports?.weekStart) || 0));
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const offset = ((today.getDay() + 6) % 7 - weekStart + 7) % 7;
+    const thisStart = new Date(today); thisStart.setDate(today.getDate() - offset);
+    const start = new Date(thisStart); if (which === "previous") start.setDate(start.getDate() - 7);
+    const end = new Date(start); end.setDate(start.getDate() + 7);
+    return { start, end };
+  }
+
+  // The hero card: last week's average stamp against the week before, from
+  // the score log the panel already holds — no compile needed to say it.
+  _reportHeroCard() {
+    const log = Array.isArray(this._config?.reports?.scoreLog) ? this._config.reports.scoreLog : [];
+    const { start, end } = this._reportLocalWeekBounds("previous");
+    const prevStart = new Date(start); prevStart.setDate(start.getDate() - 7);
+    const dateOf = (row) => { const [y, m, d] = String(row?.date || "").split("-").map(Number); return y && m && d ? new Date(y, m - 1, d) : null; };
+    const avg = (rows) => rows.length ? Math.round(rows.reduce((sum, r) => sum + Number(r.total || 0), 0) / rows.length) : null;
+    const last = avg(log.filter((r) => { const d = dateOf(r); return d && d >= start && d < end; }));
+    const before = avg(log.filter((r) => { const d = dateOf(r); return d && d >= prevStart && d < start; }));
+    const delta = last !== null && before !== null ? last - before : null;
+    const value = last === null ? "Ready" : `${last}/100`;
+    const detail = last === null ? "last week's report — open it"
+      : delta === null ? "last week's average · open the report"
+        : delta === 0 ? "level with the week before" : `${delta > 0 ? "up" : "down"} ${Math.abs(delta)} on the week before`;
+    const status = last === null ? "unknown" : last >= 80 ? "ok" : last >= 60 ? "warning" : "critical";
+    return this._missionSummaryCard("Reef Report", value, detail, status, "mission", { action: "report-open" });
+  }
+
+  async _reportLoad(force = false) {
+    const st = this._report;
+    if (!st || st.loading) return;
+    if (!force && st.data && Date.now() - st.at < 5 * 60000) return;
+    st.loading = true;
+    st.error = "";
+    this._render();
+    try {
+      const msg = { type: "openreef/report_compile", period: st.period, which: st.which };
+      let data = await this._callWS(msg);
+      if (data?.readingsSource === "tests") {
+        const readings = await this._reportPanelReadings(data);
+        if (readings) data = await this._callWS({ ...msg, readings });
+      }
+      st.data = data;
+      st.at = Date.now();
+    } catch (err) {
+      st.error = (err && err.message) || "Could not compile the report.";
+    } finally {
+      st.loading = false;
+      this._render();
+    }
+  }
+
+  // The recorder, read from the panel side for the mapped chemistry sensors,
+  // over the four-week trend window the engine draws. null when nothing is
+  // mapped or the history call fails — the compile already ran on tests.
+  async _reportPanelReadings(data) {
+    const sensors = this._config?.sensors || {};
+    const params = ["alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity", "ph", "temp"]
+      .filter((id) => sensors[id]?.entity_id && this._sensorEnabled?.(sensors[id]) !== false);
+    if (!params.length || !data?.period?.end) return null;
+    const end = new Date(data.period.end);
+    const start = new Date(end.getTime() - 28 * 86400000);
+    const readings = {};
+    try {
+      for (const id of params) {
+        const points = await this._fetchHistoryTrendPoints(sensors[id].entity_id, start, end, { maxPoints: 240 });
+        if (Array.isArray(points) && points.length) {
+          readings[id] = points.map((pt) => ({ t: new Date(pt.time).toISOString(), v: pt.value }));
+        }
+      }
+    } catch {
+      return null;
+    }
+    return Object.keys(readings).length ? readings : null;
+  }
+
+  // One series, thin line, recessive band for the target range, the last
+  // point marked, a title per point for hover — never a legend for one line.
+  _reportSparkline(points, range, opts = {}) {
+    const pts = (Array.isArray(points) ? points : []).map((p) => ({ t: Date.parse(p.t || p.date || ""), v: Number(p.v ?? p.total) }))
+      .filter((p) => Number.isFinite(p.t) && Number.isFinite(p.v)).sort((a, b) => a.t - b.t);
+    const w = opts.width || 140, h = opts.height || 36, pad = 3;
+    if (pts.length < 2) return pts.length === 1 ? `<svg class="report-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="one reading"><circle cx="${w - pad}" cy="${h / 2}" r="3" class="report-spark-dot"><title>${this._escape(String(pts[0].v))}</title></circle></svg>` : "";
+    const lo0 = range && Number.isFinite(Number(range.min)) ? Number(range.min) : Infinity;
+    const hi0 = range && Number.isFinite(Number(range.max)) ? Number(range.max) : -Infinity;
+    const vmin = Math.min(...pts.map((p) => p.v), lo0), vmax = Math.max(...pts.map((p) => p.v), hi0);
+    const span = vmax - vmin || 1;
+    const x = (t) => pad + (t - pts[0].t) / ((pts[pts.length - 1].t - pts[0].t) || 1) * (w - 2 * pad);
+    const y = (v) => h - pad - (v - vmin) / span * (h - 2 * pad);
+    const band = Number.isFinite(lo0) && Number.isFinite(hi0)
+      ? `<rect class="report-spark-band" x="0" y="${y(hi0).toFixed(1)}" width="${w}" height="${Math.max(1, y(lo0) - y(hi0)).toFixed(1)}"></rect>` : "";
+    const line = pts.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+    const last = pts[pts.length - 1];
+    const dots = pts.map((p) => `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="5" class="report-spark-hit"><title>${this._escape(`${new Date(p.t).toLocaleDateString([], { day: "numeric", month: "short" })} · ${p.v}`)}</title></circle>`).join("");
+    return `<svg class="report-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${this._escape(opts.label || "trend")}">${band}<polyline class="report-spark-line" points="${line}"></polyline>${dots}<circle class="report-spark-dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3"></circle></svg>`;
+  }
+
+  _reportStat(label, value, detail = "", status = "") {
+    return `<div class="report-stat ${status}"><small>${this._escape(label)}</small><strong>${this._escape(String(value))}</strong>${detail ? `<span>${this._escape(detail)}</span>` : ""}</div>`;
+  }
+
+  _reportBandPill(band) {
+    const cls = { steady: "ok", drifting: "warning", swinging: "critical", single: "unknown", untested: "unknown" }[band] || "unknown";
+    const label = { steady: "steady", drifting: "drifting", swinging: "swinging", single: "one reading", untested: "not tested" }[band] || band;
+    return `<span class="pill ${cls}">${this._escape(label)}</span>`;
+  }
+
+  _reportFmt(value, digits = 1) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+    return this._format(Number(value), digits);
+  }
+
+  _reportPhoto(r) {
+    const start = Date.parse(r?.period?.start || ""), end = Date.parse(r?.period?.end || "");
+    const captures = Array.isArray(this._config?.captures) ? this._config.captures : [];
+    const pick = captures.find((c) => c?.thumbnail && Number.isFinite(Date.parse(c.timestamp || "")) && Date.parse(c.timestamp) >= start && Date.parse(c.timestamp) < end);
+    if (!pick) return "";
+    return `
+      <figure class="report-photo">
+        <img src="${this._escape(this._captureUrl(pick.thumbnail))}" alt="${this._escape(pick.label || "Capture")}">
+        <figcaption>${this._escape(pick.label || "Capture")} · ${this._escape(this._formatActivityTime(pick.timestamp))}${pick.cameraLabel ? ` · ${this._escape(pick.cameraLabel)}` : ""}</figcaption>
+      </figure>`;
+  }
+
+  _reportHeadline(r) {
+    const sc = r.headline?.score || {};
+    const deltaText = sc.delta === null || sc.delta === undefined ? (sc.previousAverage === null ? "no period before to compare" : "")
+      : sc.delta === 0 ? "level with the period before" : `${sc.delta > 0 ? "up" : "down"} ${Math.abs(sc.delta)} on the period before`;
+    const scoreStatus = sc.average === null || sc.average === undefined ? "unknown" : sc.average >= 80 ? "ok" : sc.average >= 60 ? "warning" : "critical";
+    return `
+      <div class="report-headline">
+        <div class="report-score ${scoreStatus}">
+          <small>Reef Health, average</small>
+          <strong>${sc.average === null || sc.average === undefined ? "—" : `${Math.round(sc.average)}`}<span>/100</span></strong>
+          <span class="report-score-delta">${this._escape(deltaText || `${sc.stamps || 0} of ${r.period?.days || 7} days stamped`)}</span>
+          ${sc.series?.length > 1 ? this._reportSparkline(sc.series, null, { width: 160, height: 40, label: "score by day" }) : ""}
+        </div>
+        <div class="report-verdict">
+          <p class="report-verdict-line">${this._escape(r.headline?.verdict || "")}</p>
+          ${sc.stamps ? `<small class="muted">Stamped on ${sc.stamps} of ${r.period?.days || 7} days${sc.gaps ? ` — ${sc.gaps} day${sc.gaps === 1 ? "" : "s"} the panel stayed closed` : ""}.</small>` : `<small class="muted">No Reef Health stamps this period.</small>`}
+        </div>
+        ${this._reportPhoto(r)}
+      </div>`;
+  }
+
+  _reportDid(r) {
+    const m = r.did?.maintenance || {};
+    const awc = r.did?.awc || {};
+    const feeds = r.did?.feeds || {};
+    const tests = r.did?.tests || {};
+    const tasks = Array.isArray(m.tasks) ? m.tasks : [];
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">What you did</p></div>
+        <div class="report-stats">
+          ${this._reportStat("Chores ticked off", m.done || 0, m.skipped ? `${m.skipped} skipped` : "")}
+          ${this._reportStat("On time", m.onSchedule === null || m.onSchedule === undefined ? "—" : `${Math.round(m.onSchedule)} %`, m.timed ? `of ${m.timed} with a tick before` : "needs a previous tick", m.onSchedule === null || m.onSchedule === undefined ? "" : m.onSchedule >= 80 ? "ok" : m.onSchedule >= 50 ? "warning" : "critical")}
+          ${this._reportStat("Water changed", m.waterChangedL ? `${this._reportFmt(m.waterChangedL)} L` : "none", m.waterChangedL ? `${this._reportFmt(m.handL)} L by hand · ${this._reportFmt(m.autoL)} L auto${m.waterChangedPct ? ` · ${this._reportFmt(m.waterChangedPct, 0)} % of the tank` : ""}` : "")}
+          ${this._reportStat("Auto changes", awc.runs || 0, awc.runs ? `${this._reportFmt(awc.drainedL)} L drained${awc.partial ? ` · ${awc.partial} partial` : ""}` : "")}
+          ${this._reportStat("Tests", tests.count || 0, tests.parameters?.length ? tests.parameters.join(", ") : "none logged")}
+          ${this._reportStat("Feeds", feeds.available ? feeds.count || 0 : "—", feeds.available ? `${feeds.hand || 0} by hand · ${feeds.pump || 0} by pump${feeds.undone ? ` · ${feeds.undone} taken back` : ""}` : "feeding log not available")}
+        </div>
+        ${tasks.length ? `
+          <div class="report-table-wrap"><table class="report-table">
+            <thead><tr><th>Task</th><th>Done</th><th>Late</th><th>Skipped</th><th>Water</th></tr></thead>
+            <tbody>${tasks.map((t) => `
+              <tr class="${t.tracked ? "" : "muted"}"><td><button class="link-button report-task-link" data-action="report-task" data-id="${this._escape(t.id)}">${this._escape(t.label)}</button>${t.tracked ? "" : " <small>(no longer tracked)</small>"}</td><td>${t.done}</td><td>${t.late || ""}</td><td>${t.skipped || ""}</td><td>${t.litres ? `${this._reportFmt(t.litres)} L` : ""}</td></tr>`).join("")}
+            </tbody>
+          </table></div>` : `<p class="muted">Nothing ticked off in this period.</p>`}
+      </section>`;
+  }
+
+  _reportWater(r) {
+    const params = Array.isArray(r.water?.parameters) ? r.water.parameters : [];
+    if (!params.length) return "";
+    const rows = params.map((p) => {
+      const cons = p.consumption || null;
+      const consText = !cons ? "" : cons.perDay === null || cons.perDay === undefined ? `<small class="muted">needs ${2 - (cons.pairs || 0)} more falling pair${2 - (cons.pairs || 0) === 1 ? "" : "s"}</small>`
+        : `${this._reportFmt(cons.perDay, p.id === "alkalinity" ? 2 : 1)} ${this._escape(p.unit)}/day <small class="muted">est.</small>`;
+      const latest = p.latest === null || p.latest === undefined ? "—" : `${this._reportFmt(p.latest, p.id === "phosphate" ? 3 : p.id === "alkalinity" || p.id === "ph" ? 2 : 1)} ${this._escape(p.unit)}`;
+      const when = p.daysSince === null || p.daysSince === undefined ? "" : p.latestIsFromPeriod ? `${this._reportFmt(p.daysSince, 0)} d before the end` : `${this._reportFmt(p.daysSince, 0)} d old — not this period`;
+      const inRange = p.inRange === null || p.inRange === undefined ? "" : p.inRange ? `<span class="pill ok">in range</span>` : `<span class="pill critical">out of range</span>`;
+      return `
+        <tr>
+          <td><strong>${this._escape(p.label)}</strong><br><small class="muted">${p.tests || 0} test${p.tests === 1 ? "" : "s"}${p.sensorSamples ? ` · ${p.sensorSamples} sensor samples` : ""}</small></td>
+          <td>${latest}<br><small class="muted">${this._escape(when)}</small></td>
+          <td>${this._reportSparkline(p.points, p.range, { label: `${p.label} four weeks` })}${p.change ? `<br><small class="muted">${p.change > 0 ? "+" : ""}${this._reportFmt(p.change, 2)} over four weeks</small>` : ""}</td>
+          <td>${this._reportBandPill(p.band)} ${inRange}</td>
+          <td>${consText}</td>
+        </tr>`;
+    }).join("");
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Water</p>${r.water?.untested?.length ? `<small class="muted">Not tested this period: ${this._escape(r.water.untested.join(", "))}.</small>` : ""}</div>
+        <div class="report-table-wrap"><table class="report-table report-water">
+          <thead><tr><th>Parameter</th><th>Latest</th><th>Four weeks</th><th>Stability</th><th>Consumption</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </section>`;
+  }
+
+  _reportLiving(r) {
+    const h = r.living?.hatches || {};
+    const c = r.living?.cultures || {};
+    const co = r.living?.corals || {};
+    const jars = Array.isArray(c.jars) ? c.jars : [];
+    const grades = Object.entries(co.grades || {}).sort().map(([g, n]) => `${n} × ${g}`).join(" · ");
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Living reef</p></div>
+        <div class="report-cards">
+          <article class="report-card">
+            <h4>Hatchery</h4>
+            ${h.harvested || h.started ? `<p><strong>${h.harvested || 0}</strong> harvest${h.harvested === 1 ? "" : "s"} · <strong>${h.started || 0}</strong> started${h.enriched ? ` · ${h.enriched} enriched` : ""}</p>
+              <small class="muted">${h.avgActualHours ? `~${this._reportFmt(h.avgActualHours, 0)} h a hatch` : ""}${h.avgLateHours ? ` · ${h.avgLateHours > 0 ? `${this._reportFmt(h.avgLateHours)} h past the clock on average` : `${this._reportFmt(-h.avgLateHours)} h early on average`}` : ""}</small>
+              ${(h.byVessel || []).length > 1 ? `<small class="muted">${h.byVessel.map((v) => `${this._escape(v.name)} ${v.harvests}`).join(" · ")}</small>` : ""}` : `<p class="muted">No hatches this period.</p>`}
+          </article>
+          <article class="report-card">
+            <h4>Cultures</h4>
+            ${jars.length ? jars.map((j) => `<p><strong>${this._escape(j.name)}</strong> · ${j.feeds} feed${j.feeds === 1 ? "" : "s"} · ${j.looks} look${j.looks === 1 ? "" : "s"} · ${j.harvests} harvest${j.harvests === 1 ? "" : "s"}${j.harvestMl ? ` (${this._reportFmt(j.harvestMl, 0)} ml)` : ""}${j.skips ? ` · ${j.skips} skipped` : ""}${j.signs ? ` · <span class="pill warning">${j.signs} sign${j.signs === 1 ? "" : "s"}</span>` : ""}${j.crashed ? ` · <span class="pill critical">crashed</span>` : ""}${j.restarts ? ` · restarted` : ""}</p>`).join("") : `<p class="muted">No culture journal entries this period.</p>`}
+          </article>
+          <article class="report-card">
+            <h4>Corals</h4>
+            ${co.colonies ? `<p><strong>${co.checkins || 0}</strong> look${co.checkins === 1 ? "" : "s"} · <strong>${co.feeds || 0}</strong> target feed${co.feeds === 1 ? "" : "s"} across ${co.colonies} colon${co.colonies === 1 ? "y" : "ies"}</p>
+              ${grades ? `<small class="muted">Grades now: ${this._escape(grades)}</small>` : ""}
+              ${(co.moved || []).length ? `<ul class="report-list">${co.moved.map((m) => `<li>${this._escape(m.name)}: ${m.from} → ${m.to} <span class="pill ${m.to < m.from ? "warning" : "ok"}">${m.to < m.from ? "down" : "up"} ${Math.abs(m.to - m.from)}</span></li>`).join("")}</ul>` : ""}` : `<p class="muted">No colonies in the diary yet.</p>`}
+          </article>
+        </div>
+      </section>`;
+  }
+
+  _reportHappened(r) {
+    const ev = r.happened || {};
+    const rows = Array.isArray(ev.rows) ? ev.rows : [];
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">What happened</p><small class="muted">${ev.count || 0} event${ev.count === 1 ? "" : "s"}${ev.byType?.warning ? ` · ${ev.byType.warning} warning${ev.byType.warning === 1 ? "" : "s"}` : ""}</small></div>
+        ${rows.length ? `<div class="activity-list report-events">${rows.map((e) => `
+          <div class="activity-item ${this._escape(e.type || "info")}"><span>${this._escape(this._formatActivityTime(e.at))}</span><strong>${this._escape(e.message)}</strong></div>`).join("")}</div>` : `<p class="muted">Nothing on the log for this period.</p>`}
+      </section>`;
+  }
+
+  _reportNext(r) {
+    const days = Array.isArray(r.next?.days) ? r.next.days : [];
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">${r.period?.kind === "month" ? "The next two weeks" : "Next week"}</p><small class="muted">${r.next?.count || 0} due</small></div>
+        ${days.length ? days.map((d) => `
+          <div class="maint-group">
+            <div class="maint-group-head"><h4>${this._escape(d.label)}</h4>${d.day !== "now" ? `<small>${this._escape(new Date(d.items[0].dueAt).toLocaleDateString([], { day: "numeric", month: "short" }))}</small>` : ""}</div>
+            ${d.items.map((it) => `
+              <div class="maint-row ${it.status === "critical" ? "critical" : it.status === "warning" ? "warning" : "ok"}">
+                <div class="maint-row-line">
+                  <button class="maint-row-main" data-action="report-task" data-id="${this._escape(it.id)}"><strong>${this._escape(it.label)}</strong><span class="maint-when">${this._escape(new Date(it.dueAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))}</span></button>
+                  ${it.source ? `<span class="maint-chip ${this._escape(it.source)}">${this._escape(it.source)}</span>` : ""}
+                </div>
+              </div>`).join("")}
+          </div>`).join("") : `<p class="muted">Nothing falls due in the window.</p>`}
+      </section>`;
+  }
+
+  _reportDialog() {
+    const st = this._report || {};
+    const r = st.data;
+    const chip = (action, value, label, active) => `<button class="maint-view${active ? " active" : ""}" data-action="${action}" data-id="${value}">${this._escape(label)}</button>`;
+    const controls = `
+      <div class="report-controls">
+        <div class="maint-views">${chip("report-period", "week", "Week", st.period !== "month")}${chip("report-period", "month", "Month", st.period === "month")}</div>
+        <div class="maint-views">${chip("report-which", "previous", st.period === "month" ? "Last month" : "Last week", st.which !== "current")}${chip("report-which", "current", st.period === "month" ? "This month so far" : "This week so far", st.which === "current")}</div>
+        <button class="secondary compact-button" data-action="report-refresh" ${st.loading ? "disabled" : ""}>Refresh</button>
+      </div>`;
+    let body = "";
+    if (st.loading && !r) body = `<div class="center-card compact-center"><div class="spinner"></div><p>Reading the ledgers…</p></div>`;
+    else if (st.error && !r) body = `<div class="notice error">${this._escape(st.error)}</div>`;
+    else if (r) {
+      body = `
+        ${st.error ? `<div class="notice error">${this._escape(st.error)}</div>` : ""}
+        ${this._reportHeadline(r)}
+        ${this._reportDid(r)}
+        ${this._reportWater(r)}
+        ${this._reportLiving(r)}
+        ${this._reportHappened(r)}
+        ${this._reportNext(r)}
+        ${Array.isArray(r.notes) && r.notes.length ? `<section class="report-section"><div class="report-section-head"><p class="eyebrow">Notes</p></div><ul class="report-list report-notes">${r.notes.map((n) => `<li>${this._escape(n)}</li>`).join("")}</ul></section>` : ""}
+        <p class="muted report-foot">Compiled ${this._escape(this._formatActivityTime(r.generatedAt))} · readings from ${this._escape(r.readingsSource === "recorder" ? "the recorder" : r.readingsSource === "panel" ? "the recorder (via the panel)" : "manual tests only")}.</p>`;
+    }
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog report-dialog">
+          <button class="close" data-action="report-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow">Reef Report</p>
+              <div class="live-trend-title"><h2>${this._escape(r?.period?.label || (st.period === "month" ? "Month" : "Week"))}</h2>${r?.period?.partial ? `<span class="pill warning">in progress</span>` : ""}</div>
+            </div>
+          </div>
+          ${controls}
+          ${body}
+        </section>
+      </div>`;
+  }
+
   _systemCheck() {
     const sensors = Object.entries(this._config.sensors || {});
     const enabledSensors = sensors.filter(([, sensor]) => this._sensorEnabled(sensor));
@@ -7394,6 +7740,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._setupOpen ? this._setupWizard() : ""}
         ${this._trend ? this._trendModal() : ""}
         ${this._coolingDialogOpen ? this._coolingDialog() : ""}
+        ${this._report?.open ? this._reportDialog() : ""}
         ${this._awcPumpsDialogOpen ? this._awcPumpsDialog() : ""}
         ${this._systemCheckDialogOpen ? this._systemCheckDialog() : ""}
         ${this._coralDialogOpen ? this._coralDialog() : ""}
@@ -24336,6 +24683,7 @@ const rigSteps = [
       cards.cameras ? this._missionCameraCard() : "",
       cards.maintenance ? this._missionMaintenanceCard() : "",
       cards.corals ? this._missionCoralsCard() : "",
+      cards.report ? this._reportHeroCard() : "",
     ].join("");
     const activityItems = (Array.isArray(this._config.activity) ? this._config.activity : []).slice(0, 12);
     const activityBody = activityItems.length ? `
@@ -33623,6 +33971,47 @@ ${parts.buttons}
         .maint-log-time { font-variant-numeric: tabular-nums; color: #94a3b8; min-width: 44px; }
         .maint-row.skipped { opacity: .7; }
         .maint-log-note { font-style: italic; }
+        /* The Reef Report viewer (0.7.199). */
+        .report-dialog { max-width: 1000px; }
+        .report-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .report-controls > .compact-button { margin-left: auto; }
+        .report-headline { display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); gap: 16px; align-items: start; }
+        .report-score { border: 1px solid #24364a; border-radius: 10px; padding: 14px; background: rgba(11, 23, 36, .72); display: grid; gap: 4px; }
+        .report-score.ok { border-color: #22c55e; } .report-score.warning { border-color: #eab308; } .report-score.critical { border-color: #ef4444; }
+        .report-score small { color: #94a3b8; }
+        .report-score strong { font-size: 40px; line-height: 1; font-variant-numeric: tabular-nums; }
+        .report-score strong span { font-size: 16px; color: #94a3b8; margin-left: 4px; }
+        .report-score-delta { color: #cbd5e1; font-size: 13px; }
+        .report-verdict { display: grid; gap: 6px; align-content: start; }
+        .report-verdict-line { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.35; }
+        .report-photo { margin: 0; grid-column: 1 / -1; display: grid; gap: 6px; }
+        .report-photo img { width: 100%; max-height: 260px; object-fit: cover; border-radius: 10px; border: 1px solid #24364a; }
+        .report-photo figcaption { color: #94a3b8; font-size: 13px; }
+        .report-section { display: grid; gap: 10px; border-top: 1px solid #24364a; padding-top: 12px; }
+        .report-section-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+        .report-section-head .eyebrow { margin: 0; }
+        .report-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+        .report-stat { border: 1px solid #24364a; border-radius: 8px; padding: 10px 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 2px; }
+        .report-stat small { color: #94a3b8; } .report-stat strong { font-size: 22px; font-variant-numeric: tabular-nums; } .report-stat span { color: #cbd5e1; font-size: 12px; }
+        .report-stat.ok strong { color: #86efac; } .report-stat.warning strong { color: #fde68a; } .report-stat.critical strong { color: #fca5a5; }
+        .report-table-wrap { overflow-x: auto; }
+        .report-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+        .report-table th { text-align: left; color: #94a3b8; font-weight: 700; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid #24364a; }
+        .report-table td { padding: 8px; border-bottom: 1px solid #1c2b3d; vertical-align: top; }
+        .report-table tr.muted td { color: #94a3b8; }
+        .report-task-link { background: none; border: 0; padding: 0; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; text-decoration-color: #3b82f6; }
+        .report-spark { display: block; overflow: visible; }
+        .report-spark-line { fill: none; stroke: #5eead4; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+        .report-spark-band { fill: rgba(34, 197, 94, .12); }
+        .report-spark-dot { fill: #5eead4; }
+        .report-spark-hit { fill: transparent; }
+        .report-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+        .report-card { border: 1px solid #24364a; border-radius: 8px; padding: 12px; background: rgba(11, 23, 36, .72); display: grid; gap: 6px; align-content: start; }
+        .report-card h4, .report-card p { margin: 0; }
+        .report-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+        .report-events { max-height: 320px; overflow: auto; }
+        .report-foot { font-size: 12px; }
+        @media (max-width: 720px) { .report-headline { grid-template-columns: 1fr; } .report-score strong { font-size: 32px; } }
         .manual-schedule-card.manual-enabled { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .88)); }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }

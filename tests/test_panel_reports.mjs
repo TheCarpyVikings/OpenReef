@@ -91,4 +91,103 @@ test("test_never_stamps_without_hass_or_from_a_demo", async () => {
   }
 });
 
+// --- Stage C (0.7.199): the viewer ------------------------------------------
+
+function fixtureReport() {
+  const day = (d, h = 9) => new Date(2026, 8, 7 + d, h).toISOString();
+  return {
+    version: 1, generatedAt: day(9), readingsSource: "recorder",
+    period: { kind: "week", which: "previous", start: day(0, 0), end: day(7, 0), label: "7–13 September 2026", partial: false, days: 7, weekStart: 0 },
+    headline: { score: { latest: 82, average: 80, previousAverage: 71, delta: 9, stamps: 3, gaps: 4, parts: { chemistry: 85 },
+      series: [{ date: "2026-09-07", total: 78 }, { date: "2026-09-08", total: 80 }, { date: "2026-09-11", total: 82 }] },
+      verdict: "6 chores ticked off, 80 % on time, water steady." },
+    did: { maintenance: { done: 6, skipped: 1, onSchedule: 80, timed: 5, waterChangedL: 15.4, waterChangedPct: 30, handL: 5, autoL: 10.4, bySource: { hand: 5, awc: 1 },
+      tasks: [{ id: "water", label: "Water change", done: 2, skipped: 0, late: 0, litres: 15.4, tracked: true }, { id: "sock", label: "Filter sock", done: 1, skipped: 0, late: 1, litres: null, tracked: true }, { id: "old", label: "Old chore", done: 1, skipped: 1, late: 0, litres: null, tracked: false }] },
+      awc: { runs: 1, partial: 0, drainedL: 2.5, filledL: 2.5 }, tests: { count: 2, parameters: ["Alkalinity", "Calcium"] },
+      feeds: { count: 14, hand: 12, pump: 2, undone: 1, available: true }, hatches: 2, cultureFeeds: 3, coralCheckins: 2 },
+    water: { parameters: [
+      { id: "alkalinity", label: "Alkalinity", unit: "dKH", tests: 2, sensorSamples: 0, latest: 8.0, latestAt: day(5), daysSince: 1.6, range: { min: 7.5, max: 9.5 }, inRange: true, band: "drifting", change: -0.6, low: 8.0, high: 8.7, latestIsFromPeriod: true,
+        points: [{ t: day(-20), v: 8.6 }, { t: day(-13), v: 8.2 }, { t: day(-6), v: 8.7 }, { t: day(1), v: 8.3 }, { t: day(5), v: 8.0 }], consumption: { perDay: 0.08, pairs: 3 } },
+      { id: "calcium", label: "Calcium", unit: "ppm", tests: 1, sensorSamples: 0, latest: 430, daysSince: 4.6, range: { min: 400, max: 450 }, inRange: true, band: "single", change: null, latestIsFromPeriod: true, points: [{ t: day(2), v: 430 }], consumption: { perDay: null, pairs: 0 } },
+      { id: "salinity", label: "Salinity", unit: "ppt", tests: 0, sensorSamples: 0, latest: 35, daysSince: 47, range: { min: 33, max: 36 }, inRange: true, band: "untested", change: null, latestIsFromPeriod: false, points: [] },
+    ], untested: ["Salinity"], tested: ["Alkalinity", "Calcium"] },
+    living: { hatches: { started: 3, harvested: 2, avgActualHours: 26, avgLateHours: 2, enriched: 1, byVessel: [{ id: "v1", name: "Hatchery 1", harvests: 1 }, { id: "v2", name: "Hatchery 2", harvests: 1 }] },
+      cultures: { jars: [{ id: "j1", name: "Rotifers", feeds: 3, looks: 4, harvests: 1, skips: 0, signs: 1, restarts: 0, crashed: 0, harvestMl: 300, signList: ["foam"] }], feeds: 3, looks: 4, harvests: 1, skips: 0, signs: 1, restarts: 0, crashed: 0 },
+      corals: { colonies: 2, checkins: 2, feeds: 1, grades: { A: 1, C: 1 }, moved: [{ id: "c1", name: "Acro", from: 80, to: 62 }] } },
+    happened: { count: 2, byType: { warning: 1, control: 1 }, rows: [{ at: day(2), message: "Return pump off", type: "control" }, { at: day(1), message: "Alk drifting", type: "warning" }] },
+    next: { count: 2, days: [{ day: "now", label: "Already due", items: [{ id: "kalk", label: "Refill kalk", dueAt: day(6, 22), status: "warning", source: null }] },
+      { day: "2026-09-15", label: "Tuesday", items: [{ id: "brine_hatch_start", label: "Start hatch", dueAt: day(8, 22), status: "ok", source: "hatchery" }] }] },
+    notes: ["Not tested this period: Salinity.", "Reef Health was stamped on 3 of 7 days — the panel was closed on the rest."],
+  };
+}
+
+test("test_hero_card_reads_last_week_from_the_score_log", async () => {
+  const restore = freezeTime(new Date(2026, 8, 16, 9, 0, 0).toISOString());   // Wednesday; last week = 7–13
+  try {
+    const row = (d, total) => ({ date: `2026-09-${String(d).padStart(2, "0")}`, at: "", total, parts: {} });
+    const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [row(12, 84), row(9, 76), row(3, 70), row(1, 74)], events: [] } });
+    const card = panel._reportHeroCard();
+    assert(card.includes("80/100") && card.includes("up 8 on the week before"), card);
+    assert(card.includes('data-action="report-open"'));
+    panel._config.reports.scoreLog = [];
+    assert(panel._reportHeroCard().includes("Ready"), "no stamps yet: the card still opens the report");
+    panel._config.reports.weekStart = 6;   // Sunday start: last week = 6–12, the 12th is in, the 3rd is out
+    panel._config.reports.scoreLog = [row(12, 84), row(13, 60), row(5, 70)];
+    assert(panel._reportHeroCard().includes("84/100") && panel._reportHeroCard().includes("up 14"), panel._reportHeroCard());
+  } finally {
+    restore();
+  }
+});
+
+test("test_dialog_renders_every_section_and_links_rows_to_tasks", async () => {
+  const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [], events: [] }, captures: [
+    { id: "x", timestamp: new Date(2026, 8, 9, 12).toISOString(), label: "Feed watch", cameraLabel: "Display", thumbnail: "thumbs/x.jpg" },
+    { id: "y", timestamp: new Date(2026, 8, 20, 12).toISOString(), label: "Later", thumbnail: "thumbs/y.jpg" },
+  ] });
+  panel._report = { open: true, loading: false, error: "", data: fixtureReport(), at: Date.now(), period: "week", which: "previous" };
+  const html = panel._reportDialog();
+  assert(html.includes('class="wizard trend-dialog report-dialog"'), "a distinctive dialog class (scroll restore)");
+  assert(html.includes("7–13 September 2026") && html.includes("80<span>/100</span>") && html.includes("up 9 on the period before"));
+  assert(html.includes("6 chores ticked off, 80 % on time, water steady."));
+  assert(html.includes("Stamped on 3 of 7 days — 4 days the panel stayed closed."));
+  assert(html.includes('src="/openreef_captures/thumbs/x.jpg"') && !html.includes("thumbs/y.jpg"), "the photo of the week is from the week");
+  for (const heading of ["What you did", "Water", "Living reef", "What happened", "Next week", "Notes"]) assert(html.includes(heading), heading);
+  assert(html.includes('data-action="report-task" data-id="water"') && html.includes('data-action="report-task" data-id="brine_hatch_start"'));
+  assert(html.includes("(no longer tracked)"));
+  assert(html.includes("0.08 dKH/day") && html.includes("needs 2 more falling pairs"), "consumption estimate and its honesty");
+  assert(html.includes(">drifting<") && html.includes(">one reading<") && html.includes(">not tested<") && html.includes(">in range<"));
+  assert(html.includes("Not tested this period: Salinity."));
+  assert((html.match(/<polyline class="report-spark-line"/g) || []).length === 2, "score line + alkalinity line; one point draws no line");
+  assert(html.includes("Rotifers") && html.includes("1 sign") && html.includes("Acro: 80 → 62"));
+  assert(html.includes("Return pump off") && html.includes("Already due") && html.includes("Tuesday"));
+  assert(html.includes("readings from the recorder"));
+  assert(html.includes('data-action="report-period" data-id="month"') && html.includes('data-action="report-which" data-id="current"'));
+  panel._report.data.period.partial = true;
+  assert(panel._reportDialog().includes(">in progress<"));
+  panel._report = { open: true, loading: true, error: "", data: null, at: 0, period: "week", which: "previous" };
+  assert(panel._reportDialog().includes("Reading the ledgers"));
+  panel._report = { open: true, loading: false, error: "Could not compile the report.", data: null, at: 0, period: "week", which: "previous" };
+  assert(panel._reportDialog().includes("Could not compile the report."));
+});
+
+test("test_load_hands_the_recorder_back_in_when_the_backend_read_tests_only", async () => {
+  const calls = [];
+  const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [], events: [] },
+    sensors: { alkalinity: { entity_id: "sensor.trident_alk", enabled: true }, calcium: { entity_id: "", enabled: true } } });
+  panel._render = () => {};
+  panel._hass = { callWS: async (payload) => { calls.push(payload); return { ...fixtureReport(), readingsSource: payload.readings ? "panel" : "tests" }; } };
+  panel._fetchHistoryTrendPoints = async (entityId) => [{ time: Date.parse("2026-09-10T09:00:00Z"), value: 8.3 }];
+  panel._report = { open: true, loading: false, error: "", data: null, at: 0, period: "week", which: "previous" };
+  await panel._reportLoad(true);
+  assertEqual(calls.length, 2, "compile, then compile again with the panel's readings");
+  assertEqual(calls[1].readings.alkalinity[0].v, 8.3);
+  assert(!calls[1].readings.calcium, "an unmapped sensor sends nothing");
+  assertEqual(panel._report.data.readingsSource, "panel");
+  assert(!panel._report.loading && !panel._report.error);
+  panel._hass = { callWS: async () => { throw new Error("no backend"); } };
+  await panel._reportLoad(true);
+  assertEqual(panel._report.error, "no backend");
+  assert(panel._report.data, "the last good report stays on screen");
+});
+
 await runTests();

@@ -237,7 +237,15 @@ shareable (the livestream and Discord audience will want the PNG).
 - Backend: `_maintenance_next_due_at` / `_maintenance_upcoming` mirror the panel's Coming up clock (interval, hour cadence, fixed days, snooze, culture and hatch clocks); `_report_context` gathers every ledger; `_nps_feed_log_for` reuses the NPS feed-log engine; `_report_recorder_readings` reads sensor history from the recorder when present (decision 5) and the panel may hand its own `readings` in; `openreef/report_compile {period, which, readings}`.
 - Not stored, no UI, no push yet — Stage C renders it, Stage E schedules and stores it.
 
-## 8.3 Still open
+### 8.3 Stage C as built (0.7.199, 2026-09-16)
+
+- **Off Home**: a "Reef Report" mission card (toggle in Settings → mission cards) reads last week's average stamp vs the week before straight from the score log, and opens the viewer.
+- **The viewer** is a dialog (`.report-dialog`, its own class for scroll restore): Week / Month and Last / This-so-far chips, Refresh; headline (average score with its delta and a day-by-day sparkline, the verdict, stamped-days honesty, the photo of the week from the capture ledger), What you did (stat tiles + the per-task table), Water (per parameter: latest and its age, a four-week sparkline over the target band, the stability pill, in-range, the consumption estimate or how many falling pairs it still needs), Living reef (hatchery, each culture jar, corals with grade spread and score moves), What happened, Next week by day, Notes, and the readings source.
+- **Deep links**: every task in the table and the plan → the Maintenance tab, All tasks, that row open (`report-task`).
+- **Readings**: the panel calls `report_compile`; when the backend answers `readingsSource: "tests"` (no recorder) the panel fetches the mapped chemistry sensors' history the way Live Stats does and compiles again with `readings` — the Trident path works on both sides.
+- Charts follow the dataviz rules: one series per line (no legend), 2 px lines, recessive band, text in ink tokens, status only on pills, a title per point for hover.
+
+## 8.4 Still open
 
 - Report landing time: Monday 07:00 local assumed (a Settings field alongside weekStart in Stage E).
 - Which activity choke points should pass a `kind` (mode applied, AWC run, spawning run, cooling trigger) so the "What happened" section can group them — decided per stage as the compile needs them.
