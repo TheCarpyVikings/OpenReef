@@ -473,6 +473,36 @@ nps.hatchery.{eggType, hatchHours, cysts}   # legacy globals: seed a vessel with
   rename survives a re-sync. The seeder prunes pairs whose vessel is gone;
   removing a vessel in Settings deletes its pair. The hand-feed nag stays
   single (one container).
+
+### 9.10 Hatch reminders on the hatchery's clock (2026-09-16, 0.7.195)
+
+Reece's Maintenance screen at breakfast: "Start brine shrimp hatch (Hatchery 1)
+— today", beside the kalk refill, for a batch the next-hatch plan wanted at ten
+that night. The pair were plain cadence reminders (last done + 34 h) while the
+hatchery already knew the honest answer. Now each vessel's summary payload
+carries `reminders: { start, harvest }` in the cultures' clock shape
+(`available / due / at / hoursUntil / severity / reason`), computed by
+`_nps_hatch_task_clock`:
+
+- **Harvest** rides the incubation: `at` = started + the batch's hours; due when
+  ripe, `critical` past `HATCH_OVERDUE_GRACE_H`; an idle cone has no clock
+  (`reason: idle`).
+- **Start** rides `_nps_next_hatch_plan` (the "Next hatch" maths, pulled out of
+  the summary handler so the reminder path can run it with the panel closed):
+  `wait / chained / blocked` → scheduled at `startAt`; `start_now` → due;
+  `overdue` → critical. A running cone (`running`) or one the chain does not
+  pick next (`not_next`) has no start clock. `no_brine` returns `{}` and the
+  cadence stays the reminder — nothing in play, nothing honest to say.
+- `_maintenance_due_items` reads the clock over the cadence; the panel's
+  `_maintenanceDueState` reads the SAME clock off the summary
+  (`_npsHatchReminderClock`) rather than re-deriving it — LOCKSTEP by reading,
+  the 0.7.158 rule. No summary yet (older backend) → cadence, as before.
+
+The Maintenance tab itself (same release) reads in three views — Coming up
+(grouped overdue / due now / later today by time of day / tomorrow / later this
+week, folded), All tasks (needs-attention first) and Trends — with each row
+expanding in place to its full card; hour clocks earn a time of day, day
+cadences never invent one.
 - **Every anchor is per vessel.** `_nps_hatch_sync_reminders(..., vessel_id)`
   and `_nps_hatch_retime_reminders(..., vessel_id)` log/snooze only that
   vessel's pair; the harvest snooze is that vessel's own `start + hatchHours`

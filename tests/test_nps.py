@@ -4789,6 +4789,27 @@ def test_ws_harvest_waits_under_the_join_floor_and_joins_a_holding_soak():
     assert "no longer in the container" in conn.errors[-1].message
 
 
+def test_ws_summary_vessels_carry_their_reminder_clocks():
+    """0.7.195: each vessel's two reminders quote the hatchery's own clock so
+    the panel reads it rather than re-deriving it."""
+    now = datetime.now(timezone.utc)
+    entry = _v2_entry()
+    vessels = entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]
+    vessels["v1"]["state"] = {"hatchStartedAt": (now - timedelta(hours=10)).isoformat(), "hatchHours": 24}
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    hatchery = conn.results[-1].payload["hatchery"]
+    by_id = {v["id"]: v for v in hatchery["vessels"]}
+    v1, v2 = by_id["v1"]["reminders"], by_id["v2"]["reminders"]
+    assert v1["harvest"]["available"] and not v1["harvest"]["due"] and v1["harvest"]["hoursUntil"] == 14.0
+    assert v1["start"]["reason"] == "running"
+    assert v2["harvest"]["reason"] == "idle"
+    # v2 is the cone the chain picks next; its start clock follows the plan's status.
+    assert hatchery["nextStartVessel"] == "v2"
+    assert v2["start"] == {} or v2["start"]["reason"] == hatchery["nextHatch"]["status"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

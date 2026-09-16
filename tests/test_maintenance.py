@@ -752,6 +752,89 @@ def test_reminder_push_carries_done_buttons_and_the_tap_logs_the_task():
         pass
 
 
+# --- 0.7.195: hatch reminders ride the hatchery's own clock ----------------
+
+def _hatch_cfg(v1_state=None, tasks=None, completions=None):
+    cfg = _cfg(tasks or {}, completions)
+    cfg["nps"] = {"enabled": True, "hatchery": {
+        "hatchHours": 24, "eggType": "standard",
+        "vessels": {"v1": {"name": "Hatchery 1", "volumeL": 1.0, "state": v1_state or {}},
+                    "v2": {"name": "Hatchery 2", "volumeL": 1.0, "state": {}}},
+        "reservoir": {}}}
+    return cfg
+
+
+def _hatch_task(**over):
+    base = {"label": "Hatch", "cadenceHours": 24, "criticalAfterHours": 48, "enabled": True,
+            "scheduleMode": "interval", "notify": True}
+    base.update(over)
+    return base
+
+
+def _running(hours_ago, hatch_hours=24):
+    return {"hatchStartedAt": (NOW - timedelta(hours=hours_ago)).isoformat(), "hatchHours": hatch_hours}
+
+
+def test_hatch_harvest_clock_rides_the_incubation():
+    clock = integration._nps_hatch_task_clock
+    idle = clock(_hatch_cfg(), "brine_hatch_harvest", NOW)
+    assert idle["available"] is False and idle["reason"] == "idle"
+    incubating = clock(_hatch_cfg(_running(10)), "brine_hatch_harvest", NOW)
+    assert incubating["available"] and not incubating["due"] and incubating["hoursUntil"] == 14.0
+    assert incubating["at"] == (NOW + timedelta(hours=14)).isoformat()
+    ripe = clock(_hatch_cfg(_running(30)), "brine_hatch_harvest", NOW)
+    assert ripe["due"] and ripe["severity"] == "warning" and ripe["reason"] == "ripe"
+    stale = clock(_hatch_cfg(_running(40)), "brine_hatch_harvest", NOW)
+    assert stale["due"] and stale["severity"] == "critical"
+    # The other cone's reminder is its own: v2 sits idle whatever v1 does.
+    assert clock(_hatch_cfg(_running(30)), "brine_hatch_harvest_v2", NOW)["reason"] == "idle"
+    assert clock(_hatch_cfg(), "water_change", NOW) == {}
+
+
+def test_hatch_start_clock_reads_the_next_hatch_plan():
+    clock = integration._nps_hatch_task_clock
+    start_at = (NOW + timedelta(hours=9)).isoformat()
+    plan = {"nextStartVessel": "v2", "nextHatch": {"status": "wait", "startAt": start_at, "hoursUntil": 9.0}}
+    cfg = _hatch_cfg(_running(10))
+    # A running cone has no start clock; the cone the chain skips has none either.
+    assert clock(cfg, "brine_hatch_start", NOW, plan=plan)["reason"] == "running"
+    waiting = clock(cfg, "brine_hatch_start_v2", NOW, plan=plan)
+    assert waiting["available"] and not waiting["due"] and waiting["at"] == start_at and waiting["reason"] == "wait"
+    other = clock(_hatch_cfg(), "brine_hatch_start", NOW, plan=plan)
+    assert other["available"] is False and other["reason"] == "not_next"
+    now_plan = dict(plan, nextHatch={"status": "start_now", "startAt": start_at, "hoursUntil": 0.0})
+    assert clock(cfg, "brine_hatch_start_v2", NOW, plan=now_plan)["severity"] == "warning"
+    late_plan = dict(plan, nextHatch={"status": "overdue", "startAt": None, "hoursUntil": None})
+    late = clock(cfg, "brine_hatch_start_v2", NOW, plan=late_plan)
+    assert late["due"] and late["severity"] == "critical" and late["at"] == NOW.isoformat()
+    # Nothing in play: no honest answer, the cadence stays the reminder.
+    assert clock(cfg, "brine_hatch_start_v2", NOW, plan=dict(plan, nextHatch={"status": "no_brine"})) == {}
+    # Without a plan handed in the clock computes one itself (the reminder path).
+    assert clock(_hatch_cfg(), "brine_hatch_start", NOW) in ({}, clock(_hatch_cfg(), "brine_hatch_start", NOW))
+
+
+def test_due_items_use_the_hatch_clock_over_the_cadence():
+    tasks = {"brine_hatch_harvest": _hatch_task(label="Harvest"), "brine_hatch_start_v2": _hatch_task(label="Start 2")}
+    # Never logged: the cadence alone would nag both. The hatchery says otherwise.
+    original = integration._nps_next_hatch_plan
+    start_at = (NOW + timedelta(hours=9)).isoformat()
+    try:
+        integration._nps_next_hatch_plan = lambda *a, **k: {
+            "nextStartVessel": "v2", "nextHatch": {"status": "wait", "startAt": start_at, "hoursUntil": 9.0}}
+        assert due(_hatch_cfg(tasks=tasks), NOW) == []
+        ripe = due(_hatch_cfg(_running(30), tasks=tasks), NOW)
+        assert [i["id"] for i in ripe] == ["brine_hatch_harvest"] and ripe[0]["severity"] == "warning"
+        integration._nps_next_hatch_plan = lambda *a, **k: {
+            "nextStartVessel": "v2", "nextHatch": {"status": "overdue", "startAt": None, "hoursUntil": None}}
+        late = due(_hatch_cfg(tasks=tasks), NOW)
+        assert [i["id"] for i in late] == ["brine_hatch_start_v2"] and late[0]["severity"] == "critical"
+        # A snooze still wins — the keeper asked for quiet.
+        snoozed = dict(tasks, brine_hatch_start_v2=_hatch_task(label="Start 2", snoozedUntil=(NOW + timedelta(hours=2)).isoformat()))
+        assert due(_hatch_cfg(tasks=snoozed), NOW) == []
+    finally:
+        integration._nps_next_hatch_plan = original
+
+
 
 def _main() -> int:
     tests = sorted(

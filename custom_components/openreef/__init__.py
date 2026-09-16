@@ -5092,6 +5092,12 @@ def _maintenance_due_items(
         if str(task_id).startswith(MAINTENANCE_CULTURE_TASK_PREFIX):
             clock = _cultures_task_clock(config, task_id, now)
             state = ("critical" if clock.get("reason") in ("sign", "slow") else "warning") if clock.get("due") else "ok"
+        elif str(task_id).startswith(MAINTENANCE_HATCH_START_TASK_ID) or str(task_id).startswith(MAINTENANCE_HATCH_HARVEST_TASK_ID):
+            # The hatchery's own clock when it has one (0.7.195); the cadence
+            # above stays the answer when nothing is in play.
+            hatch_clock = _nps_hatch_task_clock(config, str(task_id), now)
+            if hatch_clock:
+                state = str(hatch_clock.get("severity") or "ok") if hatch_clock.get("due") else "ok"
         if state not in ("warning", "critical"):
             continue
         label = str(task.get("label") or task_id)
@@ -14990,6 +14996,120 @@ def _nps_chain_batches(config: dict[str, Any]) -> list[dict[str, Any]]:
             for vid, started, batch_h in _nps_running_batches(config)]
 
 
+def _nps_next_hatch_plan(config: dict[str, Any], now_utc: datetime, *,
+                         hatchery_cfg: dict[str, Any] | None = None,
+                         plain_shelf_h: float | None = None,
+                         planning: tuple[Any, Any, Any, Any] | None = None) -> dict[str, Any]:
+    """When the next batch of cysts should go on, and which cone takes it —
+    the maths behind the hatchery's "Next hatch" card, pulled out of the
+    summary handler (0.7.195) so the start reminder can read the SAME answer
+    with the panel closed. Config and clock in, nothing else."""
+    hatchery_cfg = hatchery_cfg if hatchery_cfg is not None else _nps_hatchery_v2(config)
+    reservoir_cfg = hatchery_cfg["reservoir"]
+    if plain_shelf_h is None:
+        plain_shelf_h = _nps_plain_shelf_hours(config, now_utc)
+    plan_loaded, plan_shelf_h, plan_remaining, plan_rate = (
+        planning if planning is not None else _nps_brine_supply_for_planning(config, now_utc))
+    # Compare completion times, not just free times: a faster cone can
+    # finish the next batch sooner even if it frees later.
+    running_by_id = {vid: started + timedelta(hours=hours)
+                     for vid, started, hours in _nps_running_batches(config)}
+    next_start_id = min(hatchery_cfg["vessels"], key=lambda vid: (
+        max(now_utc, running_by_id.get(vid, now_utc))
+        + timedelta(hours=_nps_vessel_clock(config, vid)), vid))
+    next_start_vessel = hatchery_cfg["vessels"].get(next_start_id) or {}
+    next_start_hours = _awc_num(next_start_vessel.get("hatchHours"), hatchery_cfg["hatchHours"], 8, 48)
+    # With every cone mid-hatch the ideal start is a moment nothing can honour
+    # (0.7.154 — Reece's screen: "start in 2.6 h" beside two busy hatcheries).
+    # Hand the maths the moment the first one frees so it plans on the rack it
+    # actually has; an idle cone can take the cysts whenever it asks.
+    free_at_iso = None
+    if next_start_id in running_by_id:
+        free_at_iso = running_by_id[next_start_id].isoformat()
+    next_load_ml = nps_engine._f(reservoir_cfg.get("loadVolumeMl"))
+    capacity_ml = nps_engine._f(_nps_canonical_reservoir(config).get("volumeMl"))
+    if capacity_ml > 0:
+        next_load_ml = min(next_load_ml, capacity_ml) if next_load_ml > 0 else capacity_ml
+    planning_shelf_h = plain_shelf_h
+    if next_load_ml > 0 and nps_engine._f(plan_rate) > 0:
+        planning_shelf_h = min(plain_shelf_h, next_load_ml / nps_engine._f(plan_rate) * 24.0)
+    next_hatch = nps_engine.next_hatch_suggestion(
+        now_utc,
+        next_start_hours,
+        # Container and bottle, counting only usable stock before each expiry.
+        plan_loaded, plan_shelf_h, plan_remaining, plan_rate,
+        # Per-batch clocks (0.7.62) + the enriching pseudo-batch (§10): brine
+        # on the way is brine on the way, whatever vessel it sits in.
+        _nps_chain_batches(config),
+        # The batch that loads next is unfed at load: plan it on the plain
+        # shelf, never the current load's boost window (doc §12).
+        chain_shelf_hours=plain_shelf_h,
+        free_at_iso=free_at_iso,
+        load_volume_ml=next_load_ml,
+    )
+    return {"nextHatch": next_hatch, "nextStartVessel": next_start_id,
+            "planningShelfHours": planning_shelf_h, "runningById": running_by_id}
+
+
+def _nps_hatch_task_clock(config: dict[str, Any], task_id: str, now: datetime,
+                          plan: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The hatchery's own answer for one of its reminders (0.7.195), in the
+    shape cultures already use (available / due / at) so Maintenance and the
+    panel read the clock the hatchery runs instead of a cadence guess. Reece's
+    screen: "Start brine shrimp hatch — today" at breakfast for a batch the
+    plan wanted at ten that night.
+
+    Harvest: the vessel's batch ripening (the incubation clock), overdue past
+    the grace. Start: the next-hatch plan's ``startAt``, on the cone the chain
+    picks next; a running cone or one the chain skips has no clock. ``{}``
+    when the task isn't a hatch reminder or the plan has nothing in play
+    (``no_brine``) — the caller falls back to the cadence."""
+    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    vessels = hatchery.get("vessels") if isinstance(hatchery.get("vessels"), dict) else {}
+    match: tuple[str, str] | None = None
+    for vid in vessels:
+        start_id, harvest_id = _nps_hatch_task_ids(str(vid))
+        if task_id == harvest_id:
+            match = (str(vid), "harvest")
+            break
+        if task_id == start_id:
+            match = (str(vid), "start")
+            break
+    if match is None:
+        return {}
+    vid, kind = match
+
+    def _off(reason: str) -> dict[str, Any]:
+        return {"available": False, "due": False, "at": None, "hoursUntil": None,
+                "severity": "ok", "reason": reason}
+
+    if kind == "harvest":
+        ready = _nps_vessel_ready_at(config, vid)
+        if ready is None:
+            return _off("idle")
+        delta_h = (ready - now).total_seconds() / 3600.0
+        due = delta_h <= 0
+        severity = ("critical" if -delta_h > nps_engine.HATCH_OVERDUE_GRACE_H else "warning") if due else "ok"
+        return {"available": True, "due": due, "at": ready.isoformat(),
+                "hoursUntil": round(max(0.0, delta_h), 1), "severity": severity,
+                "reason": "ripe" if due else "incubating"}
+    if any(running_vid == vid for running_vid, _started, _hours in _nps_running_batches(config)):
+        return _off("running")
+    plan = plan if plan is not None else _nps_next_hatch_plan(config, now)
+    if plan.get("nextStartVessel") != vid:
+        return _off("not_next")
+    next_hatch = plan.get("nextHatch") or {}
+    status = str(next_hatch.get("status") or "")
+    if status in ("wait", "chained", "blocked"):
+        return {"available": True, "due": False, "at": next_hatch.get("startAt"),
+                "hoursUntil": next_hatch.get("hoursUntil"), "severity": "ok", "reason": status}
+    if status in ("start_now", "overdue"):
+        return {"available": True, "due": True, "at": next_hatch.get("startAt") or now.isoformat(),
+                "hoursUntil": 0.0, "severity": "critical" if status == "overdue" else "warning",
+                "reason": status}
+    return {}
+
+
 def _nps_soak_join(hatchery: dict[str, Any], now: datetime) -> dict[str, Any]:
     """May a fresh harvest JOIN the soak that is running? (0.7.169.) One
     helper, three readers — the load gate, the summary (the tile draws THIS,
@@ -17711,29 +17831,13 @@ async def websocket_nps_summary(
                 or (rank == prev and left is not None and prev_left is not None and left < prev_left)):
             primary_state = hatch_st
             primary_vessel = vid
-    # Compare completion times, not just free times: a faster cone can
-    # finish the next batch sooner even if it frees later.
-    running_by_id = {vid: started + timedelta(hours=hours)
-                     for vid, started, hours in _nps_running_batches(config)}
-    next_start_id = min(hatchery_cfg["vessels"], key=lambda vid: (
-        max(now_utc, running_by_id.get(vid, now_utc))
-        + timedelta(hours=_nps_vessel_clock(config, vid)), vid))
-    next_start_vessel = hatchery_cfg["vessels"].get(next_start_id) or {}
-    next_start_hours = _awc_num(next_start_vessel.get("hatchHours"), hatchery_cfg["hatchHours"], 8, 48)
-    # With every cone mid-hatch the ideal start is a moment nothing can honour
-    # (0.7.154 — Reece's screen: "start in 2.6 h" beside two busy hatcheries).
-    # Hand the maths the moment the first one frees so it plans on the rack it
-    # actually has; an idle cone can take the cysts whenever it asks.
-    free_at_iso = None
-    if next_start_id in running_by_id:
-        free_at_iso = running_by_id[next_start_id].isoformat()
-    next_load_ml = nps_engine._f(reservoir_cfg.get("loadVolumeMl"))
-    capacity_ml = nps_engine._f(_nps_canonical_reservoir(config).get("volumeMl"))
-    if capacity_ml > 0:
-        next_load_ml = min(next_load_ml, capacity_ml) if next_load_ml > 0 else capacity_ml
-    planning_shelf_h = plain_shelf_h
-    if next_load_ml > 0 and nps_engine._f(plan_rate) > 0:
-        planning_shelf_h = min(plain_shelf_h, next_load_ml / nps_engine._f(plan_rate) * 24.0)
+    # The next-hatch maths lives in _nps_next_hatch_plan (0.7.195) so the
+    # start reminder can read the SAME answer with the panel closed.
+    plan = _nps_next_hatch_plan(
+        config, now_utc, hatchery_cfg=hatchery_cfg, plain_shelf_h=plain_shelf_h,
+        planning=(plan_loaded, plan_shelf_h, plan_remaining, plan_rate))
+    next_start_id = plan["nextStartVessel"]
+    planning_shelf_h = plan["planningShelfHours"]
     # How many cones continuous supply takes is vessels_needed's question;
     # WHERE their loads actually land is the rhythm's (0.7.155). Each cone on
     # its own clock and its own stamped batch, exactly as the chain sees them.
@@ -17753,20 +17857,14 @@ async def websocket_nps_summary(
     primary_egg = primary_state.get("eggType") or primary_cfg.get("eggType") or hatchery_cfg["eggType"]
     primary_hours = primary_state.get("hatchHours") or primary_cfg.get("hatchHours") or hatchery_cfg["hatchHours"]
     temp_advice = _temp_advice_for(primary_egg)
-    next_hatch = nps_engine.next_hatch_suggestion(
-        now_utc,
-        next_start_hours,
-        # Container and bottle, counting only usable stock before each expiry.
-        plan_loaded, plan_shelf_h, plan_remaining, plan_rate,
-        # Per-batch clocks (0.7.62) + the enriching pseudo-batch (§10): brine
-        # on the way is brine on the way, whatever vessel it sits in.
-        _nps_chain_batches(config),
-        # The batch that loads next is unfed at load: plan it on the plain
-        # shelf, never the current load's boost window (doc §12).
-        chain_shelf_hours=plain_shelf_h,
-        free_at_iso=free_at_iso,
-        load_volume_ml=next_load_ml,
-    )
+    next_hatch = plan["nextHatch"]
+    # Each vessel's two reminders carry the hatchery's own clock (0.7.195):
+    # the harvest rides the incubation, the start rides the plan above. The
+    # panel reads these instead of re-deriving them — LOCKSTEP by reading.
+    for vessel_payload in vessels_payload:
+        vessel_payload["reminders"] = {
+            kind: _nps_hatch_task_clock(config, vessel_payload["tasks"][kind], now_utc, plan=plan)
+            for kind in ("start", "harvest")}
     # Container payload: the CANONICAL reservoir (pump channel's when linked).
     if isinstance(fx_channel, dict):
         ch_res = fx_channel.get("reservoir") or {}

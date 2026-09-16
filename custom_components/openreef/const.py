@@ -53,7 +53,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.194"
+INTEGRATION_VERSION = "0.7.195"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.

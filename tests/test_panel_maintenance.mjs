@@ -377,4 +377,130 @@ test("test_the_new_water_record_has_its_inputs_and_shows_in_history", async () =
   }
 });
 
+// --- 0.7.195: the Maintenance views ---------------------------------------
+
+// "now" as a LOCAL 09:00 so the time-of-day slots are what a keeper sees.
+function localMorning() {
+  return new Date(2026, 8, 16, 9, 0, 0).toISOString();
+}
+
+function hoursFrom(iso, hours) {
+  return new Date(Date.parse(iso) + hours * 3600000).toISOString();
+}
+
+function multiConfig(tasks, completions = {}, nps = undefined) {
+  const cfg = { maintenance: { enabled: true, tasks, completions } };
+  if (nps) cfg.nps = nps;
+  return cfg;
+}
+
+test("test_upcoming_groups_by_when_and_splits_today_by_time_of_day", async () => {
+  const now = localMorning();
+  const restore = freezeTime(now);
+  try {
+    const hourly = (label, hours) => ({ label, enabled: true, cadenceHours: hours, criticalAfterHours: hours * 2, scheduleMode: "interval" });
+    const daily = (label, days) => ({ label, enabled: true, cadenceDays: days, criticalAfterDays: days * 2, scheduleMode: "interval" });
+    const panel = await makePanel(multiConfig({
+      kalk: daily("Refill kalk", 5),
+      brine: hourly("Feed live brine", 8),
+      pods: hourly("Feed pods", 15),
+      night: hourly("Night check", 12),
+      sock: daily("Filter sock", 7),
+      water: daily("Water change", 7),
+      snoozed: { ...daily("pH probe", 60), snoozedUntil: hoursFrom(now, 30) },
+    }, {
+      kalk: [{ id: "k", timestamp: hoursFrom(now, -24 * 6) }],        // overdue? 6 days on a 5-day cadence -> due
+      brine: [{ id: "b", timestamp: hoursFrom(now, -2) }],            // due 15:00 -> this afternoon
+      pods: [{ id: "p", timestamp: hoursFrom(now, -4) }],             // due 20:00 -> this evening
+      night: [{ id: "n", timestamp: hoursFrom(now, 1) }],             // due 22:00 -> tonight
+      sock: [{ id: "s", timestamp: hoursFrom(now, -24 * 6) }],        // tomorrow, day cadence: no clock time
+      water: [{ id: "w", timestamp: hoursFrom(now, -24 * 4) }],       // in 3 days -> later this week
+      snoozed: [{ id: "z", timestamp: hoursFrom(now, -24 * 59) }],    // due tomorrow, snoozed 30 h -> tomorrow, snoozed
+    }));
+    const upcoming = panel._maintenanceUpcoming(7);
+    const when = Object.fromEntries(upcoming.map((e) => [e.id, panel._maintenanceWhen(e)]));
+    assertEqual(when.kalk.group, "due");
+    assertEqual(when.brine.slot, "afternoon");
+    assert(when.brine.text.startsWith("this afternoon ~"), when.brine.text);
+    assertEqual(when.pods.slot, "evening");
+    assertEqual(when.night.slot, "night");
+    assert(when.night.text.startsWith("tonight ~"), when.night.text);
+    assertEqual(when.sock.group, "tomorrow");
+    assertEqual(when.sock.text, "tomorrow", "a day cadence never invents a clock time");
+    assertEqual(when.water.group, "later");
+    assertEqual(when.water.pill, "in 3 days");
+    assertEqual(when.snoozed.slot, "snoozed");
+    const html = panel._maintenanceUpcomingSection();
+    const order = ["Due now", "Later today", "This afternoon", "This evening", "Tonight", "Tomorrow", "Later this week"].map((h) => html.indexOf(h));
+    assert(order.every((i) => i >= 0) && order.every((i, n) => n === 0 || i > order[n - 1]), `groups out of order: ${order}`);
+    assert(html.includes("Show 1") && !html.includes("Water change"), "later this week folds by default");
+    panel._maintenanceLaterOpen = true;
+    assert(panel._maintenanceUpcomingSection().includes("Water change"), "and unfolds on request");
+    assert(html.includes('data-action="maintenance-expand" data-id="brine"'), "every row is a way to its task");
+    assert(html.includes('data-action="complete-task" data-id="kalk"'), "a plain due task ticks off from the row");
+  } finally {
+    restore();
+  }
+});
+
+test("test_hatch_reminders_read_the_hatchery_clock_and_fall_back_to_the_cadence", async () => {
+  const now = localMorning();
+  const restore = freezeTime(now);
+  try {
+    const startAt = hoursFrom(now, 13);   // 22:00 local -> tonight
+    const tasks = {
+      brine_hatch_start: { label: "Start hatch", enabled: true, cadenceHours: 34, criticalAfterHours: 68, scheduleMode: "interval" },
+      brine_hatch_harvest: { label: "Harvest", enabled: true, cadenceHours: 34, criticalAfterHours: 68, scheduleMode: "interval" },
+    };
+    const completions = { brine_hatch_start: [{ id: "s", timestamp: hoursFrom(now, -40) }] };   // the cadence alone says due
+    const summary = { hatchery: { vessels: [{ id: "v1", name: "Hatchery 1", tasks: { start: "brine_hatch_start", harvest: "brine_hatch_harvest" },
+      reminders: { start: { available: true, due: false, at: startAt, hoursUntil: 13, severity: "ok", reason: "wait" },
+                   harvest: { available: false, due: false, at: null, severity: "ok", reason: "idle" } } }] } };
+    const panel = await makePanel(multiConfig(tasks, completions, { hatchery: { vessels: { v1: { name: "Hatchery 1" } } } }));
+    panel._nps = { summary, at: Date.now(), loading: false, demo: false, error: "", loadError: "" };
+    const start = panel._maintenanceDueState("brine_hatch_start");
+    assertEqual(start.status, "ok");
+    assertEqual(start.label, "scheduled");
+    assertEqual(start.dueAt, startAt);
+    assertEqual(panel._maintenanceNextDueMs("brine_hatch_start"), Date.parse(startAt));
+    const when = panel._maintenanceWhen(panel._maintenanceEntry("brine_hatch_start"));
+    assertEqual(when.slot, "night");
+    assertEqual(panel._maintenanceDueState("brine_hatch_harvest").status, "unknown", "an idle cone has no harvest to time");
+    assertEqual(panel._maintenanceTaskSource("brine_hatch_start").label, "Hatchery 1");
+    assert(panel._maintenanceRow(panel._maintenanceEntry("brine_hatch_start"), when, when.pill).includes('data-action="tab" data-id="hatchery"'), "the chip opens the hatchery");
+    // Due on the clock: the severity is the hatchery's, not the cadence's.
+    summary.hatchery.vessels[0].reminders.start = { available: true, due: true, at: now, severity: "critical", reason: "overdue" };
+    assertEqual(panel._maintenanceDueState("brine_hatch_start").status, "critical");
+    // No summary yet (older backend, first load): the cadence still answers.
+    panel._nps = { summary: null, at: Date.now(), loading: false, demo: false, error: "", loadError: "" };
+    assertEqual(panel._maintenanceDueState("brine_hatch_start").status, "warning");
+    assertEqual(panel._maintenanceDueState("brine_hatch_harvest").status, "warning");
+  } finally {
+    restore();
+  }
+});
+
+test("test_rows_expand_in_place_and_views_switch", async () => {
+  const restore = freezeTime(localMorning());
+  try {
+    const panel = await makePanel(configForCase({ completions: [{ id: "a", timestamp: hoursFrom(localMorning(), -24 * 10) }] }));
+    const closed = panel._maintenanceUpcomingSection();
+    assert(closed.includes('id="or-maint-task-subject"') && !closed.includes('data-maint-draft="doneAt"'), "closed row carries no form");
+    panel._maintenanceExpanded = "subject";
+    const open = panel._maintenanceUpcomingSection();
+    assert(open.includes('class="maint-row warning open"') && open.includes('data-maint-draft="doneAt"'), "the open row shows the full card");
+    assertEqual(panel._maintenanceViewId(), "upcoming");
+    assert(panel._maintenanceViewSwitch().includes('data-action="maintenance-view" data-id="tasks"'));
+    panel._maintenanceView = "tasks";
+    const tasks = panel._maintenanceViewBody();
+    assert(tasks.includes("Needs attention") && tasks.includes('data-action="maintenance-expand" data-id="subject"'), tasks.slice(0, 200));
+    panel._maintenanceView = "trends";
+    assert(panel._maintenanceViewBody().includes("Trends appear once"), "no completions to chart yet");
+    panel._maintenanceView = "nonsense";
+    assertEqual(panel._maintenanceViewId(), "upcoming");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

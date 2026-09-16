@@ -137,6 +137,9 @@ class OpenReefPanel extends HTMLElement {
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
     this._maintenanceHistoryOpen = {};
+    this._maintenanceView = "upcoming";   // 0.7.195: upcoming | tasks | trends
+    this._maintenanceExpanded = "";       // the one row open to its full card
+    this._maintenanceLaterOpen = false;   // "Later this week" folded by default
     // Per-task completion-form drafts (done-at / volume / unit). Echoed back into
     // the inputs on render so a background hass update re-render doesn't wipe
     // half-typed values the moment the field loses focus.
@@ -1590,6 +1593,21 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "add-equipment") this._addEquipment(target.dataset.label);
       if (action === "complete-task") this._completeTask(id);
+      if (action === "maintenance-view") {
+        this._maintenanceView = id;
+        this._render();
+      }
+      if (action === "maintenance-expand") {
+        this._maintenanceExpanded = this._maintenanceExpanded === id ? "" : id;
+        this._render();
+        if (this._maintenanceExpanded) {
+          requestAnimationFrame(() => this.shadowRoot.getElementById(`or-maint-task-${id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+        }
+      }
+      if (action === "maintenance-later-toggle") {
+        this._maintenanceLaterOpen = this._maintenanceLaterOpen !== true;
+        this._render();
+      }
       if (action === "maintenance-step") this._toggleMaintenanceStep(target.dataset.id, Number(target.dataset.index));
       if (action === "maintenance-usual-steps") this._maintenanceUsualSteps(target.dataset.id);
       if (action === "skip-task") this._skipTask(id);
@@ -9773,6 +9791,20 @@ class OpenReefPanel extends HTMLElement {
   _npsHatchTaskIds(vesselId) {
     const suffix = !vesselId || vesselId === "v1" ? "" : `_${vesselId}`;
     return [`brine_hatch_start${suffix}`, `brine_hatch_harvest${suffix}`];
+  }
+
+  // The hatchery's clock for one of its reminders, off the summary's vessels
+  // (0.7.195). null = no clock to read (summary not loaded, older backend).
+  _npsHatchReminderClock(taskId) {
+    const st = this._nps;
+    if (!st) return null;
+    if (!st.demo && !st.loading && (!st.at || Date.now() - st.at > 30000)) this._npsLoadSummary();
+    for (const vessel of st.summary?.hatchery?.vessels || []) {
+      for (const kind of ["start", "harvest"]) {
+        if (vessel?.tasks?.[kind] === taskId) return vessel?.reminders?.[kind] || null;
+      }
+    }
+    return null;
   }
 
   _npsVesselEntries() {
@@ -29547,7 +29579,7 @@ const rigSteps = [
     if (state.status === "warning" || state.status === "critical") return Date.now();
     const task = this._maintenanceTask(id);
     const snoozeMs = Date.parse(task.snoozedUntil || "");
-    if (state.cultureDueAt) return Math.max(Date.parse(state.cultureDueAt), Number.isFinite(snoozeMs) ? snoozeMs : 0);
+    if (state.dueAt) return Math.max(Date.parse(state.dueAt), Number.isFinite(snoozeMs) ? snoozeMs : 0);
     let baseMs;
     if (task.scheduleMode === "fixed") {
       const next = this._maintenanceNextScheduledAfter(task, new Date());
@@ -29595,7 +29627,29 @@ const rigSteps = [
       const clock = jar?.state?.[key];
       if (!clock?.available) return { status: "unknown", label: "no active clock", detail: "The culture has no active clock for this chore.", latest };
       return { status: clock.due ? (["sign", "slow"].includes(clock.reason) ? "critical" : "warning") : "ok",
-        label: clock.due ? "due" : "scheduled", detail: clock.due ? "Due on the culture’s own clock." : `Due ${this._formatActivityTime(clock.at)}.`, latest, cultureDueAt: clock.at };
+        label: clock.due ? "due" : "scheduled", detail: clock.due ? "Due on the culture’s own clock." : `Due ${this._formatActivityTime(clock.at)}.`, latest, dueAt: clock.at };
+    }
+    // Hatch reminders read the hatchery's own clock (0.7.195) the way culture
+    // chores read the jar: the harvest rides the incubation, the start rides
+    // the next-hatch plan. LOCKSTEP with the backend by READING its clock
+    // (`reminders` on the summary's vessels), never re-deriving it. No clock
+    // (older backend, nothing in play) and the cadence below still answers.
+    if (/^brine_hatch_(?:start|harvest)(?:_.+)?$/.test(id)) {
+      const clock = this._npsHatchReminderClock(id);
+      if (clock && !clock.available) {
+        const why = { idle: "Nothing incubating in this hatchery — the harvest clock starts with the next batch.",
+          running: "A batch is already on in this hatchery; the next start follows its harvest.",
+          not_next: "The chain starts another hatchery first." }[clock.reason] || "The hatchery has no clock running for this chore.";
+        return { status: "unknown", label: "no active clock", detail: why, latest };
+      }
+      if (clock) {
+        if (clock.due) {
+          const critical = clock.severity === "critical";
+          return { status: critical ? "critical" : "warning", label: critical ? "overdue" : "due",
+            detail: `${task.label} ${critical ? "is overdue" : "is due"} on the hatchery's clock.`, latest, dueAt: clock.at };
+        }
+        return { status: "ok", label: "scheduled", detail: `Due ${this._formatActivityTime(clock.at)} — on the hatchery's clock.`, latest, dueAt: clock.at };
+      }
     }
     if (task.scheduleMode === "fixed") {
       const [lastSched, prevSched] = this._maintenanceScheduledDates(task, new Date());
@@ -29708,34 +29762,192 @@ const rigSteps = [
           ${this._missionSummaryCard("Due now", String(due), due ? "need doing soon" : "all caught up", due ? (overdue ? "critical" : "warning") : "ok", "maintenance")}
           ${this._missionSummaryCard("Overdue", String(overdue), overdue ? "past their window" : "none overdue", overdue ? "critical" : "ok", "maintenance")}
         </div>
-        ${this._maintenanceUpcomingSection()}
-        ${this._maintenanceTrendsSection()}
+        ${enabledTasks.length ? this._maintenanceViewSwitch() : ""}
         ${enabledTasks.length
-          ? `<div class="grid four">${enabledTasks.map(([id]) => this._maintenanceTaskCard(id)).join("")}</div>`
+          ? this._maintenanceViewBody()
           : this._emptyState("No tasks tracked yet", "Turn on the chores you do in Settings → Maintenance — or add your own.", "settings", "Set up tasks")}
       </section>
     `;
   }
 
-  _maintenanceUpcomingSection() {
-    const upcoming = this._maintenanceUpcoming(7);
-    if (!upcoming.length) return "";
-    const rows = upcoming.map(({ task, state, nextMs }) => {
-      const dueNow = state.status === "warning" || state.status === "critical";
-      const days = Math.max(0, Math.round((nextMs - Date.now()) / 86400000));
-      const when = dueNow
-        ? (state.status === "critical" ? "overdue" : "due now")
-        : (days <= 0 ? "today" : days === 1 ? "tomorrow" : `in ${days} days`);
-      return `
-        <div class="manual-history-row">
-          <div><strong>${this._escape(task.label)}</strong></div>
-          <span class="pill ${state.status}">${this._escape(when)}</span>
-        </div>`;
-    }).join("");
+  // ---------------------------------------------------------------------------
+  // Maintenance views (0.7.195). The tab reads in three views — Coming up
+  // (grouped by WHEN, today split by time of day), All tasks (compact rows,
+  // needs-attention first) and Trends — instead of one page carrying every
+  // list, chart and log form at once. A row expands in place to the full
+  // card: "take me to the relevant task" without a scroll hunt.
+  // ---------------------------------------------------------------------------
+  _maintenanceViewId() {
+    return ["upcoming", "tasks", "trends"].includes(this._maintenanceView) ? this._maintenanceView : "upcoming";
+  }
+
+  _maintenanceViewSwitch() {
+    const active = this._maintenanceViewId();
+    const enabled = this._maintenanceTaskList().filter(([id]) => this._maintenanceTask(id).enabled).length;
+    const views = [["upcoming", `Coming up (${this._maintenanceUpcoming(7).length})`], ["tasks", `All tasks (${enabled})`], ["trends", "Trends"]];
     return `
-      <section class="setting-card subtle-card">
+      <div class="maint-views" role="tablist">
+        ${views.map(([vid, label]) => `<button class="maint-view${active === vid ? " active" : ""}" role="tab" aria-selected="${active === vid}" data-action="maintenance-view" data-id="${vid}">${this._escape(label)}</button>`).join("")}
+      </div>`;
+  }
+
+  _maintenanceViewBody() {
+    const view = this._maintenanceViewId();
+    if (view === "tasks") return this._maintenanceTasksView();
+    if (view === "trends") return this._maintenanceTrendsSection() || `<p class="muted">Trends appear once a task has a few completions behind it.</p>`;
+    return this._maintenanceUpcomingSection();
+  }
+
+  _maintenanceEntry(id) {
+    return { id, task: this._maintenanceTask(id), state: this._maintenanceDueState(id), nextMs: this._maintenanceNextDueMs(id) };
+  }
+
+  // Where a reminder comes from — a hatchery, a culture jar, the food shelf —
+  // so its row can say so and offer the screen the chore is logged on.
+  _maintenanceTaskSource(id) {
+    const hatch = /^brine_hatch_(?:start|harvest)(?:_(.+))?$/.exec(id);
+    if (hatch) {
+      const vid = hatch[1] || "v1";
+      const vessel = this._npsVesselEntries().find(([v]) => v === vid);
+      return { kind: "hatchery", label: vessel?.[1]?.name || "Hatchery", tab: "hatchery" };
+    }
+    const culture = /^culture_(.+)_(?:feed|harvest|restart|water_change)$/.exec(id);
+    if (culture) {
+      const jar = this._config?.nps?.cultures?.jars?.[culture[1]];
+      return { kind: "cultures", label: jar?.name || "Culture", tab: "cultures" };
+    }
+    if (String(id).startsWith("nps_dose_")) return { kind: "feeding", label: "Food shelf", tab: "nps" };
+    return null;
+  }
+
+  // The row's WHEN, honest about precision: an hour clock (hatch chores,
+  // culture clocks, hourly cadences, a snooze) earns a time of day; a day
+  // cadence only ever knew the day. Reece's screen (2026-09-16): a hatch
+  // start "due today" at breakfast for a batch the plan wanted at ten that
+  // night — the "today" pile felt overwhelming and was not even true.
+  _maintenanceWhen(entry) {
+    const { task, state, nextMs } = entry;
+    if (state.status === "critical") return { group: "overdue", slot: "", text: "overdue", pill: "overdue" };
+    if (state.status === "warning") return { group: "due", slot: "", text: "due now", pill: "due now" };
+    if (!Number.isFinite(nextMs)) return { group: "later", slot: "", text: "", pill: state.label };
+    const now = new Date();
+    const at = new Date(nextMs);
+    const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const dayDiff = Math.round((dayStart(at) - dayStart(now)) / 86400000);
+    const timed = task.cadenceHours > 0 || Boolean(state.dueAt) || state.snoozed === true;
+    const clock = timed ? at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    const group = dayDiff <= 0 ? "today" : dayDiff === 1 ? "tomorrow" : "later";
+    if (state.snoozed) return { group, slot: "snoozed", text: `snoozed until ${this._formatActivityTime(task.snoozedUntil)}`, pill: "snoozed" };
+    if (group === "today") {
+      const h = at.getHours();
+      const slot = !timed ? "sometime" : h < 12 ? "morning" : h < 17 ? "afternoon" : h < 21 ? "evening" : "night";
+      const slotText = { sometime: "today", morning: "this morning", afternoon: "this afternoon", evening: "this evening", night: "tonight" }[slot];
+      return { group, slot, text: timed ? `${slotText} ~${clock}` : "", pill: "today" };
+    }
+    if (group === "tomorrow") return { group, slot: "", text: timed ? `tomorrow ~${clock}` : "tomorrow", pill: "tomorrow" };
+    const weekday = at.toLocaleDateString([], { weekday: "long" });
+    return { group, slot: "", text: `${weekday}${timed ? ` ~${clock}` : ""}`, pill: `in ${dayDiff} days` };
+  }
+
+  // One task as a row: the label, where it comes from, when — and the full
+  // card underneath when it is the open one. The source chip is the way to
+  // the screen the chore is logged on (hatchery, cultures, the shelf).
+  _maintenanceRow(entry, when, pill) {
+    const { id, task, state } = entry;
+    const source = this._maintenanceTaskSource(id);
+    const open = this._maintenanceExpanded === id;
+    const due = state.status === "warning" || state.status === "critical";
+    const quick = due && !task.logsVolume && !source && !this._maintenanceSteps(task).length;
+    return `
+      <div class="maint-row ${state.status}${open ? " open" : ""}" id="or-maint-task-${this._escape(id)}">
+        <div class="maint-row-line">
+          <button class="maint-row-main" data-action="maintenance-expand" data-id="${this._escape(id)}" aria-expanded="${open ? "true" : "false"}">
+            <strong>${this._escape(task.label)}</strong>
+            ${when.text ? `<span class="maint-when">${this._escape(when.text)}</span>` : ""}
+          </button>
+          ${source ? `<button class="maint-chip ${source.kind}" data-action="tab" data-id="${this._escape(source.tab)}" title="Open ${this._escape(source.label)}">${this._escape(source.label)}</button>` : ""}
+          <div class="maint-row-side">
+            ${quick ? `<button class="secondary compact-button" data-action="complete-task" data-id="${this._escape(id)}">Done</button>` : ""}
+            <span class="pill ${state.status}">${this._escape(pill)}</span>
+          </div>
+        </div>
+        ${open ? this._maintenanceTaskCard(id) : ""}
+      </div>`;
+  }
+
+  _maintenanceSteps(task) {
+    return Array.isArray(task?.steps) ? task.steps.filter((step) => typeof step === "string" && step.trim()) : [];
+  }
+
+  _maintenanceGroupHtml(title, hint, rows) {
+    if (!rows.length) return "";
+    return `
+      <div class="maint-group">
+        <div class="maint-group-head"><h4>${this._escape(title)}</h4>${hint ? `<small>${this._escape(hint)}</small>` : ""}</div>
+        ${rows.join("")}
+      </div>`;
+  }
+
+  _maintenanceUpcomingSection() {
+    const upcoming = this._maintenanceUpcoming(7).map((entry) => ({ entry, when: this._maintenanceWhen(entry) }));
+    if (!upcoming.length) return `<p class="muted">Nothing due in the next seven days — the reef is running itself.</p>`;
+    const byGroup = (group) => upcoming.filter((x) => x.when.group === group);
+    const rows = (list) => list.map(({ entry, when }) => this._maintenanceRow(entry, when, when.pill));
+    // Today by time of day: the morning's chores first, tonight's last, the
+    // ones that only know the day at the end, snoozes after those.
+    const slots = [["morning", "This morning"], ["afternoon", "This afternoon"], ["evening", "This evening"], ["night", "Tonight"], ["sometime", "Sometime today"], ["snoozed", "Snoozed"]];
+    const today = byGroup("today");
+    const todayHtml = today.length ? `
+      <div class="maint-group">
+        <div class="maint-group-head"><h4>Later today</h4><small>not yet — by time of day</small></div>
+        ${slots.map(([slot, label]) => {
+          const list = today.filter((x) => x.when.slot === slot);
+          return list.length ? `<p class="maint-slot-head">${this._escape(label)}</p>${rows(list).join("")}` : "";
+        }).join("")}
+      </div>` : "";
+    const later = byGroup("later");
+    const laterOpen = this._maintenanceLaterOpen === true;
+    const laterHtml = later.length ? `
+      <div class="maint-group">
+        <div class="maint-group-head">
+          <h4>Later this week</h4>
+          <button class="secondary compact-button maint-later-toggle" data-action="maintenance-later-toggle" aria-expanded="${laterOpen ? "true" : "false"}">${laterOpen ? "Hide" : `Show ${later.length}`}</button>
+        </div>
+        ${laterOpen ? rows(later).join("") : ""}
+      </div>` : "";
+    return `
+      <section class="setting-card subtle-card maint-upcoming">
         <div class="section-head"><div><p class="eyebrow">Coming up</p><h3>Due this week</h3></div></div>
-        <div class="manual-history">${rows}</div>
+        ${this._maintenanceGroupHtml("Overdue", "past their window", rows(byGroup("overdue")))}
+        ${this._maintenanceGroupHtml("Due now", "need doing", rows(byGroup("due")))}
+        ${todayHtml}
+        ${this._maintenanceGroupHtml("Tomorrow", "", rows(byGroup("tomorrow")))}
+        ${laterHtml}
+      </section>`;
+  }
+
+  // Every tracked task as a row, the ones that need you first. Snoozed and
+  // clock-less tasks sit at the bottom rather than mixed through the list.
+  _maintenanceTasksView() {
+    const entries = this._maintenanceTaskList()
+      .filter(([id]) => this._maintenanceTask(id).enabled)
+      .map(([id]) => this._maintenanceEntry(id))
+      .sort((a, b) => (Number.isFinite(a.nextMs) ? a.nextMs : Infinity) - (Number.isFinite(b.nextMs) ? b.nextMs : Infinity));
+    const groups = [
+      ["Needs attention", "due or overdue", (e) => (e.state.status === "warning" || e.state.status === "critical")],
+      ["On schedule", "soonest first", (e) => e.state.status === "ok" && e.state.snoozed !== true],
+      ["Snoozed", "", (e) => e.state.snoozed === true],
+      ["No clock running", "nothing to time yet", (e) => e.state.status === "unknown"],
+    ];
+    return `
+      <section class="setting-card subtle-card maint-all-tasks">
+        <div class="section-head"><div><p class="eyebrow">All tasks</p><h3>Everything on a schedule</h3></div></div>
+        ${groups.map(([title, hint, pick]) => this._maintenanceGroupHtml(title, hint,
+          entries.filter(pick).map((entry) => {
+            const when = this._maintenanceWhen(entry);
+            // The pill is the state here, so a day-cadence row still says which day.
+            return this._maintenanceRow(entry, { ...when, text: when.text || (when.group === "today" ? "today" : when.group === "tomorrow" ? "tomorrow" : "") }, entry.state.label);
+          }))).join("")}
       </section>`;
   }
 
@@ -33169,6 +33381,33 @@ ${parts.buttons}
         .manual-history-row { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; border: 1px solid #24364a; border-radius: 8px; padding: 10px; background: rgba(11, 23, 36, .72); }
         .manual-history-row div { display: grid; gap: 4px; min-width: 0; }
         .manual-history-row strong, .manual-history-row small { overflow-wrap: anywhere; }
+        /* Maintenance views (0.7.195): the switch, grouped rows, the open card. */
+        .maint-views { display: flex; gap: 6px; flex-wrap: wrap; }
+        .maint-view { border: 1px solid #24364a; background: rgba(11, 23, 36, .72); color: #cbd5e1; border-radius: 999px; padding: 7px 14px; font: inherit; font-weight: 700; }
+        .maint-view.active { background: #14532d; border-color: #22c55e; color: #f0fdf4; }
+        .maint-group { display: grid; gap: 8px; }
+        .maint-group + .maint-group { margin-top: 12px; }
+        .maint-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .maint-group-head h4 { margin: 0; font-size: 15px; }
+        .maint-group-head small, .maint-when { color: #94a3b8; }
+        .maint-slot-head { margin: 6px 0 0; color: #94a3b8; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; }
+        .maint-row { border: 1px solid #24364a; border-radius: 8px; background: rgba(11, 23, 36, .72); }
+        .maint-row.warning { border-color: #a16207; }
+        .maint-row.critical { border-color: #b91c1c; }
+        .maint-row.open { border-color: #3b82f6; }
+        .maint-row-line { display: flex; align-items: center; gap: 10px; padding: 6px 10px; flex-wrap: wrap; }
+        .maint-row-main { flex: 1 1 240px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; background: none; border: 0; padding: 6px 0; color: inherit; text-align: left; font: inherit; }
+        .maint-row-main strong { overflow-wrap: anywhere; }
+        .maint-row-main:hover strong { text-decoration: underline; }
+        .maint-when { font-size: 13px; }
+        .maint-chip { border: 1px solid #24364a; border-radius: 999px; padding: 3px 10px; background: #162538; color: #cbd5e1; font: inherit; font-size: 12px; font-weight: 700; }
+        .maint-chip.hatchery { border-color: #3b82f6; }
+        .maint-chip.cultures { border-color: #14b8a6; }
+        .maint-chip.feeding { border-color: #f59e0b; }
+        .maint-row-side { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+        .maint-row.open > .manual-test-card { border: 0; border-top: 1px solid #24364a; border-radius: 0 0 8px 8px; min-height: 0; }
+        .maint-later-toggle { margin-left: auto; }
+        @media (max-width: 640px) { .maint-row-main { flex-basis: 120px; } .maint-row-line { padding: 4px 8px; } }
         .manual-schedule-card.manual-enabled { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .88)); }
         .issue-list { display: grid; gap: 8px; }
         .issue-item { width: 100%; display: grid; grid-template-columns: auto minmax(160px, .45fr) 1fr; gap: 12px; align-items: center; padding: 12px; text-align: left; }
