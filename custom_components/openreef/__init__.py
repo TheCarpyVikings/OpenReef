@@ -6730,6 +6730,11 @@ def _normalise_reports(config: dict[str, Any]) -> None:
         events.append(row)
     events.sort(key=lambda r: _parse_datetime(r["at"]) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     reports["events"] = events[:REPORT_EVENTS_MAX]
+    # Snoozed recommendations (Stage D): id -> until; expired ones drop.
+    now = datetime.now(timezone.utc)
+    snoozed_raw = reports.get("snoozedRecs") if isinstance(reports.get("snoozedRecs"), dict) else {}
+    reports["snoozedRecs"] = {str(rid)[:48]: str(until) for rid, until in snoozed_raw.items()
+                              if (_parse_datetime(until) or now) > now}
 
 
 def _reports_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
@@ -6747,7 +6752,7 @@ def _reports_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
     if not isinstance(target, dict):
         target = {}
         incoming["reports"] = target
-    _copy_runtime_fields(stored_reports, target, ("scoreLog", "events"))
+    _copy_runtime_fields(stored_reports, target, ("scoreLog", "events", "snoozedRecs"))
 
 
 def _mode_label(config: dict[str, Any], mode_id: str) -> str:
@@ -10853,6 +10858,39 @@ async def websocket_report_compile(
     report = report_engine.compile_period(ctx)
     report["readingsSource"] = "panel" if msg.get("readings") else ("recorder" if readings else "tests")
     connection.send_result(msg["id"], report)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/report_rec_snooze",
+    vol.Required("rec_id"): cv.string,
+    vol.Optional("days"): vol.Any(int, float),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_report_rec_snooze(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Quiet one recommendation for a month (Stage D). ``days`` 0 lifts it."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    rec_id = str(msg.get("rec_id") or "").strip()[:48]
+    if not rec_id:
+        connection.send_error(msg["id"], "invalid_rec", "rec_id is required")
+        return
+    config = _config_from_entry(entry)
+    reports = _reports_block(config)
+    snoozed = reports.get("snoozedRecs") if isinstance(reports.get("snoozedRecs"), dict) else {}
+    days = _awc_num(msg.get("days"), 30, 0, 365)
+    if days <= 0:
+        snoozed.pop(rec_id, None)
+    else:
+        snoozed[rec_id] = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    reports["snoozedRecs"] = snoozed
+    _normalise_reports(config)
+    config = await _async_save_config(hass, entry, config)
+    connection.send_result(msg["id"], {"snoozedRecs": (config.get("reports") or {}).get("snoozedRecs", {})})
 
 
 @websocket_api.websocket_command({
@@ -16642,6 +16680,7 @@ def _report_context(config: dict[str, Any], now_utc: datetime, now_local: dateti
         "corals": live.get("corals"), "checkins": live.get("checkins"), "coralFeeds": live.get("feeds"),
         "coralStates": states,
         "events": reports.get("events"), "scoreLog": reports.get("scoreLog"),
+        "snoozedRecs": reports.get("snoozedRecs"),
         "upcoming": _maintenance_upcoming(config, plan_from, 7 if period["kind"] == "week" else 14),
     }
 
@@ -23599,6 +23638,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_coral_feed_undo)
     websocket_api.async_register_command(hass, websocket_report_compile)
     websocket_api.async_register_command(hass, websocket_report_score_stamp)
+    websocket_api.async_register_command(hass, websocket_report_rec_snooze)
     websocket_api.async_register_command(hass, websocket_report_events)
     websocket_api.async_register_command(hass, websocket_coral_status)
     websocket_api.async_register_command(hass, websocket_search_entities)

@@ -1350,6 +1350,11 @@ class OpenReefPanel extends HTMLElement {
         this._reportLoad(true);
         this._render();
       }
+      if (action === "report-why") {
+        this._report.whyOpen = this._report.whyOpen !== true;
+        this._render();
+      }
+      if (action === "report-rec-snooze") this._reportSnoozeRec(id, Number(target.dataset.days ?? 30));
       if (action === "report-task") {
         // A row in the plan is the way to its task: the Maintenance tab, All
         // tasks, that row open.
@@ -6915,6 +6920,64 @@ class OpenReefPanel extends HTMLElement {
     return `<svg class="report-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${this._escape(opts.label || "trend")}">${band}<polyline class="report-spark-line" points="${line}"></polyline>${dots}<circle class="report-spark-dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3"></circle></svg>`;
   }
 
+  async _reportSnoozeRec(recId, days = 30) {
+    try {
+      await this._callWS({ type: "openreef/report_rec_snooze", rec_id: recId, days });
+      await this._reportLoad(true);
+    } catch (err) {
+      this._report.error = (err && err.message) || "Could not snooze that.";
+      this._render();
+    }
+  }
+
+  _reportScoreCard(r) {
+    const ws = r.score || {};
+    const status = ws.total === null || ws.total === undefined ? "unknown" : ws.total >= 80 ? "ok" : ws.total >= 60 ? "warning" : "critical";
+    const parts = Array.isArray(ws.parts) ? ws.parts : [];
+    const why = this._report?.whyOpen ? `
+      <ul class="report-why">${parts.map((pt) => `
+        <li class="${pt.available ? "" : "muted"}">
+          <div class="report-why-head"><strong>${this._escape(pt.label)}</strong><span class="report-why-score">${pt.available ? `${pt.score}` : "neutral"}<small> · ${pt.weight} %</small></span></div>
+          <small>${this._escape(pt.why)}</small>
+          ${pt.available && pt.score < 100 ? `<small class="report-why-raise">Raise it: ${this._escape(pt.raise)}</small>` : ""}
+        </li>`).join("")}
+      </ul>` : "";
+    return `
+      <div class="report-score week ${status}">
+        <small>Reef Week Score</small>
+        <strong>${ws.total === null || ws.total === undefined ? "—" : ws.total}<span>/100</span></strong>
+        <span class="report-score-delta">${ws.condition !== null && ws.condition !== undefined ? `condition ${ws.condition}` : "condition —"} · ${ws.consistency !== null && ws.consistency !== undefined ? `consistency ${ws.consistency}` : "consistency —"}</span>
+        ${ws.neutral?.length ? `<small class="muted">No data for ${this._escape(ws.neutral.join(", ").toLowerCase())} — left out, not zero.</small>` : ""}
+        <button class="secondary compact-button report-why-toggle" data-action="report-why" aria-expanded="${this._report?.whyOpen ? "true" : "false"}">${this._report?.whyOpen ? "Hide why" : "Why this score"}</button>
+        ${why}
+      </div>`;
+  }
+
+  _reportRecommendations(r) {
+    const recs = r.recommendations || {};
+    const items = Array.isArray(recs.items) ? recs.items : [];
+    if (!items.length) return "";
+    const btn = (a) => a.action === "report-task"
+      ? `<button class="secondary compact-button" data-action="report-task" data-id="${this._escape(a.id)}">${this._escape(a.label)}</button>`
+      : `<button class="secondary compact-button" data-action="tab" data-id="${this._escape(a.id)}">${this._escape(a.label)}</button>`;
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">${recs.calm ? "This week" : "Recommendations · small"}</p>${recs.snoozed?.length ? `<small class="muted">${recs.snoozed.length} snoozed</small>` : ""}</div>
+        <div class="report-cards">
+          ${items.map((rec) => `
+            <article class="report-card report-rec">
+              <h4>${this._escape(rec.title)}</h4>
+              <p><small class="muted">Because:</small> ${this._escape(rec.evidence)}</p>
+              <small class="muted">${this._escape(rec.effort)} · ${this._escape(rec.effect)}</small>
+              <div class="button-row">
+                ${(rec.actions || []).map(btn).join("")}
+                ${rec.id === "keep_rhythm" ? "" : `<button class="secondary compact-button" data-action="report-rec-snooze" data-id="${this._escape(rec.id)}" data-days="30">Snooze a month</button>`}
+              </div>
+            </article>`).join("")}
+        </div>
+      </section>`;
+  }
+
   _reportStat(label, value, detail = "", status = "") {
     return `<div class="report-stat ${status}"><small>${this._escape(label)}</small><strong>${this._escape(String(value))}</strong>${detail ? `<span>${this._escape(detail)}</span>` : ""}</div>`;
   }
@@ -6949,6 +7012,7 @@ class OpenReefPanel extends HTMLElement {
     const scoreStatus = sc.average === null || sc.average === undefined ? "unknown" : sc.average >= 80 ? "ok" : sc.average >= 60 ? "warning" : "critical";
     return `
       <div class="report-headline">
+        ${this._reportScoreCard(r)}
         <div class="report-score ${scoreStatus}">
           <small>Reef Health, average</small>
           <strong>${sc.average === null || sc.average === undefined ? "—" : `${Math.round(sc.average)}`}<span>/100</span></strong>
@@ -7096,6 +7160,7 @@ class OpenReefPanel extends HTMLElement {
       body = `
         ${st.error ? `<div class="notice error">${this._escape(st.error)}</div>` : ""}
         ${this._reportHeadline(r)}
+        ${this._reportRecommendations(r)}
         ${this._reportDid(r)}
         ${this._reportWater(r)}
         ${this._reportLiving(r)}
@@ -33975,7 +34040,16 @@ ${parts.buttons}
         .report-dialog { max-width: 1000px; }
         .report-controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .report-controls > .compact-button { margin-left: auto; }
-        .report-headline { display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); gap: 16px; align-items: start; }
+        .report-headline { display: grid; grid-template-columns: minmax(200px, 260px) minmax(180px, 220px) minmax(0, 1fr); gap: 16px; align-items: start; }
+        .report-score.week strong { color: #f0fdf4; }
+        .report-why { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 8px; border-top: 1px solid #24364a; padding-top: 8px; }
+        .report-why li { display: grid; gap: 2px; } .report-why li.muted { opacity: .7; }
+        .report-why-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+        .report-why-score { font-variant-numeric: tabular-nums; font-weight: 700; } .report-why-score small { color: #94a3b8; font-weight: 400; }
+        .report-why-raise { color: #cbd5e1; }
+        .report-why-toggle { justify-self: start; margin-top: 4px; }
+        .report-rec h4 { font-size: 15px; }
+        .report-rec .button-row { flex-wrap: wrap; gap: 6px; }
         .report-score { border: 1px solid #24364a; border-radius: 10px; padding: 14px; background: rgba(11, 23, 36, .72); display: grid; gap: 4px; }
         .report-score.ok { border-color: #22c55e; } .report-score.warning { border-color: #eab308; } .report-score.critical { border-color: #ef4444; }
         .report-score small { color: #94a3b8; }
@@ -34011,6 +34085,7 @@ ${parts.buttons}
         .report-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
         .report-events { max-height: 320px; overflow: auto; }
         .report-foot { font-size: 12px; }
+        @media (max-width: 900px) { .report-headline { grid-template-columns: 1fr 1fr; } }
         @media (max-width: 720px) { .report-headline { grid-template-columns: 1fr; } .report-score strong { font-size: 32px; } }
         .manual-schedule-card.manual-enabled { border-color: var(--openreef-accent-border); background: linear-gradient(180deg, var(--openreef-accent-soft), rgba(18, 31, 47, .88)); }
         .issue-list { display: grid; gap: 8px; }

@@ -54,7 +54,7 @@ def test_normalise_reports_coerces_garbage_and_keeps_one_score_per_day():
     assert reports["scoreLog"][0]["total"] == 100, "clamped"
     assert len(reports["events"]) == 1 and len(reports["events"][0]["message"]) == 200
     empty = integration._normalise_core_config({"reports": "garbage"})["reports"]
-    assert empty == {"weekStart": 0, "scoreLog": [], "events": []}
+    assert empty == {"weekStart": 0, "scoreLog": [], "events": [], "snoozedRecs": {}}
 
 
 def test_activity_choke_point_mirrors_events_but_not_plain_info():

@@ -482,6 +482,236 @@ def next_section(upcoming: Any, start: datetime, days: int = 7) -> dict[str, Any
     return {"count": len(rows), "days": by_day}
 
 
+# --- the Reef Week Score (brief §3.3) -------------------------------------------
+
+SCORE_PARTS = (
+    ("chemistry", "Chemistry stability", 30, "condition"),
+    ("care", "Care consistency", 25, "consistency"),
+    ("nutrition", "Nutrition", 15, "consistency"),
+    ("livestock", "Livestock wellbeing", 15, "condition"),
+    ("reliability", "System reliability", 15, "consistency"),
+)
+
+BAND_SCORE = {"steady": 100, "drifting": 70, "swinging": 35}
+GRADE_SCORE = {"A": 100, "B": 80, "C": 60, "D": 40, "F": 20}
+
+
+def _avg(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _part(pid: str, score: float | None, why: str, raise_: str) -> dict[str, Any]:
+    label, weight, side = next((lb, w, sd) for i, lb, w, sd in SCORE_PARTS if i == pid)
+    return {"id": pid, "label": label, "weight": weight, "side": side,
+            "score": int(round(score)) if score is not None else None,
+            "available": score is not None, "why": why, "raise": raise_}
+
+
+def week_score(report: dict[str, Any]) -> dict[str, Any]:
+    """Five explainable parts, weighted, each with a why line and what would
+    raise it. A part with no data scores NEUTRAL — it drops out of the
+    weighting and says so — never a hidden zero. Two totals: condition
+    (chemistry, livestock) and consistency (care, nutrition, reliability),
+    so "the tank is fine, you are slipping" reads as its own sentence."""
+    water = report.get("water") or {}
+    did = report.get("did") or {}
+    m = did.get("maintenance") or {}
+    living = report.get("living") or {}
+    happened = report.get("happened") or {}
+    parts: list[dict[str, Any]] = []
+
+    # Chemistry: every parameter with a band; a reading out of range caps it.
+    scored = []
+    words = []
+    for prm in water.get("parameters") or []:
+        base = BAND_SCORE.get(prm.get("band"))
+        if base is None:
+            continue
+        if prm.get("inRange") is False:
+            base = min(base, 50)
+        scored.append(base)
+        if prm.get("band") != "steady" or prm.get("inRange") is False:
+            words.append(f"{prm.get('label')} {prm.get('band')}{' and out of range' if prm.get('inRange') is False else ''}")
+    untested = water.get("untested") or []
+    chem = _avg(scored)
+    parts.append(_part("chemistry", chem,
+                       ("Nothing tested with a trend yet." if chem is None else
+                        f"{len(scored)} parameter{'s' if len(scored) != 1 else ''} with a trend; " + (", ".join(words) if words else "all steady and in range") + "."),
+                       (f"Test {', '.join(untested[:3])}." if untested else "Keep testing on the cadence; steady beats perfect.")))
+
+    # Care: on time, tests logged vs parameters tracked, water changed.
+    care_bits = []
+    care_words = []
+    if m.get("timed"):
+        care_bits.append(float(m.get("onSchedule") or 0))
+        care_words.append(f"{int(m.get('onSchedule') or 0)} % of chores on time")
+    total_params = len(water.get("parameters") or [])
+    tested = len(water.get("tested") or [])
+    # Coverage counts once the keeper is logging at all; a period with no
+    # tests AND no chores is "no data", not "zero care".
+    if total_params and (tested or m.get("done")):
+        care_bits.append(tested / total_params * 100.0)
+        care_words.append(f"{tested} of {total_params} parameters tested")
+    if m.get("done") or (did.get("awc") or {}).get("runs"):
+        changed = (m.get("waterChangedL") or 0) > 0 or (did.get("awc") or {}).get("runs")
+        care_bits.append(100.0 if changed else 30.0)
+        care_words.append("water changed" if changed else "no water changed")
+    care = _avg(care_bits)
+    parts.append(_part("care", care, ("Nothing logged to judge." if care is None else "; ".join(care_words) + "."),
+                       "Tick chores on their day, test every tracked parameter once, change some water."))
+
+    # Nutrition: feeds happened, hatches on the clock, cultures without signs.
+    nut_bits = []
+    nut_words = []
+    feeds = did.get("feeds") or {}
+    if feeds.get("available"):
+        n = int(feeds.get("count") or 0)
+        nut_bits.append(100.0 if n >= 7 else 70.0 if n >= 3 else 40.0 if n else 10.0)
+        nut_words.append(f"{n} feed{'s' if n != 1 else ''} logged")
+    hatches = living.get("hatches") or {}
+    if hatches.get("harvested"):
+        late = hatches.get("avgLateHours")
+        nut_bits.append(100.0 if late is None or late <= 2 else 70.0 if late <= 6 else 40.0)
+        nut_words.append(f"{hatches['harvested']} hatch{'es' if hatches['harvested'] != 1 else ''}" + (f", {late:g} h past the clock" if late and late > 2 else " on the clock"))
+    cultures = living.get("cultures") or {}
+    if any((j.get("feeds") or j.get("looks") or j.get("harvests")) for j in cultures.get("jars") or []):
+        nut_bits.append(30.0 if cultures.get("crashed") else 70.0 if cultures.get("signs") else 100.0)
+        nut_words.append("a culture crashed" if cultures.get("crashed") else f"{cultures['signs']} culture sign{'s' if cultures['signs'] != 1 else ''}" if cultures.get("signs") else "cultures clean")
+    nut = _avg(nut_bits)
+    parts.append(_part("nutrition", nut, ("No feeds, hatches or culture entries logged." if nut is None else "; ".join(nut_words) + "."),
+                       "Feed on the windows, start hatches at the plan's time, look at the jars daily."))
+
+    # Livestock: the grade spread now, a drop costs.
+    corals = living.get("corals") or {}
+    grades = corals.get("grades") or {}
+    graded = [GRADE_SCORE[g] for g, n in grades.items() if g in GRADE_SCORE for _ in range(int(n))]
+    live = _avg(graded)
+    drops = [mv for mv in corals.get("moved") or [] if mv.get("to", 0) < mv.get("from", 0)]
+    if live is not None and drops:
+        live = max(0.0, live - 10.0 * len(drops))
+    parts.append(_part("livestock", live,
+                       ("No colonies graded yet." if live is None else
+                        ", ".join(f"{n} × {g}" for g, n in sorted(grades.items())) + (f"; {len(drops)} dropped" if drops else "") + "."),
+                       "Look at every colony on its cadence; a look is what lets a grade rise."))
+
+    # Reliability: a quiet log is a good log.
+    by_type = happened.get("byType") or {}
+    warnings = int(by_type.get("warning") or 0)
+    criticals = int(by_type.get("critical") or 0) + int(by_type.get("error") or 0)
+    rel = max(20.0, 100.0 - 15.0 * warnings - 30.0 * criticals)
+    parts.append(_part("reliability", rel,
+                       ("Nothing on the log." if not (warnings or criticals) else
+                        f"{warnings} warning{'s' if warnings != 1 else ''}" + (f", {criticals} critical" if criticals else "") + " on the log."),
+                       "Clear the warnings the log names; fewer surprises, higher score."))
+
+    def weighted(side: str | None) -> int | None:
+        picked = [pt for pt in parts if pt["available"] and (side is None or pt["side"] == side)]
+        if not picked:
+            return None
+        return int(round(sum(pt["score"] * pt["weight"] for pt in picked) / sum(pt["weight"] for pt in picked)))
+
+    return {"total": weighted(None), "condition": weighted("condition"), "consistency": weighted("consistency"),
+            "parts": parts, "neutral": [pt["label"] for pt in parts if not pt["available"]]}
+
+
+# --- Recommendations, small (brief §5) ------------------------------------------
+
+SMALL_RECS_MAX = 3
+
+
+def _rec(rid: str, priority: int, title: str, evidence: str, effort: str, effect: str,
+         actions: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    return {"id": rid, "size": "small", "priority": priority, "title": title, "evidence": evidence,
+            "effort": effort, "effect": effect, "actions": actions or []}
+
+
+def recommend(report: dict[str, Any], snoozed: Any = None, now: datetime | None = None) -> dict[str, Any]:
+    """Rule-based, explainable, capped: each recommendation names the evidence
+    line it came from, the effort, the expected effect and the screen to do
+    it on. Snoozed ids stay out until their stamp passes. A calm week gets a
+    calm line and one habit at most."""
+    now = now or datetime.now(timezone.utc)
+    snoozed = snoozed if isinstance(snoozed, dict) else {}
+    hidden = {rid for rid, until in snoozed.items() if (_parse(until) or now) > now}
+    water = report.get("water") or {}
+    did = report.get("did") or {}
+    m = did.get("maintenance") or {}
+    living = report.get("living") or {}
+    score = report.get("headline", {}).get("score") or {}
+    recs: list[dict[str, Any]] = []
+    manual_tab = [{"action": "tab", "id": "manual", "label": "Log a test"}]
+    for prm in water.get("parameters") or []:
+        pid, label = prm.get("id"), prm.get("label")
+        unit = prm.get("unit") or ""
+        if prm.get("band") == "untested" and pid in ("alkalinity", "calcium", "magnesium", "nitrate", "phosphate", "salinity"):
+            since = prm.get("daysSince")
+            pri = 10 if pid == "alkalinity" else 30
+            recs.append(_rec(f"test_{pid}", pri, f"Test {label.lower()} this week",
+                             f"Last test {int(since)} days before the period's end." if since is not None else "Never logged.",
+                             "5 min", "A trend to read and the chemistry part of the score filled in.", manual_tab))
+        if prm.get("band") == "swinging":
+            recs.append(_rec(f"steady_{pid}", 15, f"Steady {label.lower()}",
+                             f"Swung {prm.get('low')}–{prm.get('high')} {unit} over four weeks; steady is within {STEADY_TOLERANCE.get(pid, 0)} {unit}.".strip(),
+                             "15 min", "Stability is what the corals feel; the chemistry part of the score follows.", manual_tab))
+        if prm.get("inRange") is False and prm.get("latestIsFromPeriod"):
+            rng = prm.get("range") or {}
+            recs.append(_rec(f"range_{pid}", 12, f"Bring {label.lower()} back into range",
+                             f"Latest {prm.get('latest')} {unit}; the range is {rng.get('min')}–{rng.get('max')} {unit}.".strip(),
+                             "15 min", "Back inside the band the tank was set up for.", manual_tab))
+    for task in m.get("tasks") or []:
+        if not task.get("tracked"):
+            continue
+        if task.get("late", 0) >= 2 or (task.get("late", 0) >= 1 and task.get("done", 0) <= 2):
+            recs.append(_rec(f"late_{task['id']}", 40, f"Do {task['label']} on its day",
+                             f"{task['late']} of {task['done']} ticks came after the cadence.",
+                             "no extra time", "The on-time rate, and a chore that stops sliding.",
+                             [{"action": "report-task", "id": task["id"], "label": "Open the task"}]))
+        if task.get("skipped", 0) >= 2:
+            recs.append(_rec(f"skipped_{task['id']}", 45, f"Stop skipping {task['label']}",
+                             f"Skipped {task['skipped']} times this period.", "varies",
+                             "Either do it or lengthen its cadence — a skip is neither.",
+                             [{"action": "report-task", "id": task["id"], "label": "Open the task"}]))
+    if (m.get("done") or m.get("timed")) and not (m.get("waterChangedL") or 0) and not (did.get("awc") or {}).get("runs"):
+        recs.append(_rec("water_change", 35, "Change some water this week", "No water change logged this period.",
+                         "30 min", "Nutrients export, trace elements back in.",
+                         [{"action": "tab", "id": "maintenance", "label": "Open Maintenance"}]))
+    hatches = living.get("hatches") or {}
+    if hatches.get("harvested") and (hatches.get("avgLateHours") or 0) > 3:
+        recs.append(_rec("hatch_late", 25, "Start the hatch at the plan's time",
+                         f"Harvests ran {hatches['avgLateHours']:g} h past the clock on average.",
+                         "no extra time", "Brine at its yolkiest, and the next batch on schedule.",
+                         [{"action": "tab", "id": "hatchery", "label": "Open the hatchery"}]))
+    for jar in (living.get("cultures") or {}).get("jars") or []:
+        if jar.get("crashed"):
+            recs.append(_rec(f"culture_{jar['id']}", 8, f"Restart {jar['name']} from a clean jar", "The journal logged a crash.",
+                             "20 min", "A live culture again.", [{"action": "tab", "id": "cultures", "label": "Open cultures"}]))
+        elif jar.get("signs"):
+            recs.append(_rec(f"culture_{jar['id']}", 20, f"Look at {jar['name']} today",
+                             f"{jar['signs']} sign{'s' if jar['signs'] != 1 else ''} logged: {', '.join(jar.get('signList') or [])}.",
+                             "5 min", "A crash caught early is a purge, not a restart.",
+                             [{"action": "tab", "id": "cultures", "label": "Open cultures"}]))
+    for mv in (living.get("corals") or {}).get("moved") or []:
+        if mv.get("to", 0) < mv.get("from", 0):
+            recs.append(_rec(f"coral_{mv['id']}", 18, f"Look closer at {mv['name']}", f"Score {mv['from']} → {mv['to']} this period.",
+                             "5 min", "A colony sliding is caught while it is still a colony.",
+                             [{"action": "tab", "id": "corals", "label": "Open the diary"}]))
+    days = int((report.get("period") or {}).get("days") or 7)
+    if (score.get("gaps") or 0) >= max(3, days - 2):
+        recs.append(_rec("stamps", 50, "Open the panel once a day",
+                         f"Reef Health was stamped on {score.get('stamps') or 0} of {days} days.",
+                         "1 min", "A score line with no gaps — and the report can say more.", []))
+    recs = [r for r in recs if r["id"] not in hidden]
+    recs.sort(key=lambda r: (r["priority"], r["id"]))
+    calm = not recs
+    if calm:
+        recs.append(_rec("keep_rhythm", 99, "Keep the rhythm", "Nothing in this period asked for a change.",
+                         "none", "The reef likes it this way.", []))
+    kept = recs[:SMALL_RECS_MAX]
+    for r in kept:
+        r.pop("priority", None)
+    return {"items": kept, "calm": calm, "snoozed": sorted(hidden)}
+
+
 def verdict(report: dict[str, Any]) -> str:
     """One calm sentence, from the numbers — the only place the report is
     allowed a voice, and never on a warning."""
@@ -581,4 +811,8 @@ def compile_period(ctx: dict[str, Any]) -> dict[str, Any]:
     if maintenance["timed"] == 0 and maintenance["done"]:
         notes.append("On-time rate needs a previous tick to compare against — it will read from next period.")
     report["headline"]["verdict"] = verdict(report)
+    # Stage D: the Week Score and the small recommendations, both from the
+    # compiled report so a fixture drives them too.
+    report["score"] = week_score(report)
+    report["recommendations"] = recommend(report, ctx.get("snoozedRecs"), now)
     return report

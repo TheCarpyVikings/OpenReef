@@ -232,6 +232,99 @@ def test_ws_compile_runs_on_an_empty_and_a_busy_config():
     assert conn.results[-1].payload["period"]["kind"] == "month" and conn.results[-1].payload["period"]["partial"]
 
 
+def _busy_report():
+    """The compile test's context, compiled — the fixture the score and the
+    recommendations read."""
+    ctx = {
+        "period": WEEK, "now": NOW, "tankL": 52.0,
+        "tasks": {"water": {"label": "Water change", "cadenceDays": 7, "enabled": True},
+                  "sock": {"label": "Filter sock", "cadenceDays": 7, "enabled": True}},
+        "completions": {"water": [{"timestamp": _at(-7), "volume": 10, "volumeUnit": "L"}, {"timestamp": _at(0), "volume": 10, "volumeUnit": "L"}],
+                        "sock": [{"timestamp": _at(-10)}, {"timestamp": _at(1)}]},
+        "manualReadings": {"alkalinity": [{"timestamp": _at(-20), "value": 8.6}, {"timestamp": _at(-6), "value": 8.7}, {"timestamp": _at(1), "value": 8.3}],
+                           "nitrate": [{"timestamp": _at(-10), "value": 5}, {"timestamp": _at(3), "value": 22}]},
+        "paramMeta": {"alkalinity": {"label": "Alkalinity", "unit": "dKH", "min": 7.5, "max": 9.5}, "nitrate": {"label": "Nitrate", "unit": "ppm", "min": 2, "max": 15}},
+        "feedLog": {"rows": [{"date": (START + timedelta(days=d)).date().isoformat(), "how": "hand"} for d in range(7)]},
+        "hatchHistory": [{"vesselId": "v1", "startedAt": _at(0), "harvestedAt": _at(1, 10), "plannedHours": 24, "actualHours": 29}],
+        "cultureJars": {"j1": {"name": "Rotifers", "history": [{"at": _at(0), "fed": True}, {"at": _at(4), "sign": "foam"}]}},
+        "corals": {"c1": {"name": "Acro"}, "c2": {"name": "Zoa"}}, "checkins": {"c1": [{"at": _at(1)}]},
+        "coralStates": {"c1": {"score": 62, "grade": "C", "scoreBefore": 80}, "c2": {"score": 90, "grade": "A"}},
+        "events": [{"at": _at(3), "message": "Heater interlock", "type": "warning"}],
+        "scoreLog": [{"date": (START + timedelta(days=2)).date().isoformat(), "total": 75, "parts": {}}],
+    }
+    return report.compile_period(ctx)
+
+
+def test_week_score_has_five_explainable_parts_and_neutral_gaps():
+    out = _busy_report()
+    ws = out["score"]
+    parts = {p["id"]: p for p in ws["parts"]}
+    # Chemistry: alkalinity steady (100 — 8.3–8.7 sits inside the 0.5 dKH tolerance),
+    # nitrate swinging + out of range (35, and the cap at 50 does not lift it) -> 67.5
+    assert parts["chemistry"]["score"] == 68 and "Nitrate swinging and out of range" in parts["chemistry"]["why"]
+    assert parts["chemistry"]["raise"].startswith("Test Calcium, Magnesium")
+    # Care: sock late (1 of 1 timed -> on time 50 %), 2 of 8 tested (25), water changed (100) -> 58
+    assert parts["care"]["score"] == 58 and "50 % of chores on time" in parts["care"]["why"]
+    # Nutrition: 7 feeds (100), hatch 5 h late (70), a culture sign (70) -> 80
+    assert parts["nutrition"]["score"] == 80 and "5 h past the clock" in parts["nutrition"]["why"]
+    # Livestock: A + C = 80 avg, one drop -> 70
+    assert parts["livestock"]["score"] == 70 and "1 dropped" in parts["livestock"]["why"]
+    assert parts["reliability"]["score"] == 85
+    total = round((68 * 30 + 58 * 25 + 80 * 15 + 70 * 15 + 85 * 15) / 100)
+    assert ws["total"] == total, (ws["total"], total)
+    assert ws["condition"] == round((68 * 30 + 70 * 15) / 45) and ws["consistency"] == round((58 * 25 + 80 * 15 + 85 * 15) / 55)
+    assert ws["neutral"] == []
+    empty = report.compile_period({"period": WEEK, "now": NOW})["score"]
+    assert empty["total"] == 100 and empty["condition"] is None, "only reliability has data on an empty week: a quiet log"
+    assert set(empty["neutral"]) == {"Chemistry stability", "Care consistency", "Nutrition", "Livestock wellbeing"}
+    assert all(p["available"] is False and p["score"] is None for p in empty["parts"] if p["id"] != "reliability")
+
+
+def test_recommendations_are_evidence_backed_capped_and_snoozable():
+    out = _busy_report()
+    recs = out["recommendations"]
+    ids = [r["id"] for r in recs["items"]]
+    assert len(ids) == 3 and not recs["calm"]
+    # Priority order: out of range (12), swinging (15), a coral dropping (18); the culture sign (20) waits its turn.
+    assert ids == ["range_nitrate", "steady_nitrate", "coral_c1"], ids
+    rec = recs["items"][0]
+    assert rec["evidence"] == "Latest 22.0 ppm; the range is 2–15 ppm." and rec["actions"] == [{"action": "tab", "id": "manual", "label": "Log a test"}]
+    assert "effort" in rec and "effect" in rec and "priority" not in rec
+    # The full rule set fires beyond the cap; snoozing lifts the next ones in.
+    later = (NOW + timedelta(days=20)).isoformat()
+    again = report.recommend(out, {"range_nitrate": later, "steady_nitrate": later, "coral_c1": later}, NOW)
+    assert [r["id"] for r in again["items"]] == ["culture_j1", "hatch_late", "test_calcium"] and again["snoozed"] == ["coral_c1", "range_nitrate", "steady_nitrate"]
+    assert again["items"][2]["evidence"] == "Never logged." and again["items"][0]["evidence"] == "1 sign logged: foam."
+    expired = report.recommend(out, {"range_nitrate": (NOW - timedelta(days=1)).isoformat()}, NOW)
+    assert expired["items"][0]["id"] == "range_nitrate" and expired["snoozed"] == []
+    quiet = {"period": {"days": 7}, "headline": {"score": {"gaps": 0, "stamps": 7}}, "did": {"maintenance": {"done": 3, "timed": 3, "waterChangedL": 10, "tasks": []}},
+             "water": {"parameters": [{"id": "alkalinity", "label": "Alkalinity", "band": "steady", "inRange": True, "latestIsFromPeriod": True}]}, "living": {}}
+    calm = report.recommend(quiet, None, NOW)
+    assert calm["calm"] and [r["id"] for r in calm["items"]] == ["keep_rhythm"]
+    bare = report.compile_period({"period": WEEK, "now": NOW})["recommendations"]
+    assert [r["id"] for r in bare["items"]] == ["test_alkalinity", "test_calcium", "test_magnesium"], "an empty config is asked to test, alkalinity first"
+
+
+def test_ws_rec_snooze_stores_and_lifts():
+    entry = FakeEntry(options={CONF_SETTINGS: {}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_report_rec_snooze(hass, conn, {"id": 1, "rec_id": "test_alkalinity"}))
+    assert not conn.errors and "test_alkalinity" in conn.results[-1].payload["snoozedRecs"]
+    until = integration._parse_datetime(entry.options[CONF_SETTINGS]["reports"]["snoozedRecs"]["test_alkalinity"])
+    assert 29 <= (until - datetime.now(timezone.utc)).days <= 30
+    run(integration.websocket_report_rec_snooze(hass, conn, {"id": 2, "rec_id": "test_alkalinity", "days": 0}))
+    assert entry.options[CONF_SETTINGS]["reports"]["snoozedRecs"] == {}
+    run(integration.websocket_report_rec_snooze(hass, conn, {"id": 3, "rec_id": "  "}))
+    assert conn.errors[-1].code == "invalid_rec"
+    stale = integration._normalise_core_config({"reports": {"snoozedRecs": {"old": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), "live": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), "junk": 5}}})
+    assert list(stale["reports"]["snoozedRecs"]) == ["live"]
+    stored = {"reports": {"snoozedRecs": {"a": "2099-01-01T00:00:00+00:00"}, "scoreLog": [], "events": []}}
+    incoming = {"reports": {"weekStart": 0, "snoozedRecs": {}, "scoreLog": [], "events": []}}
+    integration._reports_preserve_runtime(stored, incoming)
+    assert incoming["reports"]["snoozedRecs"] == {"a": "2099-01-01T00:00:00+00:00"}, "snoozes ride the guard"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

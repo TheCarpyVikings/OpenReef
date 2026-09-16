@@ -245,7 +245,13 @@ shareable (the livestream and Discord audience will want the PNG).
 - **Readings**: the panel calls `report_compile`; when the backend answers `readingsSource: "tests"` (no recorder) the panel fetches the mapped chemistry sensors' history the way Live Stats does and compiles again with `readings` — the Trident path works on both sides.
 - Charts follow the dataviz rules: one series per line (no legend), 2 px lines, recessive band, text in ink tokens, status only on pills, a title per point for hover.
 
-## 8.4 Still open
+### 8.4 Stage D as built (0.7.200, 2026-09-16)
+
+- **Reef Week Score** (`report.week_score`): five parts with the brief's weights. Chemistry = the mean over parameters with a trend of steady 100 / drifting 70 / swinging 35, capped at 50 when out of range. Care = the mean of on-time % (when a tick has a tick before it), parameters tested over parameters tracked, and water changed (100 / 30). Nutrition = feeds logged (≥7 → 100, ≥3 → 70, ≥1 → 40), hatches on the clock (≤2 h late 100, ≤6 h 70, else 40), cultures clean 100 / signs 70 / crashed 30. Livestock = the grade spread (A 100 … F 20) minus 10 a dropped colony. Reliability = 100 − 15 a warning − 30 a critical, floor 20. A part with no data is **neutral**: it drops out of the weighting and the card says so. Two totals besides the headline: condition (chemistry + livestock) and consistency (care + nutrition + reliability).
+- **Small recommendations** (`report.recommend`): rules over the compiled report, each with evidence, effort, effect and deep-link actions; ranked by priority (culture crash 8, alk untested 10, out of range 12, swinging 15, coral drop 18, culture signs 20, hatch late 25, other tests 30, no water change 35, late 40, skipped 45, closed panel 50); capped at three. A calm week gets "Keep the rhythm". `reports.snoozedRecs` (id → until; expired dropped by the normaliser; rides the guard) hides a recommendation until its stamp passes — `openreef/report_rec_snooze {rec_id, days}` (0 lifts).
+- Viewer: the Week Score card sits beside the Reef Health average with a "Why this score" fold (each part's score, weight, why and how to raise it); a Recommendations section under the headline with the actions and "Snooze a month".
+
+## 8.5 Still open
 
 - Report landing time: Monday 07:00 local assumed (a Settings field alongside weekStart in Stage E).
 - Which activity choke points should pass a `kind` (mode applied, AWC run, spawning run, cooling trigger) so the "What happened" section can group them — decided per stage as the compile needs them.

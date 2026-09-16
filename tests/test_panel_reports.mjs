@@ -190,4 +190,43 @@ test("test_load_hands_the_recorder_back_in_when_the_backend_read_tests_only", as
   assert(panel._report.data, "the last good report stays on screen");
 });
 
+test("test_score_card_explains_its_parts_and_recommendations_render_with_snooze", async () => {
+  const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [], events: [] }, captures: [] });
+  const data = fixtureReport();
+  data.score = { total: 66, condition: 58, consistency: 74, neutral: ["Livestock wellbeing"], parts: [
+    { id: "chemistry", label: "Chemistry stability", weight: 30, side: "condition", score: 58, available: true, why: "2 parameters with a trend; Nitrate swinging.", raise: "Test Salinity." },
+    { id: "care", label: "Care consistency", weight: 25, side: "consistency", score: 80, available: true, why: "80 % of chores on time.", raise: "Tick chores on their day." },
+    { id: "nutrition", label: "Nutrition", weight: 15, side: "consistency", score: 70, available: true, why: "14 feeds logged; 1 culture sign.", raise: "Look at the jars daily." },
+    { id: "livestock", label: "Livestock wellbeing", weight: 15, side: "condition", score: null, available: false, why: "No colonies graded yet.", raise: "Look at every colony." },
+    { id: "reliability", label: "System reliability", weight: 15, side: "consistency", score: 100, available: true, why: "Nothing on the log.", raise: "Clear the warnings." },
+  ] };
+  data.recommendations = { calm: false, snoozed: ["late_sock"], items: [
+    { id: "test_alkalinity", size: "small", title: "Test alkalinity this week", evidence: "Last test 9 days before the period's end.", effort: "5 min", effect: "A trend to read.", actions: [{ action: "tab", id: "manual", label: "Log a test" }] },
+    { id: "late_kalk", size: "small", title: "Do Refill kalk on its day", evidence: "2 of 3 ticks came after the cadence.", effort: "no extra time", effect: "The on-time rate.", actions: [{ action: "report-task", id: "kalk", label: "Open the task" }] },
+  ] };
+  panel._report = { open: true, loading: false, error: "", data, at: Date.now(), period: "week", which: "previous", whyOpen: false };
+  let html = panel._reportDialog();
+  assert(html.includes("Reef Week Score") && html.includes("66<span>/100</span>") && html.includes("condition 58 · consistency 74"));
+  assert(html.includes("No data for livestock wellbeing — left out, not zero."));
+  assert(html.includes('data-action="report-why"') && !html.includes("2 parameters with a trend"), "the why list is folded by default");
+  panel._report.whyOpen = true;
+  html = panel._reportDialog();
+  assert(html.includes("2 parameters with a trend; Nitrate swinging.") && html.includes("Raise it: Test Salinity.") && html.includes(">neutral<small>"));
+  assert(!html.includes("Raise it: Clear the warnings."), "a full-marks part needs no raise line");
+  assert(html.includes("Recommendations · small") && html.includes("1 snoozed"));
+  assert(html.includes("Test alkalinity this week") && html.includes("Because:</small> Last test 9 days"));
+  assert(html.includes('data-action="tab" data-id="manual"') && html.includes('data-action="report-task" data-id="kalk"'));
+  assert(html.includes('data-action="report-rec-snooze" data-id="test_alkalinity" data-days="30"'));
+  data.recommendations = { calm: true, snoozed: [], items: [{ id: "keep_rhythm", size: "small", title: "Keep the rhythm", evidence: "Nothing in this period asked for a change.", effort: "none", effect: "The reef likes it this way.", actions: [] }] };
+  html = panel._reportDialog();
+  assert(html.includes("This week") && html.includes("Keep the rhythm") && !html.includes("report-rec-snooze"), "a calm week has nothing to snooze");
+  const calls = [];
+  panel._hass = { callWS: async (payload) => { calls.push(payload); return payload.type === "openreef/report_compile" ? data : { snoozedRecs: {} }; } };
+  panel._render = () => {};
+  await panel._reportSnoozeRec("test_alkalinity", 30);
+  assertEqual(calls[0].type, "openreef/report_rec_snooze");
+  assertEqual(calls[0].rec_id, "test_alkalinity");
+  assertEqual(calls[1].type, "openreef/report_compile", "and the report reloads");
+});
+
 await runTests();
