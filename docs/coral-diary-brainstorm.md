@@ -410,3 +410,19 @@ migration now stores the library id as the species too. `const.CORAL_SPECIES`,
 is added to all three (test_livestock pins every CORAL_SPECIES has a group; test_panel_diagram
 pins every catalogue id draws with a real glyph). "suncoral" / "gorgonian" stay valid legacy ids
 outside the picker. The diary's Species select is grouped the same way and carries `npsId` along.
+
+## 12. The picker reads the species report — v0.7.194 (2026-09-16)
+
+Reece asked whether a picker-added NPS coral reaches the NPS species coverage. It does, by
+construction: the tile stores the library id as the species and sets `npsId`; the backend
+derives `nps.species` from the registry on save; `compile_feed_plan` reads that list. Proven
+end to end against the fake HA (save → `nps_summary` → `covered · Fed by Frozen mysis`).
+Two things were missing and are now built: (1) a save from the Corals tab, the Diagram tab
+or either coral dialog recompiles the NPS summary (both save paths), so coverage is fresh
+without a tab hop; (2) the picker shows a **detail card for the picked species** — for an NPS
+animal the library's difficulty, rhythm, foods + particle window, mouth note and care note,
+plus the coverage verdict when the keeper already keeps it (`✅ Fed by …`, `🕳 needs …`) or
+"Not kept yet — add it and the coverage report checks your shelf"; for any other species the
+diary group's cadences and feed note. Tile tooltips carry the library note. The Corals tab
+card of an NPS animal wears the coverage verdict as a chip. Every sentence comes from the
+backend's `species_card` / `compile_feed_plan` — never re-derived in the panel.

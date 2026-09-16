@@ -258,4 +258,34 @@ test("settings section, mission card and the check-in draft", async () => {
   } finally { restore(); }
 });
 
+test("the picker and the card read the NPS species report (0.7.194)", async () => {
+  const panel = await panelWith({ corals: { s: coral("tubastraea", 100, { name: "Sun", npsId: "tubastraea" }) } });
+  panel._render = () => {};
+  // Before the NPS summary lands: an honest placeholder, not invented facts.
+  panel._coralPickSpecies = "tubastraea";
+  let markup = panel._coralRegistryMarkup();
+  assert(markup.includes("coral-pick-detail") && markup.includes("ticks the species for the NPS feed plan"), "placeholder until the library loads");
+  // A photosynthetic pick reads the diary's own group table.
+  panel._coralPickSpecies = "acan";
+  markup = panel._coralRegistryMarkup();
+  assert(markup.includes("check-in weekly") && markup.includes("target feed every 3 days"), "the group's cadences");
+  // With the summary: difficulty, rhythm, foods, mouth, and the coverage verdict for a kept animal.
+  panel._nps.summary = {
+    speciesLibrary: [{ id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, rhythm: "1 feed a day, after lights-out", foodWords: ["prepared zooplankton"], particle: "300–3000 µm", mouth: { note: "Baby brine fits." }, note: "Target feeding is what works.", needs: "prepared zooplankton at 300–3000 µm" },
+      { id: "chili", name: "Chili coral", difficulty: 2, rhythm: "1 feed a day, after lights-out", foodWords: ["live zooplankton"], particle: "150–500 µm", mouth: { note: "" }, note: "Strictly nocturnal.", needs: "live zooplankton at 150–500 µm" }],
+    speciesPlan: { species: [{ id: "tubastraea", name: "Sun coral (Tubastraea)", difficulty: 1, rhythm: "1 feed a day, after lights-out", foodWords: ["prepared zooplankton"], particle: "300–3000 µm", mouth: { note: "Baby brine fits." }, note: "Target feeding is what works.", status: "covered", fedBy: [{ id: "m", name: "Frozen mysis" }], verdict: "Fed by Frozen mysis." }] },
+  };
+  panel._coralPickSpecies = "tubastraea";
+  markup = panel._coralRegistryMarkup();
+  assert(markup.includes("●○○○○") && markup.includes("after lights-out") && markup.includes("Eats prepared zooplankton at 300–3000 µm") && markup.includes("Baby brine fits."), "the library card");
+  assert(markup.includes("✅ Fed by Frozen mysis."), "a kept animal shows its coverage verdict");
+  assert(/title="Target feeding is what works\."/.test(markup), "the tile's tooltip is the library note");
+  panel._coralPickSpecies = "chili";
+  assert(panel._coralRegistryMarkup().includes("Not kept yet"), "an animal not yet registered says so");
+  // The Corals tab card carries the verdict as a chip.
+  panel._activeTab = "corals";
+  const tab = panel._activeContent();
+  assert(tab.includes("✅ NPS: Frozen mysis"), "the card's coverage chip");
+});
+
 await runTests();

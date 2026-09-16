@@ -440,7 +440,9 @@ class OpenReefPanel extends HTMLElement {
       if (!this._canRefreshFromConfigEvent()) return;
       this._refreshConfigSilently();
       // An external save invalidates the backend-compiled NPS summaries too.
-      if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
+      // ...and the coral diary is where NPS animals are registered now (0.7.194):
+      // a save from the Corals tab or the Reef layer dialog recompiles coverage.
+      if (["nps", "hatchery", "corals", "diagram"].includes(this._activeTab) || this._coralDialogOpen || this._coralDiaryOpen) this._npsLoadSummary(true);
       if (this._activeTab === "cultures") this._culturesLoadSummary(true);
     }, 250);
   }
@@ -525,7 +527,9 @@ class OpenReefPanel extends HTMLElement {
       // NPS summaries (species plan, shelf, budget) are compiled backend-side
       // from config — a save invalidates them, so recompile without the
       // save-then-refresh dance.
-      if (this._activeTab === "nps" || this._activeTab === "hatchery") this._npsLoadSummary(true);
+      // ...and the coral diary is where NPS animals are registered now (0.7.194):
+      // a save from the Corals tab or the Reef layer dialog recompiles coverage.
+      if (["nps", "hatchery", "corals", "diagram"].includes(this._activeTab) || this._coralDialogOpen || this._coralDiaryOpen) this._npsLoadSummary(true);
       if (this._activeTab === "cultures") this._culturesLoadSummary(true);
       // Mixing summary (batch clocks, dose guide, levels) is computed backend-side
       // from config — a save (brand, volumes, layout) invalidates it the same way.
@@ -19734,6 +19738,63 @@ const rigSteps = [
     await this._coralCall({ type, coralId: cid, at }, okMessage);
   }
 
+  // What the NPS species report says about a library species (0.7.194):
+  // the card from the library (difficulty, foods, mouth, rhythm) and, when
+  // the keeper already keeps it, the coverage verdict — the same sentences
+  // the NPS tab prints, never re-derived here.
+  _coralNpsFacts(npsId) {
+    const summary = this._nps?.summary;
+    if (!summary || !npsId) return null;
+    const card = (summary.speciesLibrary || []).find((s) => s.id === npsId) || null;
+    const plan = ((summary.speciesPlan || {}).species || []).find((s) => s.id === npsId) || null;
+    if (!card && !plan) return null;
+    return { card: plan || card, plan };
+  }
+
+  _coralPickDetailMarkup(pick) {
+    const entry = this._coralCatalogueIndex()[pick];
+    if (!entry) return "";
+    const g = this._coralGroups()[entry.group] || this._coralGroups().soft;
+    const cadence = (n) => (n === 7 ? "weekly" : n === 14 ? "fortnightly" : `every ${n} days`);
+    if (entry.group !== "nps") {
+      const feed = g.feedDays > 0 ? `target feed ${cadence(g.feedDays)}` : "no target feed reminder";
+      return `
+        <div class="coral-pick-detail">
+          <strong>${this._escape(entry.label)}</strong> <small class="muted">${this._escape(g.label)} · check-in ${cadence(g.checkDays)} · ${feed}</small>
+          <p class="muted">${this._escape(g.feedNote)}</p>
+        </div>`;
+    }
+    const facts = this._coralNpsFacts(pick);
+    if (!facts) {
+      return `
+        <div class="coral-pick-detail">
+          <strong>${this._escape(entry.label)}</strong> <small class="muted">NPS · check-in weekly · the NPS feed plan owns its feeds</small>
+          <p class="muted">${this._nps?.loading ? "Loading the species library…" : "Adding it ticks the species for the NPS feed plan: the coverage report checks your shelf and pumps against this mouth."}</p>
+        </div>`;
+    }
+    const c = facts.card;
+    const statusIcon = { covered: "✅", soon: "⏳", gap: "🕳", hand: "🖐" };
+    const coverage = facts.plan
+      ? `${statusIcon[facts.plan.status] || ""} ${this._escape(facts.plan.verdict || facts.plan.needs || "")}`
+      : `Not kept yet — add it and the coverage report checks your shelf against this mouth${c.needs ? ` (${this._escape(c.needs)})` : ""}.`;
+    return `
+      <div class="coral-pick-detail">
+        <strong>${this._escape(c.name || entry.label)}</strong> <small class="muted">Difficulty ${this._npsDifficultyDots(c.difficulty)} · ${this._escape(c.rhythm || "")}</small>
+        <p class="muted">Eats ${this._escape((c.foodWords || []).join(", ") || "—")}${c.particle ? ` at ${this._escape(String(c.particle))}` : ""}.${c.mouth?.note ? ` ${this._escape(c.mouth.note)}` : ""}</p>
+        ${c.note ? `<p class="muted">${this._escape(c.note)}</p>` : ""}
+        <p class="coral-pick-coverage">${coverage}</p>
+      </div>`;
+  }
+
+  _coralNpsCoverageChip(c) {
+    const facts = c?.npsId ? this._coralNpsFacts(c.npsId) : null;
+    if (!facts?.plan) return `<span class="coral-chip">NPS plan feeds it</span>`;
+    const p = facts.plan;
+    const cls = p.status === "gap" ? "critical" : p.status === "soon" || p.status === "hand" ? "warning" : "";
+    const icon = { covered: "✅", soon: "⏳", gap: "🕳", hand: "🖐" }[p.status] || "";
+    return `<span class="coral-chip ${cls}" title="${this._escape(p.verdict || p.needs || "")}">${icon} NPS: ${this._escape(p.status === "covered" ? (p.fedBy || []).map((f) => f.name).join(", ") || "covered" : p.status === "gap" ? "nothing fits this mouth" : p.status === "soon" ? "food on its way" : "hand-fed")}</span>`;
+  }
+
   // --- the Corals tab ----------------------------------------------------------
   _coralGlyphSvg(c, size = 64) {
     const pal = this._coralPalette(c?.colour);
@@ -19758,7 +19819,7 @@ const rigSteps = [
       else if (st.checkDue) chips.push(`<span class="coral-chip warning">check-in due</span>`);
       if (st.feedDue) chips.push(`<span class="coral-chip warning">feed due</span>`);
       if (st.cadenceReason === "arrival") chips.push(`<span class="coral-chip">new arrival · every ${st.cadenceDays} d</span>`);
-      if (c.npsId) chips.push(`<span class="coral-chip">NPS plan feeds it</span>`);
+      if (c.npsId) chips.push(this._coralNpsCoverageChip(c));
     }
     const photo = c.photoUrl ? `<img class="coral-card-photo" src="${this._escape(c.photoUrl)}" alt="">` : `<div class="coral-card-glyph">${this._coralGlyphSvg(c, 56)}</div>`;
     const top = st.insights.find((i) => i.status === "critical") || st.insights.find((i) => i.status === "warning") || null;
@@ -19787,6 +19848,8 @@ const rigSteps = [
 
   _coralsTab() {
     const corals = this._config?.livestock?.corals || {};
+    // An NPS animal's card shows the coverage verdict — from the NPS summary.
+    if (Object.values(corals).some((c) => c && c.npsId) && this._nps && !this._nps.summary && !this._nps.loading && !this._nps.demo) setTimeout(() => this._npsLoadSummary?.(), 0);
     const sum = this._coralsSummary();
     const counts = sum.counts;
     const filter = this._coralsFilter || "active";
@@ -21188,6 +21251,9 @@ const rigSteps = [
   // arrange mode like any other node.
   // The Reef layer dialog (0.7.178): the coral registry, off the Diagram tab.
   _coralDialog() {
+    // The NPS species library (difficulty, foods, mouth, rhythm) and the
+    // coverage report ride the NPS summary — fetch it once for the picker.
+    if (this._nps && !this._nps.summary && !this._nps.loading && !this._nps.demo) setTimeout(() => this._npsLoadSummary?.(), 0);
     return `
       <div class="modal">
         <section class="wizard trend-dialog coral-dialog">
@@ -21212,16 +21278,21 @@ const rigSteps = [
     const palPick = this._coralPalette(pickCol);
     // The picker IS the art kit: every tile renders the species' real glyph
     // in the currently selected colour, so what you pick is what the rock gets.
+    const lib = (this._nps?.summary?.speciesLibrary) || [];
+    const detail = this._coralPickDetailMarkup(pick);
     const tile = (s) => `
-      <button type="button" class="coral-tile ${s.id === pick ? "selected" : ""}" data-action="coral-pick-species" data-id="${s.id}" title="${this._escape(s.label)}">
+      <button type="button" class="coral-tile ${s.id === pick ? "selected" : ""}" data-action="coral-pick-species" data-id="${s.id}" title="${this._escape(lib.find((x) => x.id === s.id)?.note || s.label)}">
         <svg viewBox="-52 -100 104 108" aria-hidden="true">${this._diagCoralArt(s.art, 0, 0, palPick, 0)}</svg>
         <small>${this._escape(s.label)}</small>
       </button>`;
     // Grouped by the diary's families (0.7.193); the NPS group registers the
     // animal for the feed plan as well as drawing it.
+    // The detail card sits right under the group the pick belongs to, so it
+    // is beside the tile that was tapped, never at the foot of a long grid.
     const tiles = this._coralCatalogue().map((g) => `
       <p class="eyebrow coral-group-head">${this._escape(g.label)}${g.id === "nps" ? ` <small class="muted">— also ticks the species for the NPS feed plan</small>` : ""}</p>
-      <div class="coral-species-grid">${g.species.map(tile).join("")}</div>`).join("");
+      <div class="coral-species-grid">${g.species.map(tile).join("")}</div>
+      ${g.species.some((sp) => sp.id === pick) ? detail : ""}`).join("");
     const swatches = ["purple", "pink", "green", "teal", "orange", "red", "gold", "blue"].map((col) => {
       const p = this._coralPalette(col);
       return `<button type="button" class="coral-swatch ${col === pickCol ? "selected" : ""}" style="background:${p.bright};color:${p.bright}" data-action="coral-pick-colour" data-id="${col}" title="${col}"></button>`;
@@ -21248,6 +21319,7 @@ const rigSteps = [
           </div>
         </div>
         ${tiles}
+        ${this._coralCatalogueIndex()[pick] ? "" : detail}
         <div class="coral-swatches">${swatches}</div>
         <div class="quick-add coral-add">
           <input id="or-coral-name" placeholder="Name it (e.g. Golden torch)" value="${this._escape(this._coralPickName || "")}">
@@ -32745,6 +32817,9 @@ ${parts.buttons}
         .coral-upload { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; margin-bottom: 10px; }
         .coral-species-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; margin: 4px 0 12px; }
         .coral-group-head { margin: 10px 0 2px; }
+        .coral-pick-detail { border: 1px solid var(--openreef-accent, #4fd8c3); border-radius: 10px; padding: 8px 12px; margin: -6px 0 14px; }
+        .coral-pick-detail p { margin: 4px 0 0; font-size: .85rem; }
+        .coral-pick-coverage { color: #eaf6ff; }
         .coral-tile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 4px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 10px; background: transparent; cursor: pointer; color: inherit; }
         .coral-tile svg { width: 62px; height: 58px; display: block; }
         .coral-tile small { font-size: 10.5px; line-height: 1.15; text-align: center; color: var(--openreef-muted, #9fc7e0); }
