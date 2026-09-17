@@ -7151,12 +7151,15 @@ class OpenReefPanel extends HTMLElement {
       const consText = !cons ? "" : cons.perDay === null || cons.perDay === undefined ? `<small class="muted">needs ${2 - (cons.pairs || 0)} more falling pair${2 - (cons.pairs || 0) === 1 ? "" : "s"}</small>`
         : `${this._reportFmt(cons.perDay, p.id === "alkalinity" ? 2 : 1)} ${this._escape(p.unit)}/day <small class="muted">est.</small>`;
       const latest = p.latest === null || p.latest === undefined ? "—" : `${this._reportFmt(p.latest, p.id === "phosphate" ? 3 : p.id === "alkalinity" || p.id === "ph" ? 2 : 1)} ${this._escape(p.unit)}`;
-      const when = p.daysSince === null || p.daysSince === undefined ? "" : p.latestIsFromPeriod ? `${this._reportFmt(p.daysSince, 0)} d before the end` : `${this._reportFmt(p.daysSince, 0)} d old — not this period`;
+      const source = p.latestSource === "sensor" ? "the sensor" : p.latestSource === "test" ? "your test" : "";
+      const when = p.daysSince === null || p.daysSince === undefined ? "" : `${source ? `${source} · ` : ""}${p.latestIsFromPeriod ? `${this._reportFmt(p.daysSince, 0)} d before the end` : `${this._reportFmt(p.daysSince, 0)} d old — not this period`}`;
+      const disagree = p.disagree && Number.isFinite(Number(p.disagree.delta))
+        ? `<br><small class="muted report-disagree">sensor ${Number(p.disagree.delta) > 0 ? "+" : ""}${this._reportFmt(p.disagree.delta, p.id === "phosphate" ? 3 : 2)} ${this._escape(p.unit)} off your test</small>` : "";
       const inRange = p.inRange === null || p.inRange === undefined ? "" : p.inRange ? `<span class="pill ok">in range</span>` : `<span class="pill critical">out of range</span>`;
       return `
         <tr>
           <td><strong>${this._escape(p.label)}</strong><br><small class="muted">${p.tests || 0} test${p.tests === 1 ? "" : "s"}${p.sensorSamples ? ` · ${p.sensorSamples} sensor samples` : ""}</small></td>
-          <td>${latest}<br><small class="muted">${this._escape(when)}</small></td>
+          <td>${latest}<br><small class="muted">${this._escape(when)}</small>${disagree}</td>
           <td>${this._reportSparkline(p.points, p.range, { label: `${p.label} four weeks` })}${p.change ? `<br><small class="muted">${p.change > 0 ? "+" : ""}${this._reportFmt(p.change, 2)} over four weeks</small>` : ""}</td>
           <td>${this._reportBandPill(p.band)} ${inRange}</td>
           <td>${consText}</td>

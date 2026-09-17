@@ -106,10 +106,10 @@ function fixtureReport() {
       awc: { runs: 1, partial: 0, drainedL: 2.5, filledL: 2.5 }, tests: { count: 2, parameters: ["Alkalinity", "Calcium"] },
       feeds: { count: 14, hand: 12, pump: 2, undone: 1, available: true }, hatches: 2, cultureFeeds: 3, coralCheckins: 2 },
     water: { parameters: [
-      { id: "alkalinity", label: "Alkalinity", unit: "dKH", tests: 2, sensorSamples: 0, latest: 8.0, latestAt: day(5), daysSince: 1.6, range: { min: 7.5, max: 9.5 }, inRange: true, band: "drifting", change: -0.6, low: 8.0, high: 8.7, latestIsFromPeriod: true,
+      { id: "alkalinity", label: "Alkalinity", unit: "dKH", tests: 2, sensorSamples: 0, latest: 8.0, latestAt: day(5), latestSource: "test", daysSince: 1.6, range: { min: 7.5, max: 9.5 }, inRange: true, band: "drifting", change: -0.6, low: 8.0, high: 8.7, latestIsFromPeriod: true,
         points: [{ t: day(-20), v: 8.6 }, { t: day(-13), v: 8.2 }, { t: day(-6), v: 8.7 }, { t: day(1), v: 8.3 }, { t: day(5), v: 8.0 }], consumption: { perDay: 0.08, pairs: 3 } },
       { id: "calcium", label: "Calcium", unit: "ppm", tests: 1, sensorSamples: 0, latest: 430, daysSince: 4.6, range: { min: 400, max: 450 }, inRange: true, band: "single", change: null, latestIsFromPeriod: true, points: [{ t: day(2), v: 430 }], consumption: { perDay: null, pairs: 0 } },
-      { id: "salinity", label: "Salinity", unit: "ppt", tests: 0, sensorSamples: 0, latest: 35, daysSince: 47, range: { min: 33, max: 36 }, inRange: true, band: "untested", change: null, latestIsFromPeriod: false, points: [] },
+      { id: "salinity", label: "Salinity", unit: "ppt", tests: 0, sensorSamples: 0, latest: 35, daysSince: 47, latestSource: "sensor", disagree: { delta: -0.9, test: 35.9, sensor: 35 }, range: { min: 33, max: 36 }, inRange: true, band: "untested", change: null, latestIsFromPeriod: false, points: [] },
     ], untested: ["Salinity"], tested: ["Alkalinity", "Calcium"] },
     living: { hatches: { started: 3, harvested: 2, avgActualHours: 26, avgLateHours: 2, enriched: 1, byVessel: [{ id: "v1", name: "Hatchery 1", harvests: 1 }, { id: "v2", name: "Hatchery 2", harvests: 1 }] },
       cultures: { jars: [{ id: "j1", name: "Rotifers", feeds: 3, looks: 4, harvests: 1, skips: 0, signs: 1, restarts: 0, crashed: 0, harvestMl: 300, signList: ["foam"] }], feeds: 3, looks: 4, harvests: 1, skips: 0, signs: 1, restarts: 0, crashed: 0 },
@@ -157,6 +157,8 @@ test("test_dialog_renders_every_section_and_links_rows_to_tasks", async () => {
   assert(html.includes("0.08 dKH/day") && html.includes("needs 2 more falling pairs"), "consumption estimate and its honesty");
   assert(html.includes(">drifting<") && html.includes(">one reading<") && html.includes(">not tested<") && html.includes(">in range<"));
   assert(html.includes("Not tested this period: Salinity."));
+  assert(html.includes("your test · 2 d before the end") && html.includes("the sensor · 47 d old — not this period"), "every latest figure names where it came from");
+  assert(html.includes("sensor -0.90 ppt off your test"), "the probe against the kit");
   assert((html.match(/<polyline class="report-spark-line"/g) || []).length === 2, "score line + alkalinity line; one point draws no line");
   assert(html.includes("Rotifers") && html.includes("1 sign") && html.includes("Acro: 80 → 62"));
   assert(html.includes("Return pump off") && html.includes("Already due") && html.includes("Tuesday"));

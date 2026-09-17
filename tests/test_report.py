@@ -217,6 +217,7 @@ def test_ws_compile_runs_on_an_empty_and_a_busy_config():
         "reports": {"weekStart": 0, "scoreLog": [{"date": inside.date().isoformat(), "at": inside.isoformat(), "total": 81, "parts": {"chemistry": 90}}],
                     "events": [{"at": inside.isoformat(), "message": "Skimmer off", "type": "control"}]},
     }})
+    busy.options[CONF_SETTINGS]["sensors"] = {"ph": {"entity_id": "sensor.ph", "enabled": True}}
     hass = FakeHass(entries=[busy])
     conn = FakeConnection()
     run(integration.websocket_report_compile(hass, conn, {"id": 2, "readings": {"ph": [{"t": inside.isoformat(), "v": 8.1}]}}))
@@ -288,7 +289,7 @@ def test_recommendations_are_evidence_backed_capped_and_snoozable():
     # Priority order: out of range (12), swinging (15), a coral dropping (18); the culture sign (20) waits its turn.
     assert ids == ["range_nitrate", "steady_nitrate", "coral_c1"], ids
     rec = recs["items"][0]
-    assert rec["evidence"] == "Latest 22.0 ppm; the range is 2–15 ppm." and rec["actions"] == [{"action": "tab", "id": "manual", "label": "Log a test"}]
+    assert rec["evidence"] == "Latest 22.0 ppm from your test on 10 Sep; the range is 2–15 ppm." and rec["actions"] == [{"action": "tab", "id": "manual", "label": "Log a test"}]
     assert "effort" in rec and "effect" in rec and "priority" not in rec
     # The full rule set fires beyond the cap; snoozing lifts the next ones in.
     later = (NOW + timedelta(days=20)).isoformat()
@@ -417,6 +418,61 @@ def test_ws_list_generate_and_anchor():
     assert conn.results[-1].payload["period"]["start"].startswith("2026-06-08") and conn.results[-1].payload["stored"] is None
     run(integration.websocket_report_compile(hass, conn, {"id": 6, "anchor": "yesterday"}))
     assert conn.errors[-1].code == "invalid_anchor"
+
+
+def test_water_names_its_source_and_a_probe_the_kit_contradicts_is_checked_not_chased():
+    """Reece's tank, 2026-09-17: "Bring salinity back into range — latest
+    25.312 ppt" from a probe nobody had enabled. The engine now names where a
+    figure came from, and a sensor far outside its band (or one the kit
+    contradicts) asks for the probe to be checked, not the tank."""
+    meta = {"salinity": {"label": "Salinity", "unit": "ppt", "min": 32, "max": 36}}
+    manual = {"salinity": [{"timestamp": _at(1, 9), "value": 34.6}]}
+    sensors = {"salinity": [{"t": _at(1, 11), "v": 25.312}, {"t": _at(5, 9), "v": 25.31}]}
+    water = report.water_section(manual, sensors, meta, START, END)
+    by_id = lambda w: next(p for p in w["parameters"] if p["id"] == "salinity")  # noqa: E731
+    sal = by_id(water)
+    assert sal["latest"] == 25.31 and sal["latestSource"] == "sensor" and sal["inRange"] is False
+    assert sal["latestTest"]["value"] == 34.6 and sal["latestSensor"]["value"] == 25.31
+    assert sal["farOut"] is True, "more than a band-width outside 32–36"
+    assert sal["disagree"]["delta"] == -9.288 and sal["disagree"]["test"] == 34.6 and sal["disagree"]["sensor"] == 25.312
+    recs = report.recommend({"water": water, "did": {}, "living": {}, "happened": {}, "headline": {}, "period": {"days": 7}}, {}, NOW)
+    ids = [r["id"] for r in recs["items"]]
+    assert "check_salinity" in ids and "range_salinity" not in ids, ids
+    check = next(r for r in recs["items"] if r["id"] == "check_salinity")
+    assert check["evidence"] == ("The sensor read 25.31 ppt on 12 Sep, far outside 32–36 ppt; your test on 8 Sep said 34.6 ppt. "
+                                 "A probe or a unit problem is likelier than the tank."), check["evidence"]
+    assert check["actions"][0]["id"] == "settings"
+    # The keeper's own test out of range is the tank's to fix — and says it was a test.
+    water2 = report.water_section({"salinity": [{"timestamp": _at(2), "value": 30.5}]}, {}, meta, START, END)
+    recs2 = report.recommend({"water": water2, "did": {}, "living": {}, "happened": {}, "headline": {}, "period": {"days": 7}}, {}, NOW)
+    rng = next(r for r in recs2["items"] if r["id"] == "range_salinity")
+    assert rng["evidence"] == "Latest 30.5 ppt from your test on 9 Sep; the range is 32–36 ppt."
+    assert by_id(water2)["latestSource"] == "test" and by_id(water2)["disagree"] is None
+    # A probe within twice the tolerance of the kit is not a disagreement.
+    water3 = report.water_section(manual, {"salinity": [{"t": _at(1, 12), "v": 35.2}]}, meta, START, END)
+    assert by_id(water3)["disagree"] is None and by_id(water3)["farOut"] is False
+    snap = report.snapshot(report.compile_period({"period": WEEK, "now": NOW, "manualReadings": manual, "sensorReadings": sensors, "paramMeta": meta}))
+    assert next(w for w in snap["water"] if w["id"] == "salinity")["source"] == "sensor"
+
+
+def test_report_reads_only_enabled_sensors_and_the_keepers_band():
+    cfg = integration._normalise_core_config({"sensors": {
+        "salinity": {"entity_id": "sensor.old_probe", "enabled": False, "min": 1.024, "max": 1.027},
+        "alkalinity": {"entity_id": "sensor.trident_alk", "enabled": True, "min": 7.8, "max": 8.6, "label": "Alk (Trident)"},
+    }})
+    meta = integration._report_param_meta(cfg)
+    assert meta["salinity"] == {"label": "Salinity", "unit": "ppt", "min": 31.82, "max": 35.8, "sensor": False, "entity": ""}, meta["salinity"]
+    assert meta["alkalinity"]["min"] == 7.8 and meta["alkalinity"]["label"] == "Alk (Trident)" and meta["alkalinity"]["entity"] == "sensor.trident_alk"
+    assert meta["calcium"]["min"] == 380 and meta["calcium"]["sensor"] is False, "defaults behind an unmapped one"
+    readings = {"salinity": [{"t": _at(1), "v": 25.312}], "alkalinity": [{"t": _at(1), "v": 8.2}, {"t": _at(2), "v": "junk"}, {"t": _at(3), "value": 8.1}],
+                "calcium": [{"t": _at(1), "v": 420}]}
+    clean = integration._report_clean_readings(cfg, readings)
+    assert set(clean) == {"alkalinity"}, "a disabled probe and an unmapped one feed nothing"
+    assert [r["v"] for r in clean["alkalinity"]] == [8.2, 8.1]
+    cfg["sensors"]["salinity"]["enabled"] = True
+    assert [r["v"] for r in integration._report_clean_readings(cfg, {"salinity": [{"t": _at(1), "v": 1.0264}]})["salinity"]] == [35.0], "an SG probe reads in ppt"
+    ctx = integration._report_context(cfg, NOW, NOW, WEEK, readings)
+    assert set(ctx["sensorReadings"]) == {"alkalinity", "salinity"} and ctx["paramMeta"]["salinity"]["unit"] == "ppt"
 
 if __name__ == "__main__":
     failures = 0

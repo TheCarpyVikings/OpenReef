@@ -86,6 +86,16 @@ def _in(at: datetime | None, start: datetime, end: datetime) -> bool:
     return at is not None and start <= at < end
 
 
+def _day_text(value: Any) -> str:
+    """"16 Sep" — the day a figure came from, for the copy that names it."""
+    at = _parse(value)
+    return f"{at.day} {at.strftime('%b')}" if at else ""
+
+
+def _source_text(source: Any, label: str = "") -> str:
+    return "the sensor" if source == "sensor" else "your test"
+
+
 # --- the window ---------------------------------------------------------------
 
 def period_bounds(now_local: datetime, week_start: int = 0, kind: str = "week",
@@ -253,6 +263,8 @@ def water_section(manual: Any, sensors: Any, meta: Any, start: datetime, end: da
         window = [r for r in rows if _in(r[0], trend_start, end)]
         latest = rows[-1] if rows else None
         latest_before_end = next((r for r in reversed(rows) if r[0] < end), None)
+        last_test = next((r for r in reversed(rows) if r[0] < end and r[2] == "test"), None)
+        last_sensor = next((r for r in reversed(rows) if r[0] < end and r[2] == "sensor"), None)
         lo = info.get("min")
         hi = info.get("max")
         entry: dict[str, Any] = {
@@ -262,6 +274,12 @@ def water_section(manual: Any, sensors: Any, meta: Any, start: datetime, end: da
             "sensorSamples": len([r for r in in_period if r[2] == "sensor"]),
             "latest": _round(latest_before_end[1], 3) if latest_before_end else None,
             "latestAt": latest_before_end[0].isoformat() if latest_before_end else None,
+            # Where the latest figure came from — the copy names it, so a probe
+            # reading 25 ppt is never mistaken for a refractometer's.
+            "latestSource": latest_before_end[2] if latest_before_end else None,
+            "latestTest": {"value": _round(last_test[1], 3), "at": last_test[0].isoformat()} if last_test else None,
+            "latestSensor": {"value": _round(last_sensor[1], 3), "at": last_sensor[0].isoformat()} if last_sensor else None,
+            "disagree": None, "farOut": False,
             "daysSince": _round((end - latest_before_end[0]).total_seconds() / 86400.0, 1) if latest_before_end else None,
             "range": {"min": lo, "max": hi} if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) else None,
             "inRange": None, "band": "untested", "change": None, "low": None, "high": None,
@@ -269,6 +287,19 @@ def water_section(manual: Any, sensors: Any, meta: Any, start: datetime, end: da
         }
         if latest_before_end and entry["range"]:
             entry["inRange"] = bool(lo <= latest_before_end[1] <= hi)
+            width = max(0.0, float(hi) - float(lo))
+            entry["farOut"] = bool(latest_before_end[1] < lo - width or latest_before_end[1] > hi + width)
+        # The probe against the kit: the sensor sample nearest the latest test
+        # (within a day), apart by more than twice the steady tolerance.
+        if last_test and last_test[0] >= trend_start:
+            tol = STEADY_TOLERANCE.get(param, 0.0)
+            near = [r for r in rows if r[2] == "sensor" and abs((r[0] - last_test[0]).total_seconds()) <= 86400]
+            if tol and near:
+                nearest = min(near, key=lambda r: abs((r[0] - last_test[0]).total_seconds()))
+                gap = nearest[1] - last_test[1]
+                if abs(gap) > 2 * tol:
+                    entry["disagree"] = {"delta": _round(gap, 3), "test": _round(last_test[1], 3),
+                                         "sensor": _round(nearest[1], 3), "at": last_test[0].isoformat()}
         values = [r[1] for r in window]
         if not in_period:
             entry["band"] = "untested"
@@ -660,9 +691,25 @@ def recommend(report: dict[str, Any], snoozed: Any = None, now: datetime | None 
                              "15 min", "Stability is what the corals feel; the chemistry part of the score follows.", manual_tab))
         if prm.get("inRange") is False and prm.get("latestIsFromPeriod"):
             rng = prm.get("range") or {}
-            recs.append(_rec(f"range_{pid}", 12, f"Bring {label.lower()} back into range",
-                             f"Latest {prm.get('latest')} {unit}; the range is {rng.get('min')}–{rng.get('max')} {unit}.".strip(),
-                             "15 min", "Back inside the band the tank was set up for.", manual_tab))
+            band = f"{rng.get('min')}–{rng.get('max')} {unit}".strip()
+            when = _day_text(prm.get("latestAt"))
+            dis = prm.get("disagree")
+            if prm.get("latestSource") == "sensor" and (prm.get("farOut") or dis):
+                # A probe far outside its band, or one the kit contradicts, is
+                # a probe (or a unit) to check — never a tank to chase.
+                said = (f"; your test on {_day_text(dis.get('at'))} said {dis.get('test')} {unit}".rstrip()
+                        if dis else "")
+                recs.append(_rec(f"check_{pid}", 11, f"Check the {label.lower()} reading",
+                                 f"The sensor read {prm.get('latest')} {unit} on {when}, "
+                                 f"{'far outside' if prm.get('farOut') else 'outside'} {band}{said}. "
+                                 "A probe or a unit problem is likelier than the tank.",
+                                 "5 min", "Nothing gets chased that was never wrong.",
+                                 [{"action": "tab", "id": "settings", "label": "Check the sensor"}]))
+            else:
+                recs.append(_rec(f"range_{pid}", 12, f"Bring {label.lower()} back into range",
+                                 f"Latest {prm.get('latest')} {unit} from {_source_text(prm.get('latestSource'))}"
+                                 f"{' on ' + when if when else ''}; the range is {band}.",
+                                 "15 min", "Back inside the band the tank was set up for.", manual_tab))
     for task in m.get("tasks") or []:
         if not task.get("tracked"):
             continue
@@ -739,8 +786,9 @@ def snapshot(report: dict[str, Any]) -> dict[str, Any]:
                 "waterChangedL": m.get("waterChangedL"), "awcRuns": (did.get("awc") or {}).get("runs", 0),
                 "tests": (did.get("tests") or {}).get("count", 0), "feeds": (did.get("feeds") or {}).get("count", 0),
                 "hatches": did.get("hatches", 0), "cultureFeeds": did.get("cultureFeeds", 0), "coralCheckins": did.get("coralCheckins", 0)},
-        "water": [{"id": prm.get("id"), "latest": prm.get("latest"), "band": prm.get("band"), "inRange": prm.get("inRange"),
-                   "consumption": (prm.get("consumption") or {}).get("perDay")} for prm in (report.get("water") or {}).get("parameters") or []],
+        "water": [{"id": prm.get("id"), "latest": prm.get("latest"), "source": prm.get("latestSource"), "band": prm.get("band"),
+                   "inRange": prm.get("inRange"), "consumption": (prm.get("consumption") or {}).get("perDay")}
+                  for prm in (report.get("water") or {}).get("parameters") or []],
         "recommendations": [{"id": r.get("id"), "title": r.get("title")} for r in (report.get("recommendations") or {}).get("items") or []],
         "warnings": int(((report.get("happened") or {}).get("byType") or {}).get("warning") or 0),
         "nextCount": int((report.get("next") or {}).get("count") or 0),

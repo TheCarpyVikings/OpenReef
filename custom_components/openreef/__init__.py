@@ -16888,13 +16888,68 @@ def _nps_feed_log_for(config: dict[str, Any], now_local: datetime, days: int) ->
         days=days, quiet_product_ids=quiet, culture_bottle_species=bottle_species)
 
 
-def _report_param_meta() -> dict[str, dict[str, Any]]:
+def _report_sensor_on(config: dict[str, Any], param: str) -> bool:
+    """The panel's rule, mirrored: a sensor feeds anything only when it is
+    enabled AND mapped (Settings → Sensors). A disabled probe left mapped is
+    invisible to Reef Health and must be invisible to the report."""
+    sensors = config.get("sensors") if isinstance(config.get("sensors"), dict) else {}
+    sensor = sensors.get(param) if isinstance(sensors.get(param), dict) else {}
+    return bool(sensor.get("enabled")) and bool(sensor.get("entity_id"))
+
+
+def _report_param_meta(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Label, unit and the KEEPER'S band per parameter (Settings → Sensors),
+    the MVP defaults behind them. Salinity is always ppt — an SG-magnitude
+    band converts the way the AWC's salt ledger does — and each entry says
+    whether a live sensor feeds it."""
+    sensors = config.get("sensors") if isinstance(config.get("sensors"), dict) else {}
     meta: dict[str, dict[str, Any]] = {}
     for param in MANUAL_TEST_PARAMETERS:
-        sensor = MVP_SENSORS.get(param) or {}
-        meta[param] = {"label": sensor.get("label") or param, "unit": sensor.get("unit") or "",
-                       "min": sensor.get("min"), "max": sensor.get("max")}
+        default = MVP_SENSORS.get(param) or {}
+        sensor = sensors.get(param) if isinstance(sensors.get(param), dict) else {}
+        band: list[float | None] = []
+        for key in ("min", "max"):
+            value = sensor.get(key, default.get(key))
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                number = None
+            if number is not None and param == "salinity" and salinity_value_looks_like_sg(number):
+                number = round(salinity_sg_to_ppt(number), 2)
+            band.append(number)
+        unit = "ppt" if param == "salinity" else str(sensor.get("unit") or default.get("unit") or "")
+        meta[param] = {"label": str(sensor.get("label") or default.get("label") or param), "unit": unit,
+                       "min": band[0], "max": band[1], "sensor": _report_sensor_on(config, param),
+                       "entity": str(sensor.get("entity_id") or "") if _report_sensor_on(config, param) else ""}
     return meta
+
+
+def _report_clean_readings(config: dict[str, Any], readings: Any) -> dict[str, list[dict[str, Any]]]:
+    """Sensor rows the report may read: only ENABLED, mapped sensors (from
+    the recorder or handed in by the panel — the same rule either way), and
+    a salinity probe that reports specific gravity read in ppt. Found on
+    Reece's tank 2026-09-17: a disabled salinity entity fed "25.312 ppt" to
+    the report with confidence."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for param, rows in (readings if isinstance(readings, dict) else {}).items():
+        if not _report_sensor_on(config, str(param)) or not isinstance(rows, list):
+            continue
+        clean: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                value = float(row.get("v") if "v" in row else row.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if value != value:
+                continue
+            if param == "salinity" and salinity_value_looks_like_sg(value):
+                value = round(salinity_sg_to_ppt(value), 3)
+            clean.append({"t": row.get("t") or row.get("timestamp"), "v": value})
+        if clean:
+            out[str(param)] = clean
+    return out
 
 
 def _report_context(config: dict[str, Any], now_utc: datetime, now_local: datetime,
@@ -16931,8 +16986,8 @@ def _report_context(config: dict[str, Any], now_utc: datetime, now_local: dateti
     return {
         "period": period, "now": now_utc, "tankL": _awc_effective_tank_l(config),
         "tasks": maintenance.get("tasks"), "completions": maintenance.get("completions"),
-        "manualReadings": config.get("manualReadings"), "sensorReadings": sensor_readings,
-        "paramMeta": _report_param_meta(),
+        "manualReadings": config.get("manualReadings"), "sensorReadings": _report_clean_readings(config, sensor_readings),
+        "paramMeta": _report_param_meta(config),
         "awcHistory": (_awc_cfg(config) or {}).get("history"),
         "feedLog": feed_log,
         "hatchHistory": hatchery_cfg.get("history"), "hatchVessels": hatchery_cfg.get("vessels"),
@@ -16959,7 +17014,7 @@ async def _report_recorder_readings(hass: Any, config: dict[str, Any], params: t
         return out
     for param in params:
         entity_id = str((sensors.get(param) or {}).get("entity_id") or "")
-        if not entity_id:
+        if not entity_id or not _report_sensor_on(config, param):
             continue
         try:
             states = await get_instance(hass).async_add_executor_job(

@@ -258,6 +258,13 @@ shareable (the livestream and Discord audience will want the PNG).
 - **Push** (decision 4): `report.push_text` — the headline block (score with condition · consistency, Reef Health average and its move, the verdict, the counts, the top recommendation, where to read it) to the reminders' push target, its own message the morning it is written. Push off → `_report_digest_line` puts one line in that day's maintenance digest.
 - **Ledger hygiene** (found on Reece's tank the same night): the ATO duty cycle said "skipped unavailable ATO" every tick after a restart — the warning saved the config, the save re-armed the scheduler, re-arming ran the handler at once — 397 of the ledger's 400 rows. Now said once per window and state, persisted only when something changed; and the event ledger counts a repeated line up (`count`, `lastAt`, 6 h window) instead of adding rows, with a one-shot collapse of an existing flood on load.
 
+### 8.5a Honest figures (0.7.202, 2026-09-17)
+
+- Reece's report said "Bring salinity back into range — latest 25.312 ppt" with confidence. The figure was a salinity entity left mapped under Settings → Sensors while the sensor was **disabled**: Reef Health ignores a disabled sensor, the recorder read did not, and the copy never said where the number came from.
+- Now: the report reads a sensor only when it is enabled AND mapped (`_report_sensor_on`, the panel's rule mirrored, applied to the recorder read and to readings the panel hands in alike); a salinity probe reporting specific gravity is read in ppt; the band is the **keeper's** min/max from Settings → Sensors (MVP defaults behind it, SG bands converted), not the defaults.
+- Every "latest" figure carries its source (`latestSource` test|sensor) and the copy names it ("from your test on 9 Sep"). `latestTest` / `latestSensor` sit beside it; `disagree` = the sensor sample nearest the latest test (within a day) more than twice the steady tolerance away; `farOut` = more than one band-width outside the band.
+- Recommendation: a sensor reading that is far out, or that the kit contradicts, yields **"Check the salinity reading"** (probe or unit) instead of "Bring salinity back into range" — a probe is never chased as if it were the tank.
+
 ## 8.6 Still open
 
 - Report landing time: Monday 07:00 local assumed (a Settings field alongside weekStart in Stage E).
