@@ -11117,7 +11117,91 @@ async def websocket_report_compile(
     report["readingsSource"] = "panel" if msg.get("readings") else ("recorder" if readings else "tests")
     stored_id = f"{period['kind']}:{period['start'].date().isoformat()}"
     report["stored"] = next((r for r in _report_items(config) if r.get("id") == stored_id), None)
+    report["markdown"] = report_engine.markdown(report)
     connection.send_result(msg["id"], report)
+
+
+def _report_share_target(config: dict[str, Any]) -> str:
+    """Where a shared report goes: the maintenance reminders' push target —
+    a Telegram bot, the companion app, whatever the keeper set."""
+    return str(((config.get("maintenance") or {}).get("reminders") or {}).get("notifyTarget") or "").strip()
+
+
+async def _async_report_share(hass: HomeAssistant, report: dict[str, Any], target: str) -> int:
+    """The whole report as plain text to one notify target, in chunks under
+    Telegram's message limit, in order (blocking so they land in order). A
+    Telegram target is asked for plain text so nothing is parsed as markup;
+    a target that refuses the data block gets the message plain."""
+    title, _push = report_engine.push_text(report)
+    chunks = report_engine.share_chunks(report_engine.plain_text(report))
+    telegram = "telegram" in target.lower()
+    for index, chunk in enumerate(chunks):
+        heading = title if len(chunks) == 1 else f"{title} ({index + 1}/{len(chunks)})"
+        payload: dict[str, Any] = {"title": heading, "message": chunk}
+        if telegram:
+            payload["data"] = {"parse_mode": "plain_text"}
+        try:
+            await hass.services.async_call("notify", target, payload, blocking=True)
+        except Exception as err:  # noqa: BLE001 - a picky target must not lose the report
+            _LOGGER.debug("Report share refused by %s (%s) — sending it plain", target, err)
+            await hass.services.async_call("notify", target, {"title": heading, "message": chunk}, blocking=True)
+    return len(chunks)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/report_share",
+    vol.Optional("period"): cv.string,
+    vol.Optional("which"): cv.string,
+    vol.Optional("anchor"): cv.string,
+    vol.Optional("readings"): dict,
+    vol.Optional("target"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_report_share(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Send the report (Stage G): compiled the way the viewer saw it — the
+    panel's readings ride along — rendered plain and sent to the push
+    target (or the one named) in ordered chunks; logged on the activity."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    target = str(msg.get("target") or "").strip() or _report_share_target(config)
+    if not target:
+        connection.send_error(msg["id"], "no_target", "Set a push target under Maintenance reminders first")
+        return
+    now_utc = datetime.now(timezone.utc)
+    now_local = dt_util.as_local(now_utc)
+    if not isinstance(now_local, datetime):
+        now_local = now_utc
+    anchor_date = None
+    if msg.get("anchor"):
+        try:
+            anchor_date = date.fromisoformat(str(msg["anchor"])[:10])
+        except ValueError:
+            connection.send_error(msg["id"], "invalid_anchor", "anchor must be YYYY-MM-DD")
+            return
+    period = report_engine.period_bounds(
+        now_local, (config.get("reports") or {}).get("weekStart", 0),
+        str(msg.get("period") or "week"), str(msg.get("which") or "previous"), anchor=anchor_date)
+    readings = msg.get("readings") if isinstance(msg.get("readings"), dict) else {}
+    if not readings:
+        readings = await _report_recorder_readings(
+            hass, config, tuple(MANUAL_TEST_PARAMETERS),
+            period["start"] - timedelta(days=report_engine.lookback_days(period["kind"])), period["end"])
+    report = report_engine.compile_period(_report_context(config, now_utc, now_local, period, readings))
+    try:
+        chunks = await _async_report_share(hass, report, target)
+    except Exception as err:  # noqa: BLE001
+        connection.send_error(msg["id"], "share_failed", f"Could not send to {target}: {err}")
+        return
+    label = "Monthly" if period["kind"] == "month" else "Weekly"
+    _append_activity(config, f"{label} Reef Report shared to {target} — {period['label']}", "info", kind="report")
+    _persist_entry_config(hass, entry, config)
+    connection.send_result(msg["id"], {"success": True, "target": target, "chunks": chunks, "period": period["label"]})
 
 
 @websocket_api.websocket_command({
@@ -23976,6 +24060,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_report_rec_snooze)
     websocket_api.async_register_command(hass, websocket_report_list)
     websocket_api.async_register_command(hass, websocket_report_generate)
+    websocket_api.async_register_command(hass, websocket_report_share)
     websocket_api.async_register_command(hass, websocket_report_events)
     websocket_api.async_register_command(hass, websocket_coral_status)
     websocket_api.async_register_command(hass, websocket_search_entities)

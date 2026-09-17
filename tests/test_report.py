@@ -652,6 +652,83 @@ def test_ws_month_compile_reads_the_ledgers_and_the_push_says_the_move():
     title, text = report.push_text(out)
     assert title.startswith("OpenReef Monthly Reef Report") and "on last month" in text.splitlines()[0]
 
+
+# --- Stage G: share ---------------------------------------------------------------
+
+def test_markdown_and_plain_text_render_every_section_and_chunk_cleanly():
+    out = _busy_report()
+    md = report.markdown(out)
+    assert md.startswith("# Weekly Reef Report · 7–13 September 2026\n\n")
+    assert "Week Score " in md and "Reef Health average 75/100 · stamped on 1 of 7 days" in md
+    assert "## Recommendations · small" in md and "- Bring nitrate back into range — Latest 22.0 ppm from your test on 10 Sep; the range is 2–15 ppm. (15 min · Back inside the band the tank was set up for.)" in md
+    assert "## What you did" in md and "| Water change | 1 |" in md
+    assert "| Nitrate | 22 ppm (test, 10 Sep) | swinging | OUT OF RANGE |" in md
+    assert "## Living reef" in md and "Rotifers: 1 feeds, 0 looks, 0 harvests, 1 sign" in md and "Acro: 80 → 62" in md
+    assert "## What happened" in md and "- 10 Sep · Heater interlock" in md
+    assert "## Next week" in md and "## Notes" in md
+    plain = report.plain_text(out)
+    assert plain.startswith("WEEKLY REEF REPORT · 7–13 SEPTEMBER 2026\n\n") and "WHAT YOU DID" in plain and "|" not in plain and "#" not in plain
+    assert "Parameter · Latest · Stability · Range · Consumption" in plain and "Nitrate · 22 ppm (test, 10 Sep) · swinging · OUT OF RANGE" in plain
+    month = report.compile_period(_month_ctx())
+    md_m = report.markdown(month)
+    for heading in ("# Monthly Reef Report · August 2026", "## Recommendations · big", "## Last month's plan", "## Score over months", "## Cadence drift",
+                    "## Consumption trend", "## Water ledger", "## Testing discipline", "## ICP", "## Equipment ageing", "## The next two weeks"):
+        assert heading in md_m, heading
+    assert "- Order salt (third month running) — About 5.5 weeks of salt left" in md_m
+    assert "| June 2026 | 58 | 50 | 64 | 80 |" in md_m and "Streaks held: Clean glass (10), Water change (4)" in md_m
+    assert "| Alkalinity (dKH/day) | 0.175 | 0.15 | 0.2 | level (+14 %) |" in md_m
+    assert "Against the AWC plan: 62 L planned — 22 L short" in md_m and "Salt: 2.5 used, 3.2 kg on hand, about 6 weeks at your rate." in md_m
+    assert "| Iodine | 60 ppb ok | 40 ppb ok | -33 % |" in md_m and "| Replace carbon | 73 d | 30 d | overdue |" in md_m
+    assert "Test alkalinity this week — cleared" in md_m and "Order salt — still open" in md_m
+    chunks = report.share_chunks(plain, 600)
+    assert len(chunks) > 1 and all(len(c) <= 600 for c in chunks) and "".join(chunks).count("WHAT YOU DID") == 1
+    assert all(not c.startswith("\n") and not c.endswith("\n") for c in chunks), "chunks are trimmed"
+    assert report.share_chunks("short", 500) == ["short"]
+    long_para = "\n".join(f"line {i} " + "x" * 80 for i in range(40))
+    assert all(len(c) <= 1000 for c in report.share_chunks(long_para, 1000)) and all("\nline" in c or c.startswith("line") for c in report.share_chunks(long_para, 1000)), "a paragraph over the limit splits at line ends"
+
+
+def test_ws_report_share_sends_ordered_chunks_to_the_push_target_and_logs_it():
+    now = datetime.now(timezone.utc)
+    week = report.period_bounds(now, 0, "week", "previous")
+    inside = week["start"] + timedelta(days=1, hours=9)
+    entry = FakeEntry(options={CONF_SETTINGS: {
+        "maintenance": {"enabled": True, "tasks": {"water": {"label": "Water change", "cadenceDays": 7, "criticalAfterDays": 14, "enabled": True, "scheduleMode": "interval", "logsVolume": True}},
+                        "completions": {"water": [{"id": "a", "timestamp": inside.isoformat(), "volume": 12, "volumeUnit": "L"}]},
+                        "reminders": {"enabled": True, "time": "09:00", "notifyTarget": "telegram_reef", "persistent": True}},
+        "sensors": {"ph": {"entity_id": "sensor.ph", "enabled": True}},
+    }})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_report_compile(hass, conn, {"id": 1}))
+    assert conn.results[-1].payload["markdown"].startswith("# Weekly Reef Report"), "the compile carries the Markdown for Copy"
+    run(integration.websocket_report_share(hass, conn, {"id": 2, "readings": {"ph": [{"t": inside.isoformat(), "v": 8.1}]}}))
+    assert not conn.errors, conn.errors
+    res = conn.results[-1].payload
+    assert res["target"] == "telegram_reef" and res["chunks"] >= 1 and res["period"] == week["label"]
+    sends = [c for c in hass.services.calls if c.domain == "notify"]
+    assert len(sends) == res["chunks"] and all(c.service == "telegram_reef" for c in sends)
+    assert sends[0].data["title"].startswith("OpenReef Weekly Reef Report") and sends[0].data["data"] == {"parse_mode": "plain_text"}
+    assert all(c.kwargs.get("blocking") is True for c in sends), "in order"
+    text = "\n".join(c.data["message"] for c in sends)
+    assert "WHAT YOU DID" in text and "12 L" in text and "pH" in text, text[:400]
+    assert "#" not in text and "|" not in text, "plain, never markup"
+    saved = entry.options[CONF_SETTINGS]
+    assert saved["activity"][0]["message"].startswith("Weekly Reef Report shared to telegram_reef") and saved["reports"]["events"][0]["kind"] == "report"
+    # A companion-app target gets no parse mode; no target at all is refused, not guessed.
+    # (Every share persists a fresh config dict — re-read the entry before touching it.)
+    entry.options[CONF_SETTINGS]["maintenance"]["reminders"]["notifyTarget"] = "mobile_app_pixel"
+    run(integration.websocket_report_share(hass, conn, {"id": 3, "period": "month", "which": "current"}))
+    assert "data" not in [c for c in hass.services.calls if c.domain == "notify"][-1].data
+    assert conn.results[-1].payload["target"] == "mobile_app_pixel"
+    run(integration.websocket_report_share(hass, conn, {"id": 4, "target": "telegram_other"}))
+    assert [c for c in hass.services.calls if c.domain == "notify"][-1].service == "telegram_other", "a named target wins"
+    entry.options[CONF_SETTINGS]["maintenance"]["reminders"]["notifyTarget"] = ""
+    run(integration.websocket_report_share(hass, conn, {"id": 5}))
+    assert conn.errors[-1].code == "no_target"
+    run(integration.websocket_report_share(hass, conn, {"id": 6, "target": "x", "anchor": "nope"}))
+    assert conn.errors[-1].code == "invalid_anchor"
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -1396,3 +1396,288 @@ def compile_period(ctx: dict[str, Any]) -> dict[str, Any]:
     else:
         report["recommendations"] = recommend(report, ctx.get("snoozedRecs"), now)
     return report
+
+
+# --- Share (Stage G, brief §7 G) -------------------------------------------------
+# One rendition of the report as text — the panel copies it as Markdown, the
+# backend sends it plain to a notify target (Telegram, the companion app) in
+# chunks under Telegram's message limit. Built from the compiled report only,
+# so the shared text and the viewer never disagree.
+
+SHARE_CHUNK_LIMIT = 3800
+BAND_WORDS = {"steady": "steady", "drifting": "drifting", "swinging": "swinging", "single": "one reading", "untested": "not tested"}
+
+
+def _fmt(value: Any, digits: int = 1) -> str:
+    if value is None or isinstance(value, bool):
+        return "—"
+    if isinstance(value, (int, float)):
+        number = round(float(value), digits)
+        return f"{int(number)}" if number.is_integer() else f"{number:g}"
+    return str(value)
+
+
+def _delta_words(delta: Any, against: str) -> str:
+    if not isinstance(delta, (int, float)) or isinstance(delta, bool):
+        return ""
+    if delta == 0:
+        return f"level with {against}"
+    return f"{'up' if delta > 0 else 'down'} {abs(int(round(delta)))} on {against}"
+
+
+def text_blocks(report: dict[str, Any]) -> list[tuple]:
+    """The report as blocks: ("title", text), ("h", text), ("lines", [..]),
+    ("ul", [..]), ("table", [headers], [[cells]..]). Every section the
+    viewer shows, in its order, with nothing the ledgers did not say."""
+    period = report.get("period") or {}
+    month = period.get("kind") == "month"
+    kind = "Monthly" if month else "Weekly"
+    ws = report.get("score") or {}
+    hs = (report.get("headline") or {}).get("score") or {}
+    did = report.get("did") or {}
+    m = did.get("maintenance") or {}
+    awc = did.get("awc") or {}
+    tests = did.get("tests") or {}
+    feeds = did.get("feeds") or {}
+    blocks: list[tuple] = [("title", f"{kind} Reef Report · {period.get('label', '')}".strip() + (" (in progress)" if period.get("partial") else ""))]
+    head: list[str] = []
+    if ws.get("total") is not None:
+        line = f"{'Month' if month else 'Week'} Score {ws['total']}/100"
+        if ws.get("condition") is not None and ws.get("consistency") is not None:
+            line += f" (condition {ws['condition']} · consistency {ws['consistency']})"
+        trend_delta = ((report.get("month") or {}).get("trend") or {}).get("deltas", {}).get("total")
+        if month and isinstance(trend_delta, int):
+            line += f", {_delta_words(trend_delta, 'last month')}"
+        head.append(line)
+    if hs.get("average") is not None:
+        line = f"Reef Health average {int(hs['average'])}/100"
+        if hs.get("delta") is not None:
+            line += f", {_delta_words(hs['delta'], 'the period before')}"
+        line += f" · stamped on {hs.get('stamps', 0)} of {period.get('days', 7)} days"
+        head.append(line)
+    verdict = (report.get("headline") or {}).get("verdict")
+    if verdict:
+        head.append(str(verdict))
+    blocks.append(("lines", head))
+    recs = report.get("recommendations") or {}
+    items = recs.get("items") or []
+    if items:
+        calm = bool(recs.get("calm"))
+        blocks.append(("h", ("This month" if month else "This week") if calm else f"Recommendations · {recs.get('size') or 'small'}"))
+        blocks.append(("ul", [f"{r.get('title')}" + (" (third month running)" if r.get("promoted") else "")
+                              + f" — {r.get('evidence')}" + (f" ({r.get('effort')} · {r.get('effect')})" if r.get("effort") else "")
+                              for r in items]))
+    mn = report.get("month") if month and isinstance(report.get("month"), dict) else None
+    if mn:
+        goals = mn.get("goals") or {}
+        blocks.append(("h", "Last month's plan"))
+        if goals.get("items"):
+            blocks.append(("ul", [f"{g.get('title')} — {'cleared' if g.get('status') == 'cleared' else 'still open'}" for g in goals["items"]]))
+        else:
+            blocks.append(("lines", ["Nothing to check — last month asked for no change." if goals.get("from") else "No stored month before this one."]))
+        trend = mn.get("trend") or {}
+        months = trend.get("months") or []
+        if len(months) > 1:
+            blocks.append(("h", "Score over months"))
+            blocks.append(("table", ["Month", "Score", "Condition", "Consistency", "Reef Health"],
+                           [[str(x.get("label")), _fmt(x.get("total"), 0), _fmt(x.get("condition"), 0), _fmt(x.get("consistency"), 0), _fmt(x.get("health"), 0)] for x in months]))
+    blocks.append(("h", "What you did"))
+    lines = [f"{m.get('done', 0)} chores ticked off" + (f", {m['skipped']} skipped" if m.get("skipped") else "")
+             + (f", {int(m['onSchedule'])} % on time" if m.get("onSchedule") is not None else "")]
+    if m.get("waterChangedL"):
+        lines.append(f"Water changed {_fmt(m['waterChangedL'])} L ({_fmt(m.get('handL'))} L by hand, {_fmt(m.get('autoL'))} L auto"
+                     + (f", {_fmt(m['waterChangedPct'], 0)} % of the tank" if m.get("waterChangedPct") else "") + ")")
+    if awc.get("runs"):
+        lines.append(f"{awc['runs']} automatic change{'s' if awc['runs'] != 1 else ''}, {_fmt(awc.get('drainedL'))} L drained")
+    lines.append(f"{tests.get('count', 0)} test{'s' if tests.get('count', 0) != 1 else ''}" + (f": {', '.join(tests.get('parameters') or [])}" if tests.get("parameters") else ""))
+    if feeds.get("available"):
+        lines.append(f"{feeds.get('count', 0)} feeds ({feeds.get('hand', 0)} by hand, {feeds.get('pump', 0)} by pump)")
+    blocks.append(("lines", lines))
+    task_rows = [[str(t.get("label")), str(t.get("done", 0)), str(t.get("late") or ""), str(t.get("skipped") or ""),
+                  f"{_fmt(t['litres'])} L" if t.get("litres") else ""] for t in m.get("tasks") or []]
+    if task_rows:
+        blocks.append(("table", ["Task", "Done", "Late", "Skipped", "Water"], task_rows))
+    if mn:
+        drift = mn.get("drift") or {}
+        if drift.get("late") or drift.get("held"):
+            blocks.append(("h", "Cadence drift"))
+            if drift.get("late"):
+                blocks.append(("ul", [f"{t.get('label')}: {t.get('late')} of {t.get('timed') or t.get('done')} late"
+                                      + (f", {_fmt(t['slipDays'])} d past the cadence on average" if t.get("slipDays") is not None else "")
+                                      for t in drift["late"]]))
+            if drift.get("held"):
+                blocks.append(("lines", ["Streaks held: " + ", ".join(f"{h.get('label')} ({h.get('done')})" for h in drift["held"])]))
+    water = report.get("water") or {}
+    rows = []
+    for p in water.get("parameters") or []:
+        unit = str(p.get("unit") or "")
+        latest = "—"
+        if p.get("latest") is not None:
+            latest = f"{_fmt(p['latest'], 3)} {unit}".strip()
+            if p.get("latestAt"):
+                latest += f" ({'sensor' if p.get('latestSource') == 'sensor' else 'test'}, {_day_text(p.get('latestAt'))})"
+        rng = "" if p.get("inRange") is None else ("in range" if p["inRange"] else "OUT OF RANGE")
+        cons = p.get("consumption") or {}
+        cons_text = f"{_fmt(cons['perDay'], 3)} {unit}/day est." if cons.get("perDay") is not None else ""
+        rows.append([str(p.get("label")), latest, BAND_WORDS.get(str(p.get("band")), str(p.get("band") or "")), rng, cons_text])
+    if rows:
+        blocks.append(("h", "Water"))
+        blocks.append(("table", ["Parameter", "Latest", "Stability", "Range", "Consumption"], rows))
+    if water.get("untested"):
+        blocks.append(("lines", [f"Not tested this period: {', '.join(water['untested'])}."]))
+    if mn:
+        cons = (mn.get("consumption") or {}).get("parameters") or []
+        if any(any(b.get("perDay") is not None for b in p.get("months") or []) for p in cons):
+            blocks.append(("h", "Consumption trend"))
+            blocks.append(("table", ["Parameter", *[b.get("label") for b in (cons[0].get("months") or [])], "Change"],
+                           [[f"{p.get('label')} ({p.get('unit')}/day)", *[_fmt(b.get("perDay"), 3) for b in p.get("months") or []],
+                             (f"{p.get('direction')}" + (f" ({'+' if p['changePct'] > 0 else ''}{_fmt(p['changePct'], 0)} %)" if p.get("changePct") is not None else ""))]
+                            for p in cons]))
+        ledger = mn.get("water") or {}
+        blocks.append(("h", "Water ledger"))
+        wl = [f"{_fmt(ledger.get('changedL'))} L changed ({_fmt(ledger.get('handL'))} L by hand, {_fmt(ledger.get('autoL'))} L auto"
+              + (f", {_fmt(ledger['pctOfTank'], 0)} % of the tank" if ledger.get("pctOfTank") else "") + ")"]
+        if ledger.get("plannedL"):
+            wl.append(f"Against the AWC plan: {_fmt(ledger['plannedL'])} L planned — " + ("met" if ledger.get("met") else f"{_fmt(ledger.get('shortfallL'))} L short"))
+        elif ledger.get("usualL"):
+            wl.append(f"Your recent rate says {_fmt(ledger['usualL'])} L a month.")
+        salt = ledger.get("salt") or {}
+        if salt.get("tracked"):
+            wl.append(f"Salt: {_fmt(salt.get('usedKg'), 2) if salt.get('usedKg') else 'none'} used, {_fmt(salt.get('onHandKg'))} kg on hand"
+                      + (f", about {_fmt(salt['weeksLeft'], 0)} weeks at your rate" if salt.get("weeksLeft") is not None else "") + ".")
+        blocks.append(("lines", wl))
+        testing = mn.get("testing") or {}
+        if testing.get("parameters"):
+            blocks.append(("h", "Testing discipline"))
+            blocks.append(("table", ["Parameter", "Tests", "Longest gap", "Cadence"],
+                           [[str(p.get("label")), f"{p.get('tests')} of {p.get('expected')} (every {p.get('cadenceDays')} d)",
+                             f"{_fmt(p.get('longestGapDays'), 0)} d", "kept" if p.get("onCadence") else "slipped"] for p in testing["parameters"]]))
+            if testing.get("bestDay"):
+                blocks.append(("lines", [f"Your tests land on a {testing['bestDay']} ({_fmt(testing.get('bestDayShare'), 0)} % of them)."]))
+        icp = mn.get("icp") or {}
+        blocks.append(("h", "ICP"))
+        if not icp.get("any"):
+            blocks.append(("lines", ["No ICP reports imported yet."]))
+        elif not icp.get("inPeriod"):
+            latest = icp.get("latest") or {}
+            blocks.append(("lines", [f"No ICP this month — the last ({latest.get('lab')}, {latest.get('date')}) was {_fmt(icp.get('daysSinceLast'), 0)} days before the month's end."]))
+        else:
+            latest = icp.get("latest") or {}
+            prev = icp.get("previous")
+            blocks.append(("lines", [f"{latest.get('lab')} · {latest.get('date')} · {latest.get('elements')} elements · "
+                                     + (f"{latest.get('flaggedCount')} flagged: " + ", ".join(f"{f.get('name') or f.get('symbol')} {_fmt(f.get('value'), 3)} {f.get('unit') or ''} {f.get('status')}".strip() for f in latest.get("flagged") or []) if latest.get("flaggedCount") else "nothing flagged")
+                                     + (f" · against {prev.get('lab')} · {prev.get('date')}" if prev else " · no earlier ICP to compare")]))
+            if icp.get("movers"):
+                blocks.append(("table", ["Moved", "Before", "Now", "Change"],
+                               [[str(mv.get("name") or mv.get("symbol")), f"{_fmt(mv.get('from'), 3)} {mv.get('unit') or ''} {mv.get('statusFrom') or ''}".strip(),
+                                 f"{_fmt(mv.get('to'), 3)} {mv.get('unit') or ''} {mv.get('statusTo') or ''}".strip(),
+                                 f"{'+' if (mv.get('pct') or 0) > 0 else ''}{_fmt(mv.get('pct'), 0)} %" if mv.get("pct") is not None else "—"] for mv in icp["movers"]]))
+    living = report.get("living") or {}
+    h = living.get("hatches") or {}
+    c = living.get("cultures") or {}
+    co = living.get("corals") or {}
+    live_lines = []
+    if h.get("harvested") or h.get("started"):
+        live_lines.append(f"Hatchery: {h.get('harvested', 0)} harvest{'s' if h.get('harvested', 0) != 1 else ''}, {h.get('started', 0)} started"
+                          + (f", ~{_fmt(h['avgActualHours'], 0)} h a hatch" if h.get("avgActualHours") else "")
+                          + (f", {_fmt(h['avgLateHours'])} h past the clock on average" if (h.get("avgLateHours") or 0) > 0 else ""))
+    for jar in c.get("jars") or []:
+        live_lines.append(f"{jar.get('name')}: {jar.get('feeds', 0)} feeds, {jar.get('looks', 0)} looks, {jar.get('harvests', 0)} harvests"
+                          + (f", {jar['skips']} skipped" if jar.get("skips") else "") + (f", {jar['signs']} sign{'s' if jar['signs'] != 1 else ''}" if jar.get("signs") else "")
+                          + (", crashed" if jar.get("crashed") else "") + (", restarted" if jar.get("restarts") else ""))
+    if co.get("colonies"):
+        grades = ", ".join(f"{n} × {g}" for g, n in sorted((co.get("grades") or {}).items()))
+        live_lines.append(f"Corals: {co.get('checkins', 0)} looks, {co.get('feeds', 0)} target feeds across {co['colonies']} colon{'y' if co['colonies'] == 1 else 'ies'}"
+                          + (f"; grades {grades}" if grades else "") + (f"; new: {', '.join(a.get('name') for a in co['added'])}" if co.get("added") else ""))
+        for mv in co.get("moved") or []:
+            live_lines.append(f"  {mv.get('name')}: {mv.get('from')} → {mv.get('to')}")
+    if live_lines:
+        blocks.append(("h", "Living reef"))
+        blocks.append(("lines", live_lines))
+    if mn:
+        ageing = mn.get("ageing") or {}
+        if ageing.get("items") or ageing.get("filters"):
+            blocks.append(("h", "Equipment ageing"))
+            if ageing.get("items"):
+                blocks.append(("table", ["Item", "Age", "Cadence", "State"],
+                               [[str(i.get("label")), f"{_fmt(i['ageDays'], 0)} d" if i.get("ageDays") is not None else "—", f"{i.get('cadenceDays')} d",
+                                 {"ok": "fine", "never": "never logged"}.get(str(i.get("status")), str(i.get("status")))] for i in ageing["items"]]))
+            if ageing.get("filters"):
+                blocks.append(("lines", ["RODI stages: " + ", ".join(f"{f.get('label')} {_fmt(f['usedPct'], 0)} %" if f.get("usedPct") is not None else str(f.get("label")) for f in ageing["filters"])]))
+    ev = report.get("happened") or {}
+    blocks.append(("h", "What happened"))
+    by_type = ev.get("byType") or {}
+    ev_lines = [f"{ev.get('count', 0)} event{'s' if ev.get('count', 0) != 1 else ''}" + (" · " + ", ".join(f"{n} {t}" for t, n in sorted(by_type.items())) if by_type else "")]
+    blocks.append(("lines", ev_lines))
+    ev_rows = [f"{_day_text(r.get('at'))} · {r.get('message')}" + (f" ×{r['count']}" if (r.get("count") or 1) > 1 else "") for r in (ev.get("rows") or [])[:12]]
+    if ev_rows:
+        blocks.append(("ul", ev_rows))
+    nxt = report.get("next") or {}
+    blocks.append(("h", "The next two weeks" if month else "Next week"))
+    day_lines = [f"{d.get('label')}: " + ", ".join(str(i.get("label")) for i in d.get("items") or []) for d in nxt.get("days") or []]
+    blocks.append(("ul", day_lines) if day_lines else ("lines", ["Nothing falls due in the window."]))
+    if report.get("notes"):
+        blocks.append(("h", "Notes"))
+        blocks.append(("ul", [str(n) for n in report["notes"]]))
+    return blocks
+
+
+def markdown(report: dict[str, Any]) -> str:
+    out: list[str] = []
+    for block in text_blocks(report):
+        kind = block[0]
+        if kind == "title":
+            out.append(f"# {block[1]}")
+        elif kind == "h":
+            out.append(f"## {block[1]}")
+        elif kind == "lines":
+            out.append("  \n".join(str(line) for line in block[1] if line))
+        elif kind == "ul":
+            out.append("\n".join(f"- {line}" for line in block[1] if line))
+        elif kind == "table":
+            headers, rows = block[1], block[2]
+            cells = lambda row: "| " + " | ".join(str(c).replace("|", "/") for c in row) + " |"  # noqa: E731
+            out.append("\n".join([cells(headers), "|" + "---|" * len(headers), *[cells(r) for r in rows]]))
+    return "\n\n".join(part for part in out if part) + "\n"
+
+
+def plain_text(report: dict[str, Any]) -> str:
+    """The same blocks with no markup — safe for any notify target."""
+    out: list[str] = []
+    for block in text_blocks(report):
+        kind = block[0]
+        if kind == "title":
+            out.append(str(block[1]).upper())
+        elif kind == "h":
+            out.append(str(block[1]).upper())
+        elif kind == "lines":
+            out.append("\n".join(str(line) for line in block[1] if line))
+        elif kind == "ul":
+            out.append("\n".join(f"- {line}" for line in block[1] if line))
+        elif kind == "table":
+            headers, rows = block[1], block[2]
+            out.append("\n".join([" · ".join(str(h) for h in headers), *[" · ".join(str(c) for c in r if str(c) != "") for r in rows]]))
+    return "\n\n".join(part for part in out if part) + "\n"
+
+
+def share_chunks(text: str, limit: int = SHARE_CHUNK_LIMIT) -> list[str]:
+    """Split at blank lines (then at line ends) so no message exceeds
+    ``limit`` characters and none breaks mid-line."""
+    limit = max(200, int(limit))
+    chunks: list[str] = []
+    current = ""
+    for para in text.split("\n\n"):
+        if len(para) > limit:
+            for line in para.split("\n"):
+                if len(current) + len(line) + 1 > limit and current:
+                    chunks.append(current.rstrip())
+                    current = ""
+                current += line + "\n"
+            continue
+        if len(current) + len(para) + 2 > limit and current:
+            chunks.append(current.rstrip())
+            current = ""
+        current += para + "\n\n"
+    if current.strip():
+        chunks.append(current.rstrip())
+    return chunks or [text.rstrip()]

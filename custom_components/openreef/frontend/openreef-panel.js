@@ -1364,6 +1364,11 @@ class OpenReefPanel extends HTMLElement {
         this._render();
       }
       if (action === "report-rec-snooze") this._reportSnoozeRec(id, Number(target.dataset.days ?? 30));
+      if (action === "report-png") this._reportSavePng();
+      if (action === "report-copy-image") this._reportCopyImage();
+      if (action === "report-copy-text") this._reportCopyText();
+      if (action === "report-print") this._reportPrint();
+      if (action === "report-share") this._reportShare();
       if (action === "report-task") {
         // A row in the plan is the way to its task: the Maintenance tab, All
         // tasks, that row open.
@@ -6850,21 +6855,41 @@ class OpenReefPanel extends HTMLElement {
     return { start, end };
   }
 
-  // The hero card: last week's average stamp against the week before, from
-  // the score log the panel already holds — no compile needed to say it.
-  _reportHeroCard() {
-    const log = Array.isArray(this._config?.reports?.scoreLog) ? this._config.reports.scoreLog : [];
+  // Last week in one figure, for Home and for Pulse: the stored week's
+  // score when the report was written, else last week's average Reef Health
+  // stamp from the score log the panel already holds — no compile needed.
+  _reportLastWeek() {
     const { start, end } = this._reportLocalWeekBounds("previous");
     const prevStart = new Date(start); prevStart.setDate(start.getDate() - 7);
+    const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const items = Array.isArray(this._config?.reports?.items) ? this._config.reports.items : [];
+    const week = (d) => items.find((it) => it?.kind === "week" && String(it.start || "").slice(0, 10) === iso(d));
+    const stored = week(start);
+    if (stored && Number.isFinite(Number(stored.weekScore?.total))) {
+      const last = Number(stored.weekScore.total);
+      const earlier = week(prevStart);
+      const before = Number.isFinite(Number(earlier?.weekScore?.total)) ? Number(earlier.weekScore.total) : null;
+      return { last, before, delta: before === null ? null : last - before, verdict: String(stored.verdict || ""), label: String(stored.label || ""), source: "stored" };
+    }
+    const log = Array.isArray(this._config?.reports?.scoreLog) ? this._config.reports.scoreLog : [];
     const dateOf = (row) => { const [y, m, d] = String(row?.date || "").split("-").map(Number); return y && m && d ? new Date(y, m - 1, d) : null; };
     const avg = (rows) => rows.length ? Math.round(rows.reduce((sum, r) => sum + Number(r.total || 0), 0) / rows.length) : null;
     const last = avg(log.filter((r) => { const d = dateOf(r); return d && d >= start && d < end; }));
     const before = avg(log.filter((r) => { const d = dateOf(r); return d && d >= prevStart && d < start; }));
-    const delta = last !== null && before !== null ? last - before : null;
+    return { last, before, delta: last !== null && before !== null ? last - before : null, verdict: "", label: "", source: "stamps" };
+  }
+
+  _reportWeekDeltaText(week) {
+    if (week.delta === null || week.delta === undefined) return "";
+    return week.delta === 0 ? "level with the week before" : `${week.delta > 0 ? "up" : "down"} ${Math.abs(week.delta)} on the week before`;
+  }
+
+  _reportHeroCard() {
+    const week = this._reportLastWeek();
+    const last = week.last;
     const value = last === null ? "Ready" : `${last}/100`;
     const detail = last === null ? "last week's report — open it"
-      : delta === null ? "last week's average · open the report"
-        : delta === 0 ? "level with the week before" : `${delta > 0 ? "up" : "down"} ${Math.abs(delta)} on the week before`;
+      : this._reportWeekDeltaText(week) || (week.source === "stored" ? "last week's score · open the report" : "last week's average · open the report");
     const status = last === null ? "unknown" : last >= 80 ? "ok" : last >= 60 ? "warning" : "critical";
     return this._missionSummaryCard("Reef Report", value, detail, status, "mission", { action: "report-open" });
   }
@@ -6886,9 +6911,13 @@ class OpenReefPanel extends HTMLElement {
       } catch {
         st.items = st.items || [];
       }
+      st.readings = null;
       if (data?.readingsSource === "tests") {
         const readings = await this._reportPanelReadings(data);
-        if (readings) data = await this._callWS({ ...msg, readings });
+        if (readings) {
+          st.readings = readings;
+          data = await this._callWS({ ...msg, readings });
+        }
       }
       st.data = data;
       st.at = Date.now();
@@ -6943,6 +6972,250 @@ class OpenReefPanel extends HTMLElement {
     const last = pts[pts.length - 1];
     const dots = pts.map((p) => `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="5" class="report-spark-hit"><title>${this._escape(`${new Date(p.t).toLocaleDateString([], { day: "numeric", month: "short" })} · ${p.v}`)}</title></circle>`).join("");
     return `<svg class="report-spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${this._escape(opts.label || "trend")}">${band}<polyline class="report-spark-line" points="${line}"></polyline>${dots}<circle class="report-spark-dot" cx="${x(last.t).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="3"></circle></svg>`;
+  }
+
+  // --- Share (Stage G) --------------------------------------------------------
+  // The share card is the headline as one picture (the livestream and Discord
+  // want a PNG); the text is the backend's Markdown rendition; Print opens a
+  // plain document; Send hands the whole report to the push target.
+  _reportShareTarget() {
+    return String(this._config?.maintenance?.reminders?.notifyTarget || "").trim();
+  }
+
+  _reportShareStrip(r) {
+    const st = this._report || {};
+    const target = this._reportShareTarget();
+    return `
+      <section class="report-section report-share">
+        <div class="report-section-head"><p class="eyebrow">Share</p>${st.shareNote ? `<small class="muted report-share-note" role="status">${this._escape(st.shareNote)}</small>` : ""}</div>
+        <div class="report-share-body">
+          <div class="report-share-card">${this._reportShareCardSvg(r)}</div>
+          <div class="button-row">
+            <button class="secondary compact-button" data-action="report-png">Save PNG</button>
+            <button class="secondary compact-button" data-action="report-copy-image">Copy image</button>
+            <button class="secondary compact-button" data-action="report-copy-text">Copy as text</button>
+            <button class="secondary compact-button" data-action="report-print">Print</button>
+            ${target ? `<button class="primary compact-button report-send" data-action="report-share" ${st.sharing ? "disabled" : ""}>${st.sharing ? "Sending…" : `Send to ${this._escape(target)}`}</button>`
+              : `<small class="muted">Set a push target under Maintenance → Reminders to send the report.</small>`}
+          </div>
+        </div>
+      </section>`;
+  }
+
+  _reportWrap(text, width) {
+    const words = String(text || "").split(/\s+/).filter(Boolean);
+    const lines = [];
+    let line = "";
+    for (const word of words) {
+      if ((line + " " + word).trim().length > width && line) { lines.push(line); line = word; }
+      else line = (line + " " + word).trim();
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+
+  // A standalone SVG (inline styles only — no CSS reaches a rasterised
+  // picture): period, score, condition · consistency, Reef Health, the
+  // verdict, the counts, the top recommendation, the score-by-day line.
+  _reportShareCardSvg(r) {
+    const W = 640, H = 360;
+    const esc = (v) => this._escape(String(v ?? ""));
+    const ws = r?.score || {}, hs = r?.headline?.score || {};
+    const did = r?.did || {}, m = did.maintenance || {};
+    const month = r?.period?.kind === "month";
+    const total = Number.isFinite(Number(ws.total)) ? Number(ws.total) : null;
+    const color = total === null ? "#94a3b8" : total >= 80 ? "#34d399" : total >= 60 ? "#fbbf24" : "#f87171";
+    const verdictLines = this._reportWrap(r?.headline?.verdict || "", 58).slice(0, 2);
+    const counts = [`${m.done || 0} chore${m.done === 1 ? "" : "s"}`, m.waterChangedL ? `${this._reportFmt(m.waterChangedL)} L changed` : "", `${did.tests?.count || 0} test${did.tests?.count === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+    const top = (r?.recommendations?.items || [])[0];
+    const topText = top ? (top.id === "keep_rhythm" ? top.title : `Next: ${top.title}`) : "";
+    const health = hs.average === null || hs.average === undefined ? "" : `Reef Health ${Math.round(hs.average)}${hs.delta ? ` (${hs.delta > 0 ? "▲" : "▼"} ${Math.abs(hs.delta)})` : ""}`;
+    const pieces = [];
+    if (ws.condition !== null && ws.condition !== undefined) pieces.push(`condition ${ws.condition}`);
+    if (ws.consistency !== null && ws.consistency !== undefined) pieces.push(`consistency ${ws.consistency}`);
+    if (health) pieces.push(health);
+    const series = (Array.isArray(hs.series) ? hs.series : []).map((p) => Number(p.total)).filter(Number.isFinite);
+    let spark = "";
+    if (series.length > 1) {
+      const x0 = 420, y0 = 130, w = 188, h = 56;
+      const lo = Math.min(...series), hi = Math.max(...series), span = hi - lo || 1;
+      const pts = series.map((v, i) => `${(x0 + i / (series.length - 1) * w).toFixed(1)},${(y0 + h - (v - lo) / span * h).toFixed(1)}`).join(" ");
+      spark = `<polyline points="${pts}" fill="none" stroke="#5eead4" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><text x="${x0}" y="${y0 + h + 18}" fill="#94a3b8" font-size="12">Reef Health by day</text>`;
+    }
+    const scoreText = total === null ? "—" : String(total);
+    const unitX = 32 + scoreText.length * 46 + 10;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="Reef Report share card">
+      <rect width="${W}" height="${H}" rx="20" fill="#0f1b2d"/>
+      <text x="32" y="44" fill="#7dd3fc" font-size="13" letter-spacing="2">OPENREEF · REEF REPORT</text>
+      <text x="32" y="78" fill="#e2e8f0" font-size="26" font-weight="700">${esc(r?.period?.label || "")}${r?.period?.partial ? " · in progress" : ""}</text>
+      <text x="32" y="170" fill="${color}" font-size="84" font-weight="800">${esc(scoreText)}</text>
+      <text x="${unitX}" y="170" fill="#94a3b8" font-size="20">/100 ${month ? "Month" : "Week"} Score</text>
+      <text x="32" y="200" fill="#cbd5e1" font-size="15">${esc(pieces.join(" · "))}</text>
+      ${verdictLines.map((line, i) => `<text x="32" y="${240 + i * 22}" fill="#e2e8f0" font-size="16">${esc(line)}</text>`).join("")}
+      <text x="32" y="298" fill="#94a3b8" font-size="14">${esc(counts)}</text>
+      ${topText ? `<text x="32" y="330" fill="#fbbf24" font-size="15">${esc(this._reportWrap(topText, 72)[0] || "")}</text>` : ""}
+      ${spark}
+      <text x="${W - 32}" y="${H - 16}" fill="#475569" font-size="11" text-anchor="end">openreef · the intelligence layer for reefing</text>
+    </svg>`;
+  }
+
+  _reportFileName(r, ext) {
+    const start = String(r?.period?.start || "").slice(0, 10) || "report";
+    return `reef-report-${r?.period?.kind === "month" ? "month" : "week"}-${start}.${ext}`;
+  }
+
+  _reportNote(text) {
+    if (!this._report) return;
+    this._report.shareNote = text;
+    this._render();
+    clearTimeout(this._reportNoteTimer);
+    this._reportNoteTimer = setTimeout(() => { if (this._report) { this._report.shareNote = ""; this._render(); } }, 6000);
+    if (typeof this._reportNoteTimer?.unref === "function") this._reportNoteTimer.unref();
+  }
+
+  async _reportRasterise(r) {
+    const svg = this._reportShareCardSvg(r);
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error("Could not draw the card."));
+      img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280; canvas.height = 720;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(2, 2);
+    ctx.drawImage(img, 0, 0);
+    return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not encode the PNG.")), "image/png"));
+  }
+
+  async _reportSavePng() {
+    const r = this._report?.data;
+    if (!r) return;
+    try {
+      const blob = await this._reportRasterise(r);
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = this._reportFileName(r, "png");
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+      this._reportNote(`Saved ${link.download}.`);
+    } catch (err) {
+      this._reportNote((err && err.message) || "Could not save the PNG.");
+    }
+  }
+
+  async _reportCopyImage() {
+    const r = this._report?.data;
+    if (!r) return;
+    try {
+      if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("This browser cannot copy images — use Save PNG.");
+      const blob = await this._reportRasterise(r);
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      this._reportNote("Card copied — paste it anywhere.");
+    } catch (err) {
+      this._reportNote((err && err.message) || "Could not copy the card.");
+    }
+  }
+
+  async _reportCopyText() {
+    const r = this._report?.data;
+    if (!r) return;
+    const text = String(r.markdown || "");
+    if (!text) { this._reportNote("Refresh the report to copy it as text."); return; }
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+      else {
+        const area = document.createElement("textarea");
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+      this._reportNote("Copied as text (Markdown).");
+    } catch (err) {
+      this._reportNote(`Could not copy: ${(err && err.message) || "clipboard refused"}.`);
+    }
+  }
+
+  // A plain document of the report for the printer: light, no buttons, the
+  // score's why-lines open, photos left out (their URLs need the panel).
+  _reportPrintDocument(r) {
+    const wasOpen = this._report?.whyOpen;
+    if (this._report) this._report.whyOpen = true;
+    const month = r?.period?.kind === "month" && r.month ? r.month : null;
+    let body = "";
+    try {
+      body = `
+        ${this._reportHeadline(r)}
+        ${this._reportRecommendations(r)}
+        ${month ? this._reportGoals(month.goals) + this._reportMonthTrend(month.trend) : ""}
+        ${this._reportDid(r)}
+        ${month ? this._reportDrift(month.drift) : ""}
+        ${this._reportWater(r)}
+        ${month ? this._reportConsumption(month.consumption) + this._reportWaterLedger(month.water) + this._reportTesting(month.testing) + this._reportIcp(month.icp) : ""}
+        ${this._reportLiving(r)}
+        ${month ? this._reportAgeing(month.ageing) : ""}
+        ${this._reportHappened(r)}
+        ${this._reportNext(r)}
+        ${Array.isArray(r.notes) && r.notes.length ? `<section class="report-section"><div class="report-section-head"><p class="eyebrow">Notes</p></div><ul class="report-list report-notes">${r.notes.map((n) => `<li>${this._escape(n)}</li>`).join("")}</ul></section>` : ""}`;
+    } finally {
+      if (this._report) this._report.whyOpen = wasOpen;
+    }
+    const title = `${r?.period?.kind === "month" ? "Monthly" : "Weekly"} Reef Report · ${r?.period?.label || ""}`;
+    const css = `
+      @page { margin: 14mm; }
+      body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #111; background: #fff; margin: 24px; max-width: 900px; }
+      h1 { font-size: 22px; margin: 0 0 2px; } h2, h3, h4 { margin: 4px 0; font-size: 14px; }
+      .eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #555; margin: 14px 0 6px; font-weight: 600; }
+      .report-section { border-top: 1px solid #ddd; padding-top: 6px; page-break-inside: avoid; }
+      .report-section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+      .report-headline { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: 12px; align-items: start; }
+      .report-score { border: 1px solid #ccc; border-radius: 8px; padding: 8px 12px; } .report-score strong { font-size: 30px; display: block; } .report-score small, .report-score span { color: #555; display: block; }
+      .report-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin: 8px 0; }
+      .report-stat { border: 1px solid #ddd; border-radius: 6px; padding: 6px 8px; } .report-stat small { display: block; color: #555; } .report-stat strong { font-size: 18px; } .report-stat span { display: block; color: #555; font-size: 12px; }
+      .report-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; } .report-card { border: 1px solid #ddd; border-radius: 6px; padding: 8px; }
+      table { border-collapse: collapse; width: 100%; margin: 6px 0; } th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #e5e5e5; vertical-align: top; font-size: 12px; } th { font-size: 11px; text-transform: uppercase; color: #555; }
+      .pill { display: inline-block; border: 1px solid #999; border-radius: 999px; padding: 0 6px; font-size: 11px; margin-left: 2px; }
+      .muted { color: #555; } small { font-size: 12px; }
+      button { all: unset; font: inherit; } .link-button { text-decoration: underline; }
+      .button-row, .report-controls, .close, .report-why-toggle, .report-timeline, .report-share, .report-foot, .report-photo, .report-photo-pair, .maint-chip { display: none !important; }
+      .maint-group { margin: 6px 0; } .maint-group-head { display: flex; gap: 8px; align-items: baseline; } .maint-row-line { display: flex; gap: 8px; } .maint-when { color: #555; margin-left: 6px; }
+      .activity-list .activity-item { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid #eee; } .activity-item span { color: #555; min-width: 120px; }
+      .report-spark { vertical-align: middle; } .report-spark-line { fill: none; stroke: #333; stroke-width: 1.5; } .report-spark-band { fill: #eee; } .report-spark-dot { fill: #333; } .report-spark-hit { fill: transparent; }
+      ul.report-list, ul.report-why { margin: 4px 0; padding-left: 18px; } ul.report-why { list-style: none; padding: 0; } .report-why li { border-top: 1px dotted #ddd; padding: 3px 0; }
+      .report-held { display: flex; flex-wrap: wrap; gap: 6px; }`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${this._escape(title)}</title><style>${css}</style></head><body><h1>${this._escape(title)}</h1><p class="muted">Compiled ${this._escape(this._formatActivityTime(r?.generatedAt))} by OpenReef.</p>${body}<script>window.addEventListener("load", () => setTimeout(() => window.print(), 150));</script></body></html>`;
+  }
+
+  _reportPrint() {
+    const r = this._report?.data;
+    if (!r) return;
+    const win = window.open("", "_blank");
+    if (!win) { this._reportNote("Allow pop-ups for this page to print the report."); return; }
+    win.document.open();
+    win.document.write(this._reportPrintDocument(r));
+    win.document.close();
+  }
+
+  async _reportShare() {
+    const st = this._report;
+    const target = this._reportShareTarget();
+    if (!st?.data || !target || st.sharing) return;
+    st.sharing = true;
+    this._render();
+    try {
+      const msg = { type: "openreef/report_share", period: st.period, which: st.which };
+      if (st.anchor) msg.anchor = st.anchor;
+      if (st.readings) msg.readings = st.readings;
+      const res = await this._callWS(msg);
+      st.sharing = false;
+      this._reportNote(`Sent to ${res?.target || target}${res?.chunks > 1 ? ` in ${res.chunks} messages` : ""}.`);
+    } catch (err) {
+      st.sharing = false;
+      this._reportNote(`Could not send: ${(err && err.message) || "the notify call failed"}.`);
+    }
   }
 
   async _reportStoreNow() {
@@ -7422,6 +7695,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._reportHappened(r)}
         ${this._reportNext(r)}
         ${Array.isArray(r.notes) && r.notes.length ? `<section class="report-section"><div class="report-section-head"><p class="eyebrow">Notes</p></div><ul class="report-list report-notes">${r.notes.map((n) => `<li>${this._escape(n)}</li>`).join("")}</ul></section>` : ""}
+        ${this._reportShareStrip(r)}
         ${this._reportTimeline(r)}
         <p class="muted report-foot">Compiled ${this._escape(this._formatActivityTime(r.generatedAt))} · readings from ${this._escape(r.readingsSource === "recorder" ? "the recorder" : r.readingsSource === "panel" ? "the recorder (via the panel)" : "manual tests only")}.</p>`;
     }
@@ -19042,6 +19316,18 @@ const rigSteps = [
         push("health-loss", `Reef health · −${loss.points} pts`, loss.label, loss.detail, loss.status, [health.nextAction]);
       } else if (health.status === "ok") {
         push("health-clean", "Reef health", "Every scoring check is clean", health.gradeDetail, "ok");
+      }
+    } catch { /* no card */ }
+
+    // Reef Report: last week in one figure, the way the Home card says it.
+    try {
+      const week = this._reportLastWeek();
+      if (week && week.last !== null) {
+        const arrow = week.delta === null ? "" : week.delta > 0 ? " ↑" : week.delta < 0 ? " ↓" : " →";
+        const detail = week.source === "stored" ? (week.verdict || week.label) : "average Reef Health of last week's stamps";
+        push("report-week", "Reef Report", `Last week: ${week.last}${arrow}`, detail,
+          week.last >= 80 ? "ok" : week.last >= 60 ? "warning" : "critical",
+          [this._reportWeekDeltaText(week), week.source === "stored" ? week.label : ""]);
       }
     } catch { /* no card */ }
 
@@ -34317,7 +34603,10 @@ ${parts.buttons}
         .report-score-delta { color: #cbd5e1; font-size: 13px; }
         .report-verdict { display: grid; gap: 6px; align-content: start; }
         .report-verdict-line { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.35; }
-         .report-photo-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+          .report-share-body { display: grid; gap: 12px; }
+ .report-share-card svg { max-width: 100%; height: auto; border-radius: 16px; display: block; }
+ .report-share-note { font-weight: 600; }
+ .report-photo-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
  .report-spark-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
  .report-held { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 0; }
  .report-table tr.current td { font-weight: 600; }

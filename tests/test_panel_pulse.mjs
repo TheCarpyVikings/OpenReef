@@ -1065,4 +1065,31 @@ test("each mode says up front how long it would run for", async () => {
   }
 });
 
+test("insight cards: the Reef Report card says last week's score with its arrow", async () => {
+  const restore = freezeTime("2026-09-16T09:00:00Z");   // Wednesday; last week = 7–13 September
+  try {
+    const panel = prep(await makePanel({ sensors: {}, equipment: {}, alerts: {}, reports: { weekStart: 0, scoreLog: [], events: [], items: [
+      { id: "week:2026-09-07", kind: "week", start: "2026-09-07", label: "7–13 September 2026", verdict: "A steady week.", weekScore: { total: 78 } },
+      { id: "week:2026-08-31", kind: "week", start: "2026-08-31", label: "31 Aug – 6 Sep 2026", verdict: "Slipping.", weekScore: { total: 70 } },
+    ] } }));
+    const card = panel._pulseInsightCards().find((c) => c.key === "report-week");
+    assert(card, "a stored week makes a card");
+    assertEqual(card.kicker, "Reef Report");
+    assertEqual(card.title, "Last week: 78 ↑");
+    assertEqual(card.detail, "A steady week.");
+    assertEqual(card.status, "warning");
+    assertEqual(card.more.join("|"), "up 8 on the week before|7–13 September 2026");
+    panel._config.reports.items[0].weekScore.total = 55;
+    assertEqual(panel._pulseInsightCards().find((c) => c.key === "report-week").title, "Last week: 55 ↓");
+    panel._config.reports.items = [];
+    assert(!panel._pulseInsightCards().some((c) => c.key === "report-week"), "no stored week and no stamps: no card");
+    panel._config.reports.scoreLog = [{ date: "2026-09-10", at: "", total: 82, parts: {} }];
+    const stamped = panel._pulseInsightCards().find((c) => c.key === "report-week");
+    assertEqual(stamped.title, "Last week: 82");
+    assertEqual(stamped.detail, "average Reef Health of last week's stamps");
+  } finally {
+    restore();
+  }
+});
+
 await runTests();

@@ -324,4 +324,82 @@ test("test_month_dialog_renders_the_monthly_sections", async () => {
   assertEqual(spans.join(","), "92,28");
 });
 
+test("test_share_strip_card_copy_print_and_send", async () => {
+  const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [], events: [], items: [] }, captures: [],
+    maintenance: { reminders: { notifyTarget: "telegram_reef" } } });
+  panel._render = () => {};
+  const data = fixtureReport();
+  data.score = { total: 70, condition: 69, consistency: 71, parts: [], neutral: [] };
+  data.recommendations = { size: "small", calm: false, snoozed: [], items: [{ id: "range_nitrate", title: "Bring nitrate back into range", evidence: "x", effort: "15 min", effect: "y", actions: [] }] };
+  data.markdown = "# Weekly Reef Report · 7–13 September 2026\n\nWeek Score 70/100\n";
+  panel._report = { open: true, loading: false, error: "", data, at: Date.now(), period: "week", which: "previous", anchor: "", items: [], readings: { alkalinity: [{ t: "2026-09-10T09:00:00Z", v: 8.3 }] } };
+  const html = panel._reportDialog();
+  assert(html.includes('class="report-section report-share"') && html.includes(">Share<"));
+  for (const action of ["report-png", "report-copy-image", "report-copy-text", "report-print", "report-share"]) assert(html.includes(`data-action="${action}"`), action);
+  assert(html.includes("Send to telegram_reef"));
+  const svg = panel._reportShareCardSvg(data);
+  assert(svg.startsWith("<svg xmlns=") && svg.includes(">70<") && svg.includes("/100 Week Score") && svg.includes("condition 69 · consistency 71 · Reef Health 80 (▲ 9)"), svg.slice(0, 400));
+  assert(svg.includes("6 chores ticked off, 80 % on time, water steady.") && svg.includes("6 chores · 15.4 L changed · 2 tests") && svg.includes("Next: Bring nitrate back into range"));
+  assert(svg.includes("<polyline") && svg.includes("Reef Health by day"), "the score-by-day line, inline-styled");
+  assert(!svg.includes("class="), "nothing in the card depends on the panel's CSS");
+  assertEqual(panel._reportFileName(data, "png"), "reef-report-week-2026-09-07.png");
+  assertEqual(panel._reportWrap("one two three four five six", 9).join("|"), "one two|three|four five|six");
+  // Copy as text hands the backend's Markdown to the clipboard and says so.
+  const copied = [];
+  Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async (t) => { copied.push(t); } } }, configurable: true });
+  await panel._reportCopyText();
+  assertEqual(copied[0], data.markdown);
+  assertEqual(panel._report.shareNote, "Copied as text (Markdown).");
+  assert(panel._reportDialog().includes("Copied as text (Markdown)."), "the note shows in the strip");
+  // Send: the same period, anchor and readings the viewer compiled with.
+  const calls = [];
+  panel._hass = { callWS: async (payload) => { calls.push(payload); return { target: "telegram_reef", chunks: 3 }; } };
+  panel._report.anchor = "2026-08-31";
+  await panel._reportShare();
+  assertEqual(calls[0].type, "openreef/report_share");
+  assertEqual(calls[0].anchor, "2026-08-31");
+  assertEqual(calls[0].readings.alkalinity[0].v, 8.3);
+  assertEqual(panel._report.shareNote, "Sent to telegram_reef in 3 messages.");
+  assert(!panel._report.sharing);
+  panel._hass = { callWS: async () => { throw new Error("Set a push target under Maintenance reminders first"); } };
+  await panel._reportShare();
+  assert(panel._report.shareNote.startsWith("Could not send: Set a push target"));
+  // Print: a standalone light document with every section, the why-lines open, no controls.
+  const doc = panel._reportPrintDocument(data);
+  assert(doc.startsWith("<!doctype html>") && doc.includes("<title>Weekly Reef Report · 7–13 September 2026</title>") && doc.includes("@page"));
+  assert(doc.includes("What you did") && doc.includes("Next week") && doc.includes("window.print()"));
+  assert(doc.includes(".report-share, .report-foot") && !doc.includes('data-action="report-png"'), "the share strip is not printed");
+  assert(panel._report.whyOpen !== true, "the viewer's why-fold is left as it was");
+  // No target: the strip says where to set one and Send does nothing.
+  panel._config.maintenance.reminders.notifyTarget = "";
+  const noTarget = panel._reportDialog();
+  assert(noTarget.includes("Set a push target under Maintenance") && !noTarget.includes('data-action="report-share"'));
+  await panel._reportShare();
+});
+
+test("test_last_week_prefers_the_stored_score_and_the_hero_card_follows", async () => {
+  const restore = freezeTime(new Date(2026, 8, 16, 9, 0, 0).toISOString());   // Wednesday; last week = 7–13
+  try {
+    const row = (d, total) => ({ date: `2026-09-${String(d).padStart(2, "0")}`, at: "", total, parts: {} });
+    const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [row(12, 84), row(9, 76), row(3, 70)], events: [], items: [
+      { id: "week:2026-09-07", kind: "week", start: "2026-09-07", label: "7–13 September 2026", verdict: "A steady week.", weekScore: { total: 71 } },
+      { id: "week:2026-08-31", kind: "week", start: "2026-08-31", label: "31 Aug – 6 Sep 2026", verdict: "Slipping.", weekScore: { total: 66 } },
+    ] } });
+    const week = panel._reportLastWeek();
+    assertEqual(week.source, "stored");
+    assertEqual(week.last, 71);
+    assertEqual(week.delta, 5);
+    assertEqual(week.verdict, "A steady week.");
+    assert(panel._reportHeroCard().includes("71/100") && panel._reportHeroCard().includes("up 5 on the week before"));
+    panel._config.reports.items = [];
+    const fallback = panel._reportLastWeek();
+    assertEqual(fallback.source, "stamps");
+    assertEqual(fallback.last, 80);
+    assertEqual(fallback.delta, 10);
+    assert(panel._reportHeroCard().includes("80/100") && panel._reportHeroCard().includes("up 10 on the week before"));
+  } finally {
+    restore();
+  }
+});
+
 await runTests();
