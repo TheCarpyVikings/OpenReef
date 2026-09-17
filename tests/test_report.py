@@ -474,6 +474,184 @@ def test_report_reads_only_enabled_sensors_and_the_keepers_band():
     ctx = integration._report_context(cfg, NOW, NOW, WEEK, readings)
     assert set(ctx["sensorReadings"]) == {"alkalinity", "salinity"} and ctx["paramMeta"]["salinity"]["unit"] == "ppt"
 
+
+# --- Stage F: the monthly report ---------------------------------------------------
+
+MONTH = report.period_bounds(NOW, 0, "month", "previous")     # August 2026
+MSTART, MEND = MONTH["start"], MONTH["end"]
+
+
+def _m(day_offset, hour=9):
+    """A stamp inside August: day 0 = 1 August."""
+    return _iso(MSTART + timedelta(days=day_offset, hours=hour))
+
+
+def _alk_month(back, values):
+    """Four alkalinity tests in the month ``back`` months before August, on
+    days 0, 2, 5, 7 — two falling pairs with a dose between them."""
+    first = report._month_start(MSTART.date(), back)
+    base = datetime(first.year, first.month, 1, 9, tzinfo=timezone.utc)
+    return [{"timestamp": _iso(base + timedelta(days=d)), "value": v} for d, v in zip((0, 2, 5, 7), values)]
+
+
+def _month_ctx():
+    items = [
+        {"id": "month:2026-07-01", "kind": "month", "start": "2026-07-01", "label": "July 2026", "weekScore": {"total": 60, "condition": 55, "consistency": 66}, "health": {"average": 82},
+         "recommendations": [{"id": "water_plan", "title": "Raise the AWC volume or lower its plan — pick one"}, {"id": "test_alkalinity", "title": "Test alkalinity this week"}, {"id": "salt_stock", "title": "Order salt"}]},
+        {"id": "month:2026-06-01", "kind": "month", "start": "2026-06-01", "label": "June 2026", "weekScore": {"total": 58, "condition": 50, "consistency": 64}, "health": {"average": 80},
+         "recommendations": [{"id": "salt_stock", "title": "Order salt"}]},
+        {"id": "week:2026-08-10", "kind": "week", "start": "2026-08-10", "label": "10–16 August 2026", "weekScore": {"total": 72}},
+        {"id": "week:2026-08-03", "kind": "week", "start": "2026-08-03", "label": "3–9 August 2026", "weekScore": {"total": 70}},
+        {"id": "week:2026-07-27", "kind": "week", "start": "2026-07-27", "label": "27 Jul – 2 Aug 2026", "weekScore": {"total": 65}},
+        {"id": "week:2026-08-31", "kind": "week", "start": "2026-08-31", "label": "31 Aug – 6 Sep 2026", "weekScore": {"total": 74}},
+        {"id": "week:2026-09-07", "kind": "week", "start": "2026-09-07", "label": "7–13 September 2026", "weekScore": {"total": 77}},
+    ]
+    return {
+        "period": MONTH, "now": NOW, "tankL": 52.0, "items": items,
+        "tasks": {"sock": {"label": "Filter sock", "cadenceDays": 7, "enabled": True},
+                  "water_change": {"label": "Water change", "cadenceDays": 7, "enabled": True, "logsVolume": True},
+                  "replace_carbon": {"label": "Replace carbon", "cadenceDays": 30, "enabled": True},
+                  "calibrate_ph": {"label": "Calibrate pH probe", "cadenceDays": 30, "enabled": True},
+                  "clean_glass": {"label": "Clean glass", "cadenceDays": 3, "enabled": True}},
+        "completions": {
+            "sock": [{"timestamp": _m(0)}, {"timestamp": _m(7)}, {"timestamp": _m(17)}, {"timestamp": _m(27)}],      # 7 d, 10 d, 10 d
+            "water_change": [{"timestamp": _m(d), "volume": 10, "volumeUnit": "L"} for d in (0, 7, 14, 21)],
+            "replace_carbon": [{"timestamp": _iso(MSTART - timedelta(days=42))}],
+            "clean_glass": [{"timestamp": _m(d)} for d in range(0, 30, 3)],
+        },
+        "manualReadings": {"alkalinity": _alk_month(2, (8.6, 8.3, 8.6, 8.2)) + _alk_month(1, (8.6, 8.3, 8.6, 8.3)) + _alk_month(0, (8.6, 8.2, 8.6, 8.2)),
+                           "ph": [{"timestamp": _m(1, 10), "value": 8.1}]},
+        "sensorReadings": {"ph": [{"t": _m(1, 12), "v": 7.6}]},
+        "paramMeta": {"alkalinity": {"label": "Alkalinity", "unit": "dKH", "min": 7.5, "max": 9.5}, "ph": {"label": "pH", "unit": "", "min": 7.8, "max": 8.4}},
+        "testSchedules": {"alkalinity": {"enabled": True, "cadenceDays": 7}, "calcium": {"enabled": True, "cadenceDays": 14}, "nitrate": {"enabled": False, "cadenceDays": 7}},
+        "icpReports": [
+            {"id": "a", "lab": "Triton", "sampleDate": "2026-07-10", "sampleType": "tank", "elements": [
+                {"symbol": "Ca", "name": "Calcium", "value": 420, "unit": "ppm", "status": "ok"}, {"symbol": "I", "name": "Iodine", "value": 60, "unit": "ppb", "status": "ok"},
+                {"symbol": "Sr", "name": "Strontium", "value": 8, "unit": "ppm", "status": "ok"}]},
+            {"id": "b", "lab": "Triton", "sampleDate": "2026-08-12", "sampleType": "tank", "elements": [
+                {"symbol": "Ca", "name": "Calcium", "value": 450, "unit": "ppm", "status": "high"}, {"symbol": "I", "name": "Iodine", "value": 40, "unit": "ppb", "status": "ok"},
+                {"symbol": "Sr", "name": "Strontium", "value": 8.2, "unit": "ppm", "status": "ok"}]},
+        ],
+        "saltState": {"tracked": True, "kg": 3.2, "weeksLeft": 5.5, "low": False, "empty": False},
+        "saltHistory": [{"at": _m(4), "delta": -1.2}, {"at": _m(19), "delta": -1.3}, {"at": _iso(MSTART - timedelta(days=12)), "delta": -1.0}, {"at": _m(10), "delta": 5.0}],
+        "rodiFilters": [{"id": "sed", "label": "Sediment", "type": "sediment", "ratedLitres": 2000, "litresProcessed": 2100, "changedAt": "2026-03-01T00:00:00+00:00"}],
+        "awcPlanDailyL": 2.0, "usualWeeklyL": 10.0,
+        "corals": {"c1": {"name": "Acro", "addedAt": _m(3)}, "c2": {"name": "Zoa", "addedAt": _iso(MSTART - timedelta(days=90))}},
+        "hatchHistory": [{"vesselId": "v1", "startedAt": _m(d), "harvestedAt": _m(d + 1, 19), "plannedHours": 24, "actualHours": 34} for d in (2, 6, 10, 14)],
+    }
+
+
+def test_month_trend_drift_consumption_and_the_big_recommendations():
+    assert report.lookback_days("month") == 92 and report.lookback_days("week") == 28
+    out = report.compile_period(_month_ctx())
+    assert out["period"]["label"] == "August 2026" and out["period"]["days"] == 31
+    month = out["month"]
+    trend = month["trend"]
+    assert [m["label"] for m in trend["months"]] == ["June 2026", "July 2026", "August 2026"] and trend["months"][-1]["current"]
+    assert trend["deltas"]["total"] == out["score"]["total"] - 60 and trend["deltas"]["condition"] == out["score"]["condition"] - 55
+    assert trend["previous"] == "July 2026" and trend["deltas"]["health"] is None, "no stamps this month: the health delta is honest"
+    assert [w["start"] for w in trend["weeks"]] == ["2026-07-27", "2026-08-03", "2026-08-10", "2026-08-31"], "the weeks touching the month, in order"
+    drift = month["drift"]
+    assert drift["late"][0]["id"] == "sock" and drift["late"][0]["late"] == 2 and drift["late"][0]["timed"] == 3
+    assert drift["late"][0]["lateShare"] == 67 and drift["late"][0]["slipDays"] == 3.0
+    assert [h["id"] for h in drift["held"]] == ["clean_glass", "water_change"], "streaks by ticks"
+    cons = next(p for p in month["consumption"]["parameters"] if p["id"] == "alkalinity")
+    assert [m["label"] for m in cons["months"]] == ["Jun", "Jul", "Aug"]
+    assert [m["perDay"] for m in cons["months"]] == [0.175, 0.15, 0.2], [m["perDay"] for m in cons["months"]]
+    assert cons["changePct"] == 14 and cons["direction"] == "level"
+    mg = next(p for p in month["consumption"]["parameters"] if p["id"] == "magnesium")
+    assert mg["direction"] == "unknown" and mg["months"][0]["readings"] == 0
+    assert next(m for m in out["living"]["corals"]["added"])["name"] == "Acro"
+    recs = out["recommendations"]
+    assert recs["size"] == "big" and all(r["size"] == "big" for r in recs["items"])
+    assert set(recs["raised"]) == {"calibrate_ph", "hatch_capacity", "water_plan", "test_day", "salt_stock", "cadence_sock",
+                                   "ageing_replace_carbon", "filter_sed"}, recs["raised"]
+    assert [r["id"] for r in recs["items"]] == ["salt_stock", "calibrate_ph", "hatch_capacity"], [r["id"] for r in recs["items"]]
+    salt = recs["items"][0]
+    assert salt["promoted"] is True and salt["evidence"] == "About 5.5 weeks of salt left at your water-change rate (3.2 kg). Third month running."
+    assert recs["items"][1]["evidence"] == "The probe and the kit disagree by 0.5; no calibration logged." and recs["items"][1]["actions"][0] == {"action": "report-task", "id": "calibrate_ph", "label": "Open the task"}
+    assert recs["items"][2]["evidence"] == "4 harvests ran 10 h past the clock on average this month."
+    goals = month["goals"]
+    assert goals["from"] == "July 2026" and goals["cleared"] == 1 and goals["open"] == 2
+    assert {g["id"]: g["status"] for g in goals["items"]} == {"water_plan": "open", "test_alkalinity": "cleared", "salt_stock": "open"}
+    # Snoozing the promoted one: the next two step up; a calm month says so.
+    quiet = report.recommend_big({"month": {}, "water": {}, "living": {}}, {}, NOW, [])
+    assert quiet["calm"] and quiet["items"][0]["id"] == "keep_rhythm" and quiet["items"][0]["size"] == "big"
+
+
+def test_month_water_ledger_testing_icp_and_ageing():
+    out = report.compile_period(_month_ctx())
+    month = out["month"]
+    ledger = month["water"]
+    assert ledger["changedL"] == 40.0 and ledger["handL"] == 40.0 and ledger["autoL"] == 0.0 and ledger["pctOfTank"] == 77
+    assert ledger["plannedL"] == 62.0 and ledger["met"] is False and ledger["shortfallL"] == 22.0 and ledger["usualL"] == 44.3
+    assert ledger["salt"] == {"tracked": True, "usedKg": 2.5, "onHandKg": 3.2, "weeksLeft": 5.5, "low": False}, "debits inside the month only; the top-up is not a use"
+    testing = month["testing"]
+    assert testing["scheduled"] == 2 and testing["tests"] == 5 and testing["expected"] == 6
+    by = {p["id"]: p for p in testing["parameters"]}
+    assert by["alkalinity"]["tests"] == 4 and by["alkalinity"]["expected"] == 4 and by["alkalinity"]["ratio"] == 100
+    assert by["alkalinity"]["longestGapDays"] == 24 and by["alkalinity"]["onCadence"] is False, "four tests in the first week, then nothing"
+    assert by["calcium"]["tests"] == 0 and by["calcium"]["ratio"] == 0 and by["calcium"]["longestGapDays"] == 31
+    assert testing["overallRatio"] == 50 and testing["bestDay"] == "Saturday" and testing["bestDayShare"] == 40
+    assert "nitrate" not in by, "a disabled cadence is not a discipline"
+    test_day = next(r for r in report.recommend_big(out, {}, NOW, [])["items"] + [x for x in [] ] if r["id"] == "test_day") if False else None
+    icp = month["icp"]
+    assert icp["any"] and icp["inPeriod"] and icp["latest"]["date"] == "2026-08-12" and icp["previous"]["date"] == "2026-07-10"
+    assert icp["latest"]["flaggedCount"] == 1 and icp["latest"]["flagged"][0]["symbol"] == "Ca"
+    assert [(m["symbol"], m["pct"], m["statusTo"]) for m in icp["movers"]] == [("I", -33, "ok"), ("Ca", 7, "high")], "a status change moves even under the floor; strontium did not"
+    assert icp["daysSinceLast"] == 20
+    ageing = month["ageing"]
+    assert [(i["id"], i["status"]) for i in ageing["items"]] == [("replace_carbon", "overdue"), ("calibrate_ph", "never")]
+    assert ageing["items"][0]["ageDays"] == 73 and ageing["items"][0]["ratio"] == 2.43
+    assert ageing["filters"] == [{"id": "sed", "label": "Sediment", "usedPct": 105, "litres": 2100, "ageDays": 184, "status": "overdue"}]
+    # Without an AWC plan the ledger compares to the recent rate and no plan rec fires.
+    ctx = _month_ctx()
+    ctx["awcPlanDailyL"] = 0
+    ctx["icpReports"] = [ctx["icpReports"][0]]
+    out2 = report.compile_period(ctx)
+    assert out2["month"]["water"]["plannedL"] is None and out2["month"]["water"]["met"] is None
+    assert "water_plan" not in out2["recommendations"]["raised"]
+    assert out2["month"]["icp"]["inPeriod"] is False and out2["month"]["icp"]["movers"] == [] and out2["month"]["icp"]["daysSinceLast"] == 53
+    ctx["icpReports"][0]["sampleDate"] = "2026-03-01"
+    out3 = report.compile_period(ctx)
+    assert "icp_due" in out3["recommendations"]["raised"]
+    assert next(r for r in report.recommend_big(out3, {}, NOW, [])["raised"] if r == "icp_due")
+    # The test-day recommendation names the day the keeper already tests on.
+    big = report.recommend_big(out3, {"salt_stock": (NOW + timedelta(days=20)).isoformat(), "calibrate_ph": (NOW + timedelta(days=20)).isoformat(),
+                                      "hatch_capacity": (NOW + timedelta(days=20)).isoformat()}, NOW, [])
+    assert big["items"][0]["id"] == "test_day", [r["id"] for r in big["items"]]
+    assert big["items"][0]["title"] == "Set a test day — Saturday fits your completions"
+    assert big["items"][0]["evidence"] == "5 of 6 scheduled tests logged this month; 40 % of the ones you did fell on a Saturday."
+
+
+def test_ws_month_compile_reads_the_ledgers_and_the_push_says_the_move():
+    now = datetime.now(timezone.utc)
+    month = report.period_bounds(now, 0, "month", "previous")
+    inside = month["start"] + timedelta(days=3, hours=9)
+    prev_start = report._month_start(month["start"].date(), 1).isoformat()
+    entry = FakeEntry(options={CONF_SETTINGS: {
+        "tank": {"volumeLitres": 52},
+        "automaticWaterChange": {"enabled": True, "schedule": {"enabled": True, "amountUnit": "percent", "amount": 10, "period": "week", "times": ["02:00"], "days": []}},
+        "maintenance": {"enabled": True, "tasks": {"water_change": {"label": "Water change", "cadenceDays": 7, "criticalAfterDays": 14, "enabled": True, "scheduleMode": "interval", "logsVolume": True}},
+                        "completions": {"water_change": [{"id": "a", "timestamp": inside.isoformat(), "volume": 12, "volumeUnit": "L"}]}},
+        "manualTests": {"enabled": True, "schedules": {"alkalinity": {"enabled": True, "cadenceDays": 7}}},
+        "reports": {"weekStart": 0, "items": [{"id": f"month:{prev_start}", "kind": "month", "start": prev_start, "label": "Before", "weekScore": {"total": 40, "condition": 40, "consistency": 40},
+                                               "recommendations": [{"id": "test_alkalinity", "title": "Test alkalinity this week"}]}]},
+    }})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_report_compile(hass, conn, {"id": 1, "period": "month"}))
+    assert not conn.errors, conn.errors
+    out = conn.results[-1].payload
+    assert out["period"]["kind"] == "month" and out["month"]["trend"]["previous"] == "Before"
+    assert out["month"]["water"]["plannedL"] == round(52 * 0.10 / 7 * month["days"], 1), out["month"]["water"]
+    assert out["month"]["testing"]["scheduled"] == 1 and out["month"]["goals"]["items"] == [{"id": "test_alkalinity", "title": "Test alkalinity this week", "status": "open"}]
+    assert out["recommendations"]["size"] == "big" and "test_day" not in out["recommendations"]["raised"], "one scheduled parameter is not a test-day case"
+    ctx = integration._report_context(entry.options[CONF_SETTINGS] | {}, now, now, month, {})
+    assert ctx["awcPlanDailyL"] > 0 and ctx["saltState"]["tracked"] is False and ctx["rodiFilters"] == []
+    title, text = report.push_text(out)
+    assert title.startswith("OpenReef Monthly Reef Report") and "on last month" in text.splitlines()[0]
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

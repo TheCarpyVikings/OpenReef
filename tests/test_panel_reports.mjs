@@ -266,4 +266,62 @@ test("test_settings_card_timeline_anchor_and_store", async () => {
   assertEqual(calls[0].which, "previous");
 });
 
+test("test_month_dialog_renders_the_monthly_sections", async () => {
+  const panel = await makePanel({ reports: { weekStart: 0, scoreLog: [], events: [], items: [] }, captures: [
+    { id: "a", timestamp: new Date(2026, 7, 2, 12).toISOString(), label: "Early", thumbnail: "thumbs/a.jpg" },
+    { id: "b", timestamp: new Date(2026, 7, 16, 12).toISOString(), label: "Mid", thumbnail: "thumbs/b.jpg" },
+    { id: "c", timestamp: new Date(2026, 7, 30, 12).toISOString(), label: "Late", thumbnail: "thumbs/c.jpg" },
+  ] });
+  const data = fixtureReport();
+  data.period = { kind: "month", which: "previous", start: "2026-08-01T00:00:00+00:00", end: "2026-09-01T00:00:00+00:00", label: "August 2026", partial: false, days: 31, weekStart: 0 };
+  data.living.corals.added = [{ id: "c3", name: "Goniopora" }];
+  data.recommendations = { size: "big", calm: false, snoozed: [], raised: ["salt_stock", "water_plan"], items: [
+    { id: "salt_stock", size: "big", title: "Order salt", evidence: "About 5.5 weeks of salt left. Third month running.", effort: "5 min", effect: "No batch waits.", promoted: true, actions: [{ action: "tab", id: "mixing", label: "Open the mixing station" }] },
+    { id: "water_plan", size: "big", title: "Raise the AWC volume or lower its plan — pick one", evidence: "40 L changed against 62 L planned.", effort: "5 min", effect: "A plan the tank actually gets.", actions: [{ action: "tab", id: "awc", label: "Open AWC" }] },
+  ] };
+  data.month = {
+    trend: { previous: "July 2026", deltas: { total: 6, condition: 3, consistency: 8, health: null },
+      months: [{ id: "month:2026-06-01", label: "June 2026", start: "2026-06-01", total: 58, condition: 50, consistency: 64, health: 80 }, { id: "month:2026-07-01", label: "July 2026", start: "2026-07-01", total: 60, condition: 55, consistency: 66, health: 82 }, { id: "month:2026-08-01", label: "August 2026", start: "2026-08-01", total: 66, condition: 58, consistency: 74, health: null, current: true }],
+      weeks: [{ start: "2026-08-03", label: "3–9 August 2026", total: 70 }, { start: "2026-08-10", label: "10–16 August 2026", total: 72 }] },
+    drift: { late: [{ id: "sock", label: "Filter sock", done: 4, timed: 3, late: 2, skipped: 0, lateShare: 67, slipDays: 3 }], held: [{ id: "water", label: "Water change", done: 4 }] },
+    consumption: { parameters: [{ id: "alkalinity", label: "Alkalinity", unit: "dKH", months: [{ label: "Jun", perDay: 0.1, pairs: 2, readings: 4 }, { label: "Jul", perDay: 0.15, pairs: 2, readings: 4 }, { label: "Aug", perDay: 0.2, pairs: 2, readings: 4 }], changePct: 100, direction: "rising" },
+      { id: "calcium", label: "Calcium", unit: "ppm", months: [{ label: "Jun", perDay: null, pairs: 0, readings: 0 }, { label: "Jul", perDay: null, pairs: 1, readings: 2 }, { label: "Aug", perDay: null, pairs: 0, readings: 0 }], changePct: null, direction: "unknown" }] },
+    water: { changedL: 40, handL: 40, autoL: 0, pctOfTank: 77, awcRuns: 0, plannedL: 62, met: false, shortfallL: 22, usualL: 44.3, salt: { tracked: true, usedKg: 2.5, onHandKg: 3.2, weeksLeft: 5.5, low: false } },
+    testing: { scheduled: 2, overallRatio: 50, tests: 5, expected: 6, bestDay: "Saturday", bestDayShare: 40, parameters: [{ id: "calcium", label: "Calcium", cadenceDays: 14, expected: 2, tests: 0, ratio: 0, longestGapDays: 31, onCadence: false }, { id: "alkalinity", label: "Alkalinity", cadenceDays: 7, expected: 4, tests: 4, ratio: 100, longestGapDays: 24, onCadence: false }] },
+    icp: { any: true, inPeriod: true, daysSinceLast: 20, latest: { id: "b", lab: "Triton", date: "2026-08-12", elements: 3, flaggedCount: 1, flagged: [{ symbol: "Ca", name: "Calcium", value: 450, unit: "ppm", status: "high" }] }, previous: { id: "a", lab: "Triton", date: "2026-07-10", elements: 3, flaggedCount: 0, flagged: [] },
+      movers: [{ symbol: "I", name: "Iodine", from: 60, to: 40, unit: "ppb", pct: -33, statusFrom: "ok", statusTo: "ok" }, { symbol: "Ca", name: "Calcium", from: 420, to: 450, unit: "ppm", pct: 7, statusFrom: "ok", statusTo: "high" }] },
+    ageing: { items: [{ id: "replace_carbon", label: "Replace carbon", kind: "consumable", cadenceDays: 30, lastAt: "2026-06-20T09:00:00+00:00", ageDays: 73, ratio: 2.43, status: "overdue" }, { id: "calibrate_ph", label: "Calibrate pH probe", kind: "calibration", cadenceDays: 30, lastAt: null, ageDays: null, ratio: null, status: "never" }],
+      filters: [{ id: "sed", label: "Sediment", usedPct: 105, litres: 2100, ageDays: 184, status: "overdue" }] },
+    goals: { from: "July 2026", cleared: 1, open: 2, items: [{ id: "water_plan", title: "Raise the AWC volume or lower its plan — pick one", status: "open" }, { id: "test_alkalinity", title: "Test alkalinity this week", status: "cleared" }] },
+  };
+  panel._report = { open: true, loading: false, error: "", data, at: Date.now(), period: "month", which: "previous", items: [] };
+  const html = panel._reportDialog();
+  for (const heading of ["Last month's plan", "Score over months", "Cadence drift", "Consumption trend", "Water ledger", "Testing discipline", ">ICP<", "Equipment ageing", "The next two weeks", "Recommendations · big"]) assert(html.includes(heading), heading);
+  assert(html.includes("third month running") && html.includes('class="report-card report-rec promoted"'), "the promoted recommendation says so");
+  assert(html.includes("July 2026 recommended 2") && html.includes(">still open<") && html.includes(">cleared<"));
+  assert(html.includes("up 6 on July 2026") && html.includes("up 8 on July 2026") && html.includes("2 stored months before this one"));
+  assert((html.match(/report-spark-line/g) || []).length >= 3, "score by month, the weeks inside it, and alkalinity");
+  assert(html.includes('data-action="report-task" data-id="sock"') && html.includes("2 of 3") && html.includes("3.0 d on average") && html.includes("Water change · 4"));
+  assert(html.includes(">rising<") && html.includes("+100 %") && html.includes("1 falling pair") && html.includes(">not enough tests<"));
+  assert(html.includes("62.0 L planned · 22.0 L short") && html.includes("2.50 kg") && html.includes("≈6 weeks at your rate"));
+  assert(html.includes("0 of 2") && html.includes(">slipped<") && html.includes("Your tests land on a Saturday (40 % of them)"));
+  assert(html.includes("Triton") && html.includes("1 flagged") && html.includes("against Triton · 2026-07-10") && html.includes("Iodine") && html.includes("-33 %") && html.includes("+7 %"));
+  assert(html.includes('data-action="report-task" data-id="replace_carbon"') && html.includes("73 d") && html.includes(">overdue<") && html.includes(">never logged<") && html.includes("Sediment · 105 %"));
+  assert(html.includes("New this period: Goniopora"));
+  assert(html.includes("First of the month") && html.includes("Last of the month") && html.includes("thumbs/a.jpg") && html.includes("thumbs/c.jpg") && !html.includes("thumbs/b.jpg"), "first and last capture of the month");
+  data.month.icp = { any: true, inPeriod: false, daysSinceLast: 140, latest: { lab: "ATI", date: "2026-04-14" }, previous: null, movers: [] };
+  data.month.goals = { from: null, items: [], cleared: 0, open: 0 };
+  data.recommendations = { size: "big", calm: true, snoozed: [], raised: [], items: [{ id: "keep_rhythm", size: "big", title: "Keep the rhythm", evidence: "Nothing in this month asked for a change.", effort: "none", effect: "The reef likes it this way.", actions: [] }] };
+  const calm = panel._reportDialog();
+  assert(calm.includes("No ICP this month — the last (ATI, 2026-04-14) was 140 days before the month's end."));
+  assert(calm.includes("The first stored month gives the next one something to check against.") && calm.includes(">This month<"));
+  // The panel's own recorder read reaches back three months for a month.
+  const spans = [];
+  panel._config.sensors = { alkalinity: { entity_id: "sensor.alk", enabled: true } };
+  panel._fetchHistoryTrendPoints = async (entityId, start, end) => { spans.push(Math.round((end - start) / 86400000)); return [{ time: Date.parse("2026-08-10T09:00:00Z"), value: 8.3 }]; };
+  await panel._reportPanelReadings({ period: { kind: "month", end: "2026-09-01T00:00:00Z" } });
+  await panel._reportPanelReadings({ period: { kind: "week", end: "2026-09-01T00:00:00Z" } });
+  assertEqual(spans.join(","), "92,28");
+});
+
 await runTests();

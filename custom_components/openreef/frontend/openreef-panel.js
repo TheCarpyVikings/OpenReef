@@ -6909,7 +6909,7 @@ class OpenReefPanel extends HTMLElement {
       .filter((id) => sensors[id]?.entity_id && this._sensorEnabled?.(sensors[id]) !== false);
     if (!params.length || !data?.period?.end) return null;
     const end = new Date(data.period.end);
-    const start = new Date(end.getTime() - 28 * 86400000);
+    const start = new Date(end.getTime() - (data.period?.kind === "month" ? 92 : 28) * 86400000);
     const readings = {};
     try {
       for (const id of params) {
@@ -7051,11 +7051,11 @@ class OpenReefPanel extends HTMLElement {
       : `<button class="secondary compact-button" data-action="tab" data-id="${this._escape(a.id)}">${this._escape(a.label)}</button>`;
     return `
       <section class="report-section">
-        <div class="report-section-head"><p class="eyebrow">${recs.calm ? "This week" : "Recommendations · small"}</p>${recs.snoozed?.length ? `<small class="muted">${recs.snoozed.length} snoozed</small>` : ""}</div>
+        <div class="report-section-head"><p class="eyebrow">${recs.calm ? (r.period?.kind === "month" ? "This month" : "This week") : `Recommendations · ${recs.size === "big" ? "big" : "small"}`}</p>${recs.snoozed?.length ? `<small class="muted">${recs.snoozed.length} snoozed</small>` : ""}</div>
         <div class="report-cards">
           ${items.map((rec) => `
-            <article class="report-card report-rec">
-              <h4>${this._escape(rec.title)}</h4>
+            <article class="report-card report-rec${rec.promoted ? " promoted" : ""}">
+              <h4>${this._escape(rec.title)}${rec.promoted ? ` <span class="pill warning">third month running</span>` : ""}</h4>
               <p><small class="muted">Because:</small> ${this._escape(rec.evidence)}</p>
               <small class="muted">${this._escape(rec.effort)} · ${this._escape(rec.effect)}</small>
               <div class="button-row">
@@ -7112,8 +7112,164 @@ class OpenReefPanel extends HTMLElement {
           <p class="report-verdict-line">${this._escape(r.headline?.verdict || "")}</p>
           ${sc.stamps ? `<small class="muted">Stamped on ${sc.stamps} of ${r.period?.days || 7} days${sc.gaps ? ` — ${sc.gaps} day${sc.gaps === 1 ? "" : "s"} the panel stayed closed` : ""}.</small>` : `<small class="muted">No Reef Health stamps this period.</small>`}
         </div>
-        ${this._reportPhoto(r)}
+        ${r.period?.kind === "month" ? (this._reportPhotoPair(r) || this._reportPhoto(r)) : this._reportPhoto(r)}
       </div>`;
+  }
+
+  // First and last capture of the month, side by side — the growth a month
+  // shows that a week cannot. Empty when the month has fewer than two.
+  _reportPhotoPair(r) {
+    const start = Date.parse(r?.period?.start || ""), end = Date.parse(r?.period?.end || "");
+    const captures = (Array.isArray(this._config?.captures) ? this._config.captures : [])
+      .filter((c) => c?.thumbnail && Number.isFinite(Date.parse(c.timestamp || "")) && Date.parse(c.timestamp) >= start && Date.parse(c.timestamp) < end)
+      .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+    if (captures.length < 2) return "";
+    const fig = (c, tag) => `
+      <figure class="report-photo">
+        <img src="${this._escape(this._captureUrl(c.thumbnail))}" alt="${this._escape(c.label || "Capture")}">
+        <figcaption>${tag} · ${this._escape(this._formatActivityTime(c.timestamp))}${c.cameraLabel ? ` · ${this._escape(c.cameraLabel)}` : ""}</figcaption>
+      </figure>`;
+    return `<div class="report-photo-pair">${fig(captures[0], "First of the month")}${fig(captures[captures.length - 1], "Last of the month")}</div>`;
+  }
+
+  // --- The month's own sections (Stage F) ------------------------------------
+
+  _reportDelta(value, suffix = "") {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return "";
+    const n = Number(value);
+    return n === 0 ? `level${suffix}` : `${n > 0 ? "up" : "down"} ${Math.abs(n)}${suffix}`;
+  }
+
+  _reportMonthTrend(trend) {
+    const months = Array.isArray(trend?.months) ? trend.months : [];
+    const weeks = Array.isArray(trend?.weeks) ? trend.weeks : [];
+    const deltas = trend?.deltas || {};
+    const current = months.find((m) => m.current) || {};
+    const prevText = trend?.previous ? ` on ${trend.previous}` : "";
+    const series = months.filter((m) => Number.isFinite(Number(m.total))).map((m) => ({ t: m.start, v: Number(m.total) }));
+    const weekSeries = weeks.filter((w) => Number.isFinite(Number(w.total))).map((w) => ({ t: w.start, v: Number(w.total) }));
+    return `
+      <section class="report-section report-month-trend">
+        <div class="report-section-head"><p class="eyebrow">Score over months</p><small class="muted">${months.length > 1 ? `${months.length - 1} stored month${months.length === 2 ? "" : "s"} before this one` : "no stored month before this one"}</small></div>
+        <div class="report-stats">
+          ${this._reportStat("Month score", current.total ?? "—", this._reportDelta(deltas.total, prevText) || "nothing to compare", deltas.total > 0 ? "ok" : deltas.total < 0 ? "warning" : "")}
+          ${this._reportStat("Condition", current.condition ?? "—", this._reportDelta(deltas.condition, prevText))}
+          ${this._reportStat("Consistency", current.consistency ?? "—", this._reportDelta(deltas.consistency, prevText))}
+          ${this._reportStat("Reef Health, average", current.health ?? "—", this._reportDelta(deltas.health, prevText))}
+        </div>
+        ${series.length > 1 ? `<div class="report-spark-row">${this._reportSparkline(series, null, { width: 320, height: 48, label: "score by month" })}<small class="muted">Score by month</small></div>` : ""}
+        ${weekSeries.length > 1 ? `<div class="report-spark-row">${this._reportSparkline(weekSeries, null, { width: 320, height: 40, label: "score by week" })}<small class="muted">The weeks inside the month</small></div>` : ""}
+        ${months.length > 1 ? `<div class="report-table-wrap"><table class="report-table">
+          <thead><tr><th>Month</th><th>Score</th><th>Condition</th><th>Consistency</th><th>Reef Health</th></tr></thead>
+          <tbody>${months.map((m) => `<tr class="${m.current ? "current" : ""}"><td>${this._escape(m.label)}</td><td>${m.total ?? "—"}</td><td>${m.condition ?? "—"}</td><td>${m.consistency ?? "—"}</td><td>${m.health ?? "—"}</td></tr>`).join("")}</tbody>
+        </table></div>` : ""}
+      </section>`;
+  }
+
+  _reportDrift(drift) {
+    const late = Array.isArray(drift?.late) ? drift.late : [];
+    const held = Array.isArray(drift?.held) ? drift.held : [];
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Cadence drift</p><small class="muted">${late.length ? `${late.length} chore${late.length === 1 ? "" : "s"} sliding` : "nothing sliding"}</small></div>
+        ${late.length ? `<div class="report-table-wrap"><table class="report-table">
+          <thead><tr><th>Chore</th><th>Late</th><th>Past the cadence</th><th>Skipped</th></tr></thead>
+          <tbody>${late.map((t) => `<tr><td><button class="link-button report-task-link" data-action="report-task" data-id="${this._escape(t.id)}">${this._escape(t.label)}</button></td><td>${t.late} of ${t.timed || t.done}${t.lateShare !== null && t.lateShare !== undefined ? ` <small class="muted">(${Math.round(t.lateShare)} %)</small>` : ""}</td><td>${t.slipDays !== null && t.slipDays !== undefined ? `${this._reportFmt(t.slipDays)} d on average` : "—"}</td><td>${t.skipped || ""}</td></tr>`).join("")}</tbody>
+        </table></div>` : `<p class="muted">No chore with two ticks came late this month.</p>`}
+        ${held.length ? `<p class="report-held"><small class="muted">Streaks held:</small> ${held.map((h) => `<span class="pill ok">${this._escape(h.label)} · ${h.done}</span>`).join(" ")}</p>` : ""}
+      </section>`;
+  }
+
+  _reportConsumption(cons) {
+    const params = Array.isArray(cons?.parameters) ? cons.parameters : [];
+    if (!params.length) return "";
+    const pill = (d) => d === "rising" ? `<span class="pill warning">rising</span>` : d === "falling" ? `<span class="pill warning">falling</span>` : d === "level" ? `<span class="pill ok">level</span>` : `<span class="pill unknown">not enough tests</span>`;
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Consumption trend</p><small class="muted">the fall a day between tests, by month · rising is growth, falling is the doser or the corals to check</small></div>
+        <div class="report-table-wrap"><table class="report-table">
+          <thead><tr><th>Parameter</th>${(params[0].months || []).map((m) => `<th>${this._escape(m.label)}</th>`).join("")}<th>Change</th></tr></thead>
+          <tbody>${params.map((p) => `<tr><td><strong>${this._escape(p.label)}</strong><br><small class="muted">${this._escape(p.unit)}/day</small></td>${(p.months || []).map((m) => `<td>${m.perDay === null || m.perDay === undefined ? `<small class="muted">${m.readings ? `${m.pairs} falling pair${m.pairs === 1 ? "" : "s"}` : "no tests"}</small>` : this._reportFmt(m.perDay, p.id === "alkalinity" ? 2 : 1)}</td>`).join("")}<td>${pill(p.direction)}${p.changePct !== null && p.changePct !== undefined ? ` <small class="muted">${p.changePct > 0 ? "+" : ""}${Math.round(p.changePct)} %</small>` : ""}</td></tr>`).join("")}</tbody>
+        </table></div>
+      </section>`;
+  }
+
+  _reportWaterLedger(w) {
+    if (!w) return "";
+    const salt = w.salt || {};
+    const planText = w.plannedL ? `${this._reportFmt(w.plannedL)} L planned${w.met ? " · met" : w.shortfallL ? ` · ${this._reportFmt(w.shortfallL)} L short` : ""}` : w.usualL ? `your recent rate says ${this._reportFmt(w.usualL)} L a month` : "no AWC plan to compare";
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Water ledger</p></div>
+        <div class="report-stats">
+          ${this._reportStat("Changed", w.changedL ? `${this._reportFmt(w.changedL)} L` : "none", `${this._reportFmt(w.handL)} L by hand · ${this._reportFmt(w.autoL)} L auto${w.pctOfTank ? ` · ${this._reportFmt(w.pctOfTank, 0)} % of the tank` : ""}`)}
+          ${this._reportStat("Against the plan", w.plannedL ? (w.met ? "met" : "short") : "—", planText, w.plannedL ? (w.met ? "ok" : "warning") : "")}
+          ${this._reportStat("Salt used", salt.tracked ? (salt.usedKg ? `${this._reportFmt(salt.usedKg, 2)} kg` : "none logged") : "—", salt.tracked ? `${this._reportFmt(salt.onHandKg, 1)} kg on hand${salt.weeksLeft !== null && salt.weeksLeft !== undefined ? ` · ≈${this._reportFmt(salt.weeksLeft, 0)} weeks at your rate` : ""}` : "salt stock not tracked", salt.tracked && salt.low ? "warning" : "")}
+        </div>
+      </section>`;
+  }
+
+  _reportTesting(t) {
+    const params = Array.isArray(t?.parameters) ? t.parameters : [];
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Testing discipline</p><small class="muted">${params.length ? `${t.tests || 0} tests logged · ${t.overallRatio === null || t.overallRatio === undefined ? "" : `${Math.round(t.overallRatio)} % of the cadence you set`}` : "no test cadence set in Settings → Manual tests"}</small></div>
+        ${params.length ? `<div class="report-table-wrap"><table class="report-table">
+          <thead><tr><th>Parameter</th><th>Tests</th><th>Longest gap</th><th>Cadence</th></tr></thead>
+          <tbody>${params.map((p) => `<tr><td><strong>${this._escape(p.label)}</strong></td><td>${p.tests} of ${p.expected} <small class="muted">(every ${p.cadenceDays} d)</small></td><td>${this._reportFmt(p.longestGapDays, 0)} d</td><td>${p.onCadence ? `<span class="pill ok">kept</span>` : `<span class="pill warning">slipped</span>`}</td></tr>`).join("")}</tbody>
+        </table></div>` : ""}
+        ${t?.bestDay ? `<p class="muted"><small>Your tests land on a ${this._escape(t.bestDay)} (${this._reportFmt(t.bestDayShare, 0)} % of them).</small></p>` : ""}
+      </section>`;
+  }
+
+  _reportIcp(icp) {
+    if (!icp) return "";
+    const statusPill = (st) => st === "ok" ? `<span class="pill ok">ok</span>` : st === "bdl" ? `<span class="pill unknown">below detection</span>` : st ? `<span class="pill ${st === "contaminant" ? "critical" : "warning"}">${this._escape(st)}</span>` : "";
+    let body = "";
+    if (!icp.any) body = `<p class="muted">No ICP reports imported yet.</p>`;
+    else if (!icp.inPeriod) body = `<p class="muted">No ICP this month — the last (${this._escape(icp.latest?.lab || "")}, ${this._escape(icp.latest?.date || "")}) was ${this._reportFmt(icp.daysSinceLast, 0)} days before the month's end.</p>`;
+    else {
+      const l = icp.latest || {}, p = icp.previous;
+      const movers = Array.isArray(icp.movers) ? icp.movers : [];
+      body = `
+        <p><strong>${this._escape(l.lab || "ICP")}</strong> · ${this._escape(l.date || "")} · ${l.elements || 0} elements · ${l.flaggedCount ? `<span class="pill warning">${l.flaggedCount} flagged</span>` : `<span class="pill ok">nothing flagged</span>`}${p ? `<br><small class="muted">against ${this._escape(p.lab || "")} · ${this._escape(p.date || "")}</small>` : `<br><small class="muted">no earlier ICP to compare</small>`}</p>
+        ${l.flagged?.length ? `<p class="report-held">${l.flagged.map((f) => `<span class="pill ${f.status === "contaminant" ? "critical" : "warning"}">${this._escape(f.name || f.symbol)} ${f.value ?? ""} ${this._escape(f.unit || "")} · ${this._escape(f.status)}</span>`).join(" ")}</p>` : ""}
+        ${movers.length ? `<div class="report-table-wrap"><table class="report-table">
+          <thead><tr><th>Moved</th><th>Before</th><th>Now</th><th>Change</th></tr></thead>
+          <tbody>${movers.map((m) => `<tr><td><strong>${this._escape(m.name || m.symbol)}</strong></td><td>${m.from} ${this._escape(m.unit)} ${statusPill(m.statusFrom)}</td><td>${m.to} ${this._escape(m.unit)} ${statusPill(m.statusTo)}</td><td>${m.pct === null || m.pct === undefined ? "—" : `${m.pct > 0 ? "+" : ""}${Math.round(m.pct)} %`}</td></tr>`).join("")}</tbody>
+        </table></div>` : p ? `<p class="muted">Nothing moved materially since the ICP before.</p>` : ""}`;
+    }
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">ICP</p></div>
+        ${body}
+      </section>`;
+  }
+
+  _reportAgeing(a) {
+    const items = Array.isArray(a?.items) ? a.items : [];
+    const filters = Array.isArray(a?.filters) ? a.filters : [];
+    if (!items.length && !filters.length) return "";
+    const pill = (st) => st === "overdue" ? `<span class="pill critical">overdue</span>` : st === "due" ? `<span class="pill warning">due</span>` : st === "never" ? `<span class="pill unknown">never logged</span>` : st === "untracked" ? `<span class="pill unknown">untracked</span>` : `<span class="pill ok">fine</span>`;
+    return `
+      <section class="report-section">
+        <div class="report-section-head"><p class="eyebrow">Equipment ageing</p><small class="muted">consumables, calibrations and services by age</small></div>
+        ${items.length ? `<div class="report-table-wrap"><table class="report-table">
+          <thead><tr><th>Item</th><th>Age</th><th>Cadence</th><th></th></tr></thead>
+          <tbody>${items.map((i) => `<tr><td><button class="link-button report-task-link" data-action="report-task" data-id="${this._escape(i.id)}">${this._escape(i.label)}</button></td><td>${i.ageDays === null || i.ageDays === undefined ? "—" : `${this._reportFmt(i.ageDays, 0)} d`}</td><td>${i.cadenceDays} d</td><td>${pill(i.status)}</td></tr>`).join("")}</tbody>
+        </table></div>` : ""}
+        ${filters.length ? `<p class="report-held"><small class="muted">RODI stages:</small> ${filters.map((f) => `<span class="pill ${f.status === "overdue" ? "critical" : f.status === "due" ? "warning" : f.status === "ok" ? "ok" : "unknown"}">${this._escape(f.label)}${f.usedPct !== null && f.usedPct !== undefined ? ` · ${Math.round(f.usedPct)} %` : ""}</span>`).join(" ")}</p>` : ""}
+      </section>`;
+  }
+
+  _reportGoals(g) {
+    const items = Array.isArray(g?.items) ? g.items : [];
+    return `
+      <section class="report-section report-goals">
+        <div class="report-section-head"><p class="eyebrow">Last month's plan</p><small class="muted">${g?.from ? `${this._escape(g.from)} recommended ${items.length}` : "no stored month before this one"}</small></div>
+        ${items.length ? `<ul class="report-list">${items.map((i) => `<li>${this._escape(i.title)} <span class="pill ${i.status === "cleared" ? "ok" : "warning"}">${i.status === "cleared" ? "cleared" : "still open"}</span></li>`).join("")}</ul>`
+          : g?.from ? `<p class="muted">Nothing to check — last month asked for no change.</p>` : `<p class="muted">The first stored month gives the next one something to check against.</p>`}
+      </section>`;
   }
 
   _reportDid(r) {
@@ -7199,6 +7355,7 @@ class OpenReefPanel extends HTMLElement {
             <h4>Corals</h4>
             ${co.colonies ? `<p><strong>${co.checkins || 0}</strong> look${co.checkins === 1 ? "" : "s"} · <strong>${co.feeds || 0}</strong> target feed${co.feeds === 1 ? "" : "s"} across ${co.colonies} colon${co.colonies === 1 ? "y" : "ies"}</p>
               ${grades ? `<small class="muted">Grades now: ${this._escape(grades)}</small>` : ""}
+              ${(co.added || []).length ? `<small class="muted">New this period: ${this._escape(co.added.map((a) => a.name).join(", "))}</small>` : ""}
               ${(co.moved || []).length ? `<ul class="report-list">${co.moved.map((m) => `<li>${this._escape(m.name)}: ${m.from} → ${m.to} <span class="pill ${m.to < m.from ? "warning" : "ok"}">${m.to < m.from ? "down" : "up"} ${Math.abs(m.to - m.from)}</span></li>`).join("")}</ul>` : ""}` : `<p class="muted">No colonies in the diary yet.</p>`}
           </article>
         </div>
@@ -7249,13 +7406,19 @@ class OpenReefPanel extends HTMLElement {
     if (st.loading && !r) body = `<div class="center-card compact-center"><div class="spinner"></div><p>Reading the ledgers…</p></div>`;
     else if (st.error && !r) body = `<div class="notice error">${this._escape(st.error)}</div>`;
     else if (r) {
+      const month = r.period?.kind === "month" && r.month ? r.month : null;
       body = `
         ${st.error ? `<div class="notice error">${this._escape(st.error)}</div>` : ""}
         ${this._reportHeadline(r)}
         ${this._reportRecommendations(r)}
+        ${month ? this._reportGoals(month.goals) : ""}
+        ${month ? this._reportMonthTrend(month.trend) : ""}
         ${this._reportDid(r)}
+        ${month ? this._reportDrift(month.drift) : ""}
         ${this._reportWater(r)}
+        ${month ? this._reportConsumption(month.consumption) + this._reportWaterLedger(month.water) + this._reportTesting(month.testing) + this._reportIcp(month.icp) : ""}
         ${this._reportLiving(r)}
+        ${month ? this._reportAgeing(month.ageing) : ""}
         ${this._reportHappened(r)}
         ${this._reportNext(r)}
         ${Array.isArray(r.notes) && r.notes.length ? `<section class="report-section"><div class="report-section-head"><p class="eyebrow">Notes</p></div><ul class="report-list report-notes">${r.notes.map((n) => `<li>${this._escape(n)}</li>`).join("")}</ul></section>` : ""}
@@ -34154,7 +34317,13 @@ ${parts.buttons}
         .report-score-delta { color: #cbd5e1; font-size: 13px; }
         .report-verdict { display: grid; gap: 6px; align-content: start; }
         .report-verdict-line { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.35; }
-        .report-photo { margin: 0; grid-column: 1 / -1; display: grid; gap: 6px; }
+         .report-photo-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+ .report-spark-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0; }
+ .report-held { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 0; }
+ .report-table tr.current td { font-weight: 600; }
+ .report-rec.promoted { border-color: var(--warning, #d9a441); }
+ .report-rec h4 .pill { vertical-align: middle; margin-left: 6px; }
+ .report-photo { margin: 0; grid-column: 1 / -1; display: grid; gap: 6px; }
         .report-photo img { width: 100%; max-height: 260px; object-fit: cover; border-radius: 10px; border: 1px solid #24364a; }
         .report-photo figcaption { color: #94a3b8; font-size: 13px; }
         .report-section { display: grid; gap: 10px; border-top: 1px solid #24364a; padding-top: 12px; }

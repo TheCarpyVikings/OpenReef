@@ -10956,7 +10956,7 @@ async def _async_report_generate(hass: HomeAssistant, entry: OpenReefConfigEntry
     period = report_engine.period_bounds(now_local, (config.get("reports") or {}).get("weekStart", 0), kind, which)
     readings = await _report_recorder_readings(
         hass, config, tuple(MANUAL_TEST_PARAMETERS),
-        period["start"] - timedelta(days=report_engine.TREND_DAYS), period["end"])
+        period["start"] - timedelta(days=report_engine.lookback_days(period["kind"])), period["end"])
     report = report_engine.compile_period(_report_context(config, now_utc, now_local, period, readings))
     report["readingsSource"] = "recorder" if readings else "tests"
     snap = _report_store_snapshot(config, report)
@@ -11111,7 +11111,7 @@ async def websocket_report_compile(
     if not readings:
         readings = await _report_recorder_readings(
             hass, config, tuple(MANUAL_TEST_PARAMETERS),
-            period["start"] - timedelta(days=report_engine.TREND_DAYS), period["end"])
+            period["start"] - timedelta(days=report_engine.lookback_days(period["kind"])), period["end"])
     ctx = _report_context(config, now_utc, now_local, period, readings)
     report = report_engine.compile_period(ctx)
     report["readingsSource"] = "panel" if msg.get("readings") else ("recorder" if readings else "tests")
@@ -16983,7 +16983,27 @@ def _report_context(config: dict[str, Any], now_utc: datetime, now_local: dateti
         feed_log = None
     reports = _reports_block(config)
     plan_from = now_utc if period["partial"] else max(now_utc, end)
+    # Stage F: the month's ledgers — stored snapshots, test cadences, ICP,
+    # the salt stock and RODI stages, the AWC plan and the recent rate.
+    mixing = _mixing_cfg(config)
+    try:
+        salt_state = _mixing_salt_stock_state(config, now_utc)
+    except Exception as err:  # noqa: BLE001 — the ledger says "not tracked" rather than failing the report
+        _LOGGER.debug("report: salt stock unavailable: %s", err)
+        salt_state = None
+    acfg = _awc_cfg(config) or {}
+    awc_sched = acfg.get("schedule") if isinstance(acfg.get("schedule"), dict) else {}
+    plan_daily = (awc_engine.daily_equivalent_litres(awc_sched, _awc_effective_tank_l(config))
+                  if acfg.get("enabled") and awc_sched.get("enabled") else 0.0)
     return {
+        "items": _report_items(config),
+        "testSchedules": (config.get("manualTests") or {}).get("schedules") if isinstance(config.get("manualTests"), dict) else {},
+        "icpReports": config.get("icpReports"),
+        "saltState": salt_state,
+        "saltHistory": (mixing.get("saltStock") or {}).get("history") if isinstance(mixing.get("saltStock"), dict) else [],
+        "rodiFilters": (mixing.get("rodi") or {}).get("filters") if isinstance(mixing.get("rodi"), dict) else [],
+        "awcPlanDailyL": plan_daily,
+        "usualWeeklyL": _maintenance_weekly_change_litres(config, now_utc),
         "period": period, "now": now_utc, "tankL": _awc_effective_tank_l(config),
         "tasks": maintenance.get("tasks"), "completions": maintenance.get("completions"),
         "manualReadings": config.get("manualReadings"), "sensorReadings": _report_clean_readings(config, sensor_readings),

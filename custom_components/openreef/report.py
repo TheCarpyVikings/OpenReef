@@ -166,8 +166,9 @@ def maintenance_section(tasks: Any, completions: Any, start: datetime, end: date
         cadence_h = _f(task.get("cadenceHours"))
         cadence_d = _f(task.get("cadenceDays"), 7.0)
         cadence = timedelta(hours=cadence_h) if cadence_h > 0 else timedelta(days=cadence_d)
-        t_done = t_skipped = t_late = 0
+        t_done = t_skipped = t_late = t_timed = 0
         t_litres = 0.0
+        t_slip: list[float] = []
         prev_done: datetime | None = None
         for at, row in dated:
             if row.get("skipped"):
@@ -192,14 +193,18 @@ def maintenance_section(tasks: Any, completions: Any, start: datetime, end: date
                         hand_l += row_l
                 if prev_done is not None and task.get("scheduleMode") != "fixed":
                     timed += 1
+                    t_timed += 1
                     if at - prev_done <= cadence + timedelta(hours=1):
                         on_time += 1
                     else:
                         t_late += 1
+                        t_slip.append((at - prev_done - cadence).total_seconds() / 86400.0)
             prev_done = at
         if t_done or t_skipped:
             by_task.append({"id": task_id, "label": str(task.get("label") or task_id), "done": t_done,
-                            "skipped": t_skipped, "late": t_late, "litres": _round(t_litres) if t_litres else None,
+                            "skipped": t_skipped, "late": t_late, "timed": t_timed,
+                            "slipDays": _round(sum(t_slip) / len(t_slip)) if t_slip else None,
+                            "litres": _round(t_litres) if t_litres else None,
                             "tracked": bool(task.get("enabled"))})
         done += t_done
         skipped += t_skipped
@@ -291,7 +296,7 @@ def water_section(manual: Any, sensors: Any, meta: Any, start: datetime, end: da
             entry["farOut"] = bool(latest_before_end[1] < lo - width or latest_before_end[1] > hi + width)
         # The probe against the kit: the sensor sample nearest the latest test
         # (within a day), apart by more than twice the steady tolerance.
-        if last_test and last_test[0] >= trend_start:
+        if last_test and last_test[0] >= min(start, trend_start):
             tol = STEADY_TOLERANCE.get(param, 0.0)
             near = [r for r in rows if r[2] == "sensor" and abs((r[0] - last_test[0]).total_seconds()) <= 86400]
             if tol and near:
@@ -396,10 +401,13 @@ def corals_section(corals: Any, checkins: Any, feeds: Any, states: Any,
     states = states if isinstance(states, dict) else {}
     n_checks = n_feeds = 0
     moved: list[dict[str, Any]] = []
+    added: list[dict[str, Any]] = []
     grades: dict[str, int] = {}
     for cid, coral in corals.items():
         if not isinstance(coral, dict):
             continue
+        if _in(_parse(coral.get("addedAt")), start, end):
+            added.append({"id": str(cid), "name": str(coral.get("name") or cid)})
         rows = [r for r in (checkins.get(cid) or []) if isinstance(r, dict) and not r.get("undoneAt")]
         n_checks += len([r for r in rows if _in(_parse(r.get("at")), start, end)])
         n_feeds += len([r for r in (feeds.get(cid) or []) if isinstance(r, dict) and not r.get("undoneAt")
@@ -413,7 +421,7 @@ def corals_section(corals: Any, checkins: Any, feeds: Any, states: Any,
         if isinstance(before, (int, float)) and isinstance(after, (int, float)) and abs(after - before) >= 5:
             moved.append({"id": str(cid), "name": str(coral.get("name") or cid), "from": int(before), "to": int(after)})
     moved.sort(key=lambda m: m["to"] - m["from"])
-    return {"colonies": len(corals), "checkins": n_checks, "feeds": n_feeds, "grades": grades, "moved": moved}
+    return {"colonies": len(corals), "checkins": n_checks, "feeds": n_feeds, "grades": grades, "moved": moved, "added": added}
 
 
 def feed_counts_in(feed_log: dict[str, Any], start: datetime, end: datetime) -> dict[str, int]:
@@ -656,8 +664,8 @@ SMALL_RECS_MAX = 3
 
 
 def _rec(rid: str, priority: int, title: str, evidence: str, effort: str, effect: str,
-         actions: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    return {"id": rid, "size": "small", "priority": priority, "title": title, "evidence": evidence,
+         actions: list[dict[str, str]] | None = None, size: str = "small") -> dict[str, Any]:
+    return {"id": rid, "size": size, "priority": priority, "title": title, "evidence": evidence,
             "effort": effort, "effect": effect, "actions": actions or []}
 
 
@@ -752,6 +760,7 @@ def recommend(report: dict[str, Any], snoozed: Any = None, now: datetime | None 
         recs.append(_rec("stamps", 50, "Open the panel once a day",
                          f"Reef Health was stamped on {score.get('stamps') or 0} of {days} days.",
                          "1 min", "A score line with no gaps — and the report can say more.", []))
+    raised = sorted({r["id"] for r in recs})
     recs = [r for r in recs if r["id"] not in hidden]
     recs.sort(key=lambda r: (r["priority"], r["id"]))
     calm = not recs
@@ -761,7 +770,7 @@ def recommend(report: dict[str, Any], snoozed: Any = None, now: datetime | None 
     kept = recs[:SMALL_RECS_MAX]
     for r in kept:
         r.pop("priority", None)
-    return {"items": kept, "calm": calm, "snoozed": sorted(hidden)}
+    return {"items": kept, "calm": calm, "snoozed": sorted(hidden), "raised": raised, "size": "small"}
 
 
 def snapshot(report: dict[str, Any]) -> dict[str, Any]:
@@ -810,6 +819,9 @@ def push_text(report: dict[str, Any]) -> tuple[str, str]:
     head = f"Week Score {total}" if total is not None and period.get("kind") != "month" else (f"Score {total}" if total is not None else "No score yet")
     if ws.get("condition") is not None and ws.get("consistency") is not None:
         head += f" (condition {ws['condition']} · consistency {ws['consistency']})"
+    month_delta = ((report.get("month") or {}).get("trend") or {}).get("deltas", {}).get("total")
+    if period.get("kind") == "month" and isinstance(month_delta, int) and month_delta:
+        head += f", {'up' if month_delta > 0 else 'down'} {abs(month_delta)} on last month"
     if score.get("average") is not None:
         head += f" · Reef Health avg {int(score['average'])}"
         if score.get("delta") is not None and score["delta"] != 0:
@@ -853,6 +865,440 @@ def verdict(report: dict[str, Any]) -> str:
     return line[0].upper() + line[1:] + "." if line else "A quiet period."
 
 
+# --- The monthly report (Stage F, brief §3.2) -----------------------------------
+
+# Readings behind a month: the two months before it, so the consumption trend
+# has three calendar months to compare.
+MONTH_LOOKBACK_DAYS = 92
+BIG_RECS_MAX = 3
+
+# Consumables, calibrations and services ranked by age (brief §3.2, Equipment
+# ageing) — the built-in task ids; a keeper's own tasks are not guessed at.
+AGEING_TASKS = {
+    "replace_carbon": "consumable", "replace_gfo": "consumable", "replace_filter_sock": "consumable",
+    "replace_rodi": "consumable", "calibrate_ph": "calibration", "calibrate_salinity": "calibration",
+    "clean_pumps": "service", "inspect_ato": "service", "clean_skimmer": "service",
+}
+PROBE_CALIBRATION_TASK = {"ph": "calibrate_ph", "salinity": "calibrate_salinity"}
+
+
+def lookback_days(kind: str) -> int:
+    return MONTH_LOOKBACK_DAYS if kind == "month" else TREND_DAYS
+
+
+def _month_start(d: date, back: int = 0) -> date:
+    year, month = d.year, d.month - back
+    while month <= 0:
+        month += 12
+        year -= 1
+    return date(year, month, 1)
+
+
+def _next_month(d: date) -> date:
+    return (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+
+def _snap_num(row: Any, block: str, key: str) -> Any:
+    inner = row.get(block) if isinstance(row.get(block), dict) else {}
+    value = inner.get(key)
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def trend_section(items: Any, period: dict[str, Any], this_score: dict[str, Any],
+                  this_health: dict[str, Any]) -> dict[str, Any]:
+    """The score over months: the stored monthly snapshots before this one
+    plus this compile, month-over-month deltas, and the weeks stored inside
+    the month. Only what was stored — a month never written up is a gap."""
+    rows = [r for r in (items if isinstance(items, list) else []) if isinstance(r, dict)]
+    start_d, end_d = period["start"].date(), period["end"].date()
+    this_id = f"month:{start_d.isoformat()}"
+    months: list[dict[str, Any]] = []
+    weeks: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            d = date.fromisoformat(str(r.get("start"))[:10])
+        except ValueError:
+            continue
+        if r.get("kind") == "month" and r.get("id") != this_id and d < start_d:
+            months.append({"id": r.get("id"), "label": str(r.get("label") or d.strftime("%B %Y")), "start": d.isoformat(),
+                           "total": _snap_num(r, "weekScore", "total"), "condition": _snap_num(r, "weekScore", "condition"),
+                           "consistency": _snap_num(r, "weekScore", "consistency"), "health": _snap_num(r, "health", "average")})
+        elif r.get("kind") == "week" and start_d - timedelta(days=6) <= d < end_d:
+            weeks.append({"start": d.isoformat(), "label": str(r.get("label") or ""), "total": _snap_num(r, "weekScore", "total")})
+    months.sort(key=lambda m: m["start"])
+    months = months[-5:]
+    weeks.sort(key=lambda w: w["start"])
+    current = {"id": this_id, "label": period["label"], "start": start_d.isoformat(), "current": True,
+               "total": this_score.get("total"), "condition": this_score.get("condition"),
+               "consistency": this_score.get("consistency"), "health": this_health.get("average")}
+    prev = months[-1] if months else None
+    deltas: dict[str, int | None] = {}
+    for key in ("total", "condition", "consistency", "health"):
+        a, b = (prev or {}).get(key), current.get(key)
+        deltas[key] = int(round(b - a)) if isinstance(a, (int, float)) and isinstance(b, (int, float)) else None
+    return {"months": months + [current], "deltas": deltas, "previous": prev["label"] if prev else None, "weeks": weeks}
+
+
+def cadence_drift(maintenance: dict[str, Any]) -> dict[str, Any]:
+    """Which chores slid (late ticks against the tick before, ranked by the
+    share that were late) and which streaks held — from the month's own
+    per-task rows, so every figure is a count."""
+    late: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = []
+    for t in (maintenance.get("tasks") if isinstance(maintenance.get("tasks"), list) else []):
+        if not isinstance(t, dict):
+            continue
+        done = int(t.get("done") or 0)
+        timed = int(t.get("timed") or 0)
+        n_late = int(t.get("late") or 0)
+        if done < 2:
+            continue
+        share = n_late / timed if timed else 0.0
+        if n_late and (n_late >= 2 or share >= 0.5):
+            late.append({"id": t["id"], "label": t["label"], "done": done, "timed": timed, "late": n_late,
+                         "skipped": int(t.get("skipped") or 0), "lateShare": _round(share * 100.0, 0),
+                         "slipDays": t.get("slipDays")})
+        elif not n_late and not t.get("skipped") and t.get("tracked"):
+            held.append({"id": t["id"], "label": t["label"], "done": done})
+    late.sort(key=lambda r: (-(r["lateShare"] or 0), -r["late"], r["label"]))
+    held.sort(key=lambda r: (-r["done"], r["label"]))
+    return {"late": late[:5], "held": held[:6]}
+
+
+def consumption_trend(manual: Any, sensors: Any, meta: Any, period: dict[str, Any], months: int = 3) -> dict[str, Any]:
+    """Alk / Ca / Mg demand per calendar month, this month and the two
+    before — the median fall a day inside each month, from the same
+    estimator the week uses. Rising demand is growth; falling is the doser
+    or the corals to check. Needs two falling pairs in a month to say."""
+    meta = meta if isinstance(meta, dict) else {}
+    start_d = period["start"].date()
+    tz = period["start"].tzinfo
+    out: list[dict[str, Any]] = []
+    for param in CONSUMED:
+        rows = _readings_for(param, manual, sensors)
+        blocks: list[dict[str, Any]] = []
+        for back in range(months - 1, -1, -1):
+            m0 = _month_start(start_d, back)
+            m1 = _next_month(m0)
+            s = datetime(m0.year, m0.month, m0.day, tzinfo=tz)
+            e = datetime(m1.year, m1.month, m1.day, tzinfo=tz)
+            window = [r for r in rows if _in(r[0], s, e)]
+            est = consumption_per_day(window)
+            blocks.append({"label": m0.strftime("%b"), "start": m0.isoformat(), "perDay": est["perDay"],
+                           "pairs": est["pairs"], "readings": len(window)})
+        known = [b for b in blocks if b["perDay"] is not None]
+        change = None
+        direction = "unknown"
+        if len(known) >= 2 and known[0]["perDay"]:
+            change = _round((known[-1]["perDay"] - known[0]["perDay"]) / known[0]["perDay"] * 100.0, 0)
+            direction = "rising" if change >= 30 else "falling" if change <= -30 else "level"
+        info = meta.get(param) if isinstance(meta.get(param), dict) else {}
+        out.append({"id": param, "label": str(info.get("label") or PARAM_LABELS[param]), "unit": str(info.get("unit") or ""),
+                    "months": blocks, "changePct": change, "direction": direction,
+                    "from": known[0] if known else None, "to": known[-1] if known else None})
+    return {"parameters": out}
+
+
+def water_ledger(maintenance: dict[str, Any], awc: dict[str, Any], plan_daily_l: Any, usual_weekly_l: Any,
+                 tank_l: float, days: int, salt_state: Any, salt_history: Any,
+                 start: datetime, end: datetime) -> dict[str, Any]:
+    """Water changed against the AWC's plan (when a schedule is on) and
+    against the keeper's recent rate; salt used from the stock ledger's
+    debits and what is left. Nothing here is a target OpenReef invented."""
+    changed = _f(maintenance.get("waterChangedL"))
+    planned = _round(_f(plan_daily_l) * days) if _f(plan_daily_l) > 0 else None
+    usual = _round(_f(usual_weekly_l) * days / 7.0) if _f(usual_weekly_l) > 0 else None
+    met = None if planned is None else bool(changed >= planned * 0.9)
+    salt_state = salt_state if isinstance(salt_state, dict) else {}
+    used = 0.0
+    for row in (salt_history if isinstance(salt_history, list) else []):
+        if not isinstance(row, dict):
+            continue
+        delta = _f(row.get("delta"))
+        if delta < 0 and _in(_parse(row.get("at")), start, end):
+            used -= delta
+    return {
+        "changedL": _round(changed), "handL": _round(_f(maintenance.get("handL"))), "autoL": _round(_f(maintenance.get("autoL"))),
+        "pctOfTank": _round(changed / tank_l * 100.0, 0) if tank_l > 0 and changed else None,
+        "awcRuns": int(_f(awc.get("runs"))), "plannedL": planned, "met": met,
+        "shortfallL": _round(planned - changed) if planned is not None and changed < planned else None,
+        "usualL": usual,
+        "salt": {"tracked": bool(salt_state.get("tracked")), "usedKg": _round(used, 2) if used else None,
+                 "onHandKg": salt_state.get("kg") if salt_state.get("tracked") else None,
+                 "weeksLeft": salt_state.get("weeksLeft") if salt_state.get("tracked") else None,
+                 "low": bool(salt_state.get("low") or salt_state.get("empty"))},
+    }
+
+
+def testing_discipline(manual: Any, schedules: Any, meta: Any, start: datetime, end: datetime) -> dict[str, Any]:
+    """Tests per parameter against the cadence the keeper set (Settings →
+    Manual tests), the longest gap, and the weekday the keeper's tests
+    actually land on — the honest suggestion for a test day."""
+    meta = meta if isinstance(meta, dict) else {}
+    days = (end - start).days or 1
+    tz = start.tzinfo
+    params: list[dict[str, Any]] = []
+    weekday_counts = [0] * 7
+    total_tests = 0
+    for param, rows in (manual if isinstance(manual, dict) else {}).items():
+        for at, _v, _s in _readings_for(str(param), {param: rows}, {}):
+            if _in(at, start, end):
+                weekday_counts[(at.astimezone(tz) if tz else at).weekday()] += 1
+                total_tests += 1
+    expected_total = 0
+    for param, sched in (schedules if isinstance(schedules, dict) else {}).items():
+        if not isinstance(sched, dict) or not sched.get("enabled"):
+            continue
+        cadence = max(1, int(_f(sched.get("cadenceDays"), 14)))
+        stamps = sorted(r[0] for r in _readings_for(str(param), manual, {}) if _in(r[0], start, end))
+        expected = max(1, int(round(days / cadence)))
+        expected_total += expected
+        gaps: list[float] = []
+        prev = start
+        for at in [*stamps, end]:
+            gaps.append((at - prev).total_seconds() / 86400.0)
+            prev = at
+        longest = max(gaps) if gaps else float(days)
+        info = meta.get(param) if isinstance(meta.get(param), dict) else {}
+        params.append({"id": str(param), "label": str(info.get("label") or PARAM_LABELS.get(str(param), param)),
+                       "cadenceDays": cadence, "expected": expected, "tests": len(stamps),
+                       "ratio": _round(min(1.0, len(stamps) / expected) * 100.0, 0),
+                       "longestGapDays": _round(longest, 0), "onCadence": bool(longest <= cadence * 1.5)})
+    params.sort(key=lambda p: (p["ratio"], p["label"]))
+    overall = _round(sum(p["ratio"] for p in params) / len(params), 0) if params else None
+    best = max(range(7), key=lambda i: weekday_counts[i]) if total_tests else None
+    return {"parameters": params, "scheduled": len(params), "overallRatio": overall,
+            "tests": total_tests, "expected": expected_total,
+            "bestDay": DAY_NAMES[best] if best is not None else None,
+            "bestDayShare": _round(weekday_counts[best] / total_tests * 100.0, 0) if total_tests else None}
+
+
+def _icp_brief(at: datetime, row: dict[str, Any]) -> dict[str, Any]:
+    els = [e for e in (row.get("elements") if isinstance(row.get("elements"), list) else []) if isinstance(e, dict)]
+    flagged = [{"symbol": e.get("symbol"), "name": e.get("name"), "value": e.get("value"), "unit": e.get("unit"),
+                "status": e.get("status")} for e in els if e.get("status") in ("low", "high", "contaminant")]
+    return {"id": row.get("id"), "lab": row.get("lab"), "date": at.date().isoformat(), "elements": len(els),
+            "flagged": flagged[:12], "flaggedCount": len(flagged)}
+
+
+def icp_section(reports: Any, start: datetime, end: datetime) -> dict[str, Any]:
+    """The month's ICP against the one before it: the elements that moved
+    materially (15 % or a unit floor) or changed status. No ICP in the
+    month: how long since the last, and nothing compared."""
+    rows: list[tuple[datetime, dict[str, Any]]] = []
+    for r in (reports if isinstance(reports, list) else []):
+        if not isinstance(r, dict) or r.get("sampleType") == "rodi":
+            continue
+        at = _parse(r.get("sampleDate")) or _parse(r.get("importedAt"))
+        if at is not None:
+            rows.append((at, r))
+    rows.sort(key=lambda p: p[0])
+    before_end = [p for p in rows if p[0] < end]
+    latest = before_end[-1] if before_end else None
+    previous = before_end[-2] if len(before_end) >= 2 else None
+    in_period = bool(latest and _in(latest[0], start, end))
+    movers: list[dict[str, Any]] = []
+    if in_period and latest and previous:
+        prev_by = {e.get("symbol"): e for e in (previous[1].get("elements") or []) if isinstance(e, dict)}
+        for e in (latest[1].get("elements") or []):
+            if not isinstance(e, dict):
+                continue
+            pe = prev_by.get(e.get("symbol"))
+            if not pe:
+                continue
+            a, b = pe.get("value"), e.get("value")
+            if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (a, b)):
+                continue
+            unit = str(e.get("unit") or "")
+            floor = 0.02 if e.get("symbol") == "PO4" else 0.5 if unit == "dKH" else 1.0 if unit == "ppm" else 5.0 if unit == "ppb" else 0.0
+            material = abs(b - a) >= max(floor, (abs(a) + abs(b)) / 2.0 * 0.15)
+            if material or e.get("status") != pe.get("status"):
+                movers.append({"symbol": e.get("symbol"), "name": e.get("name"), "from": _round(a, 3), "to": _round(b, 3),
+                               "unit": unit, "pct": _round((b - a) / a * 100.0, 0) if a else None,
+                               "statusFrom": pe.get("status"), "statusTo": e.get("status")})
+        movers.sort(key=lambda m: -abs(m["pct"] or 0))
+    return {"any": bool(rows), "inPeriod": in_period,
+            "latest": _icp_brief(*latest) if latest else None, "previous": _icp_brief(*previous) if previous else None,
+            "movers": movers[:8], "daysSinceLast": _round((end - latest[0]).total_seconds() / 86400.0, 0) if latest else None}
+
+
+def equipment_ageing(tasks: Any, completions: Any, end: datetime, filters: Any) -> dict[str, Any]:
+    """Consumables, calibrations and services by age against their cadence,
+    and the RODI stages by litres through them. Ranked worst first; a task
+    never logged says so rather than pretending an age."""
+    tasks = tasks if isinstance(tasks, dict) else {}
+    completions = completions if isinstance(completions, dict) else {}
+    items: list[dict[str, Any]] = []
+    for task_id, task in tasks.items():
+        kind = AGEING_TASKS.get(str(task_id))
+        if not kind or not isinstance(task, dict):
+            continue
+        rows = [r for r in (completions.get(task_id) or []) if isinstance(r, dict) and not r.get("skipped")]
+        if not task.get("enabled") and not rows:
+            continue
+        cadence = _f(task.get("cadenceDays"), 30.0) or 30.0
+        done = [d for d in (_parse(r.get("timestamp") or r.get("date")) for r in rows) if d is not None and d < end]
+        last = max(done) if done else None
+        age = (end - last).total_seconds() / 86400.0 if last else None
+        ratio = age / cadence if age is not None else None
+        status = "never" if last is None else "overdue" if ratio >= 1.5 else "due" if ratio >= 1.0 else "ok"
+        items.append({"id": str(task_id), "label": str(task.get("label") or task_id), "kind": kind, "cadenceDays": int(cadence),
+                      "lastAt": last.isoformat() if last else None, "ageDays": _round(age, 0), "ratio": _round(ratio, 2), "status": status})
+    items.sort(key=lambda i: (0 if i["ratio"] is not None else 1, -(i["ratio"] or 0), i["label"]))
+    stages: list[dict[str, Any]] = []
+    for f in (filters if isinstance(filters, list) else []):
+        if not isinstance(f, dict):
+            continue
+        rated, used = _f(f.get("ratedLitres")), _f(f.get("litresProcessed"))
+        changed = _parse(f.get("changedAt"))
+        stages.append({"id": str(f.get("id") or ""), "label": str(f.get("label") or f.get("type") or "filter"),
+                       "usedPct": _round(used / rated * 100.0, 0) if rated > 0 else None, "litres": _round(used, 0),
+                       "ageDays": _round((end - changed).total_seconds() / 86400.0, 0) if changed else None,
+                       "status": ("overdue" if used >= rated else "due" if used >= rated * 0.8 else "ok") if rated > 0 else "untracked"})
+    return {"items": items, "filters": stages}
+
+
+def goals_check(previous: Any, raised: set[str]) -> dict[str, Any]:
+    """What last month's report recommended and whether it happened: a
+    recommendation the rules no longer raise is cleared; one they still
+    raise is open. Read from the stored snapshot, judged by this compile."""
+    prev = previous if isinstance(previous, dict) else None
+    if not prev:
+        return {"from": None, "items": [], "cleared": 0, "open": 0}
+    items = []
+    for rec in (prev.get("recommendations") if isinstance(prev.get("recommendations"), list) else []):
+        rid = str((rec or {}).get("id") or "") if isinstance(rec, dict) else ""
+        if not rid or rid == "keep_rhythm":
+            continue
+        items.append({"id": rid, "title": str(rec.get("title") or rid), "status": "open" if rid in raised else "cleared"})
+    return {"from": prev.get("label"), "items": items,
+            "cleared": len([i for i in items if i["status"] == "cleared"]), "open": len([i for i in items if i["status"] == "open"])}
+
+
+def month_sections(ctx: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
+    period = ctx["period"]
+    start, end = period["start"], period["end"]
+    m = report["did"]["maintenance"]
+    return {
+        "trend": trend_section(ctx.get("items"), period, report.get("score") or {}, report["headline"]["score"]),
+        "drift": cadence_drift(m),
+        "consumption": consumption_trend(ctx.get("manualReadings"), ctx.get("sensorReadings"), ctx.get("paramMeta"), period),
+        "water": water_ledger(m, report["did"]["awc"], ctx.get("awcPlanDailyL"), ctx.get("usualWeeklyL"), _f(ctx.get("tankL")),
+                              int(period["days"]), ctx.get("saltState"), ctx.get("saltHistory"), start, end),
+        "testing": testing_discipline(ctx.get("manualReadings"), ctx.get("testSchedules"), ctx.get("paramMeta"), start, end),
+        "icp": icp_section(ctx.get("icpReports"), start, end),
+        "ageing": equipment_ageing(ctx.get("tasks"), ctx.get("completions"), end, ctx.get("rodiFilters")),
+    }
+
+
+def recommend_big(report: dict[str, Any], snoozed: Any = None, now: datetime | None = None,
+                  history: Any = None) -> dict[str, Any]:
+    """The structural recommendations a month of evidence supports (brief
+    §5, big): each names the month's figures, the effort, the effect and the
+    screen. Capped at three; snoozed ids stay out; one recommended three
+    months running is promoted to the top and says so."""
+    now = now or datetime.now(timezone.utc)
+    snoozed = snoozed if isinstance(snoozed, dict) else {}
+    hidden = {rid for rid, until in snoozed.items() if (_parse(until) or now) > now}
+    month = report.get("month") or {}
+    water = report.get("water") or {}
+    living = report.get("living") or {}
+    recs: list[dict[str, Any]] = []
+
+    def big(rid: str, pri: int, title: str, evidence: str, effort: str, effect: str, actions: list[dict[str, str]]) -> None:
+        recs.append(_rec(rid, pri, title, evidence, effort, effect, actions, size="big"))
+
+    ageing_by = {i["id"]: i for i in (month.get("ageing") or {}).get("items") or []}
+    for prm in water.get("parameters") or []:
+        dis = prm.get("disagree")
+        task_id = PROBE_CALIBRATION_TASK.get(str(prm.get("id")))
+        if not dis or not task_id:
+            continue
+        age = ageing_by.get(task_id) or {}
+        if age.get("status") in (None, "never", "due", "overdue") or (age.get("ageDays") or 0) >= 60:
+            big(f"calibrate_{prm['id']}", 8, f"Recalibrate the {str(prm.get('label')).lower()} probe",
+                f"The probe and the kit disagree by {abs(_f(dis.get('delta'))):g} {prm.get('unit') or ''}".rstrip()
+                + (f"; last calibrated {age['ageDays']:g} days ago." if age.get("ageDays") is not None else "; no calibration logged."),
+                "15 min", "One number for the tank, not two.",
+                [{"action": "report-task", "id": task_id, "label": "Open the task"}])
+    hatches = living.get("hatches") or {}
+    if (hatches.get("harvested") or 0) >= 4 and (hatches.get("avgLateHours") or 0) > 6:
+        big("hatch_capacity", 10, "Add a hatchery or lengthen the hatch cadence",
+            f"{hatches['harvested']} harvests ran {hatches['avgLateHours']:g} h past the clock on average this month.",
+            "an evening", "Brine at its yolkiest without chasing the clock.",
+            [{"action": "tab", "id": "hatchery", "label": "Open the hatchery"}])
+    for prm in (month.get("consumption") or {}).get("parameters") or []:
+        frm, to = prm.get("from") or {}, prm.get("to") or {}
+        if prm.get("direction") == "rising":
+            big(f"demand_up_{prm['id']}", 12, f"Raise the daily {str(prm['label']).lower()} plan — the corals are growing",
+                f"Consumption {frm.get('perDay'):g} → {to.get('perDay'):g} {prm.get('unit')}/day, {frm.get('label')} to {to.get('label')} (+{prm.get('changePct'):g} %).",
+                "10 min", "The line stops sagging between tests.", [{"action": "tab", "id": "dosing", "label": "Open dosing"}])
+        elif prm.get("direction") == "falling":
+            big(f"demand_down_{prm['id']}", 14, f"Check the doser and the corals — {str(prm['label']).lower()} demand fell",
+                f"Consumption {frm.get('perDay'):g} → {to.get('perDay'):g} {prm.get('unit')}/day, {frm.get('label')} to {to.get('label')} ({prm.get('changePct'):g} %).",
+                "15 min", "A stalled pump or a sulking colony found this month, not next.",
+                [{"action": "tab", "id": "dosing", "label": "Open dosing"}])
+    ledger = month.get("water") or {}
+    if ledger.get("plannedL") and _f(ledger.get("changedL")) < _f(ledger.get("plannedL")) * 0.75:
+        big("water_plan", 16, "Raise the AWC volume or lower its plan — pick one",
+            f"{_f(ledger.get('changedL')):g} L changed against {_f(ledger.get('plannedL')):g} L planned.",
+            "5 min", "A plan the tank actually gets.", [{"action": "tab", "id": "awc", "label": "Open AWC"}])
+    testing = month.get("testing") or {}
+    if (testing.get("scheduled") or 0) >= 2 and testing.get("overallRatio") is not None and testing["overallRatio"] < 60:
+        best = testing.get("bestDay")
+        big("test_day", 18, "Set a test day" + (f" — {best} fits your completions" if best else ""),
+            f"{testing.get('tests', 0)} of {testing.get('expected', 0)} scheduled tests logged this month"
+            + (f"; {testing.get('bestDayShare'):g} % of the ones you did fell on a {best}." if best else "."),
+            "no extra time", "Every parameter with a trend; the chemistry part of the score filled in.",
+            [{"action": "tab", "id": "manual", "label": "Log a test"}])
+    salt = ledger.get("salt") or {}
+    if salt.get("tracked") and salt.get("weeksLeft") is not None and _f(salt.get("weeksLeft")) < 8:
+        big("salt_stock", 20, "Order salt",
+            f"About {_f(salt.get('weeksLeft')):g} weeks of salt left at your water-change rate ({_f(salt.get('onHandKg')):g} kg).",
+            "5 min", "No batch waits on a delivery.", [{"action": "tab", "id": "mixing", "label": "Open the mixing station"}])
+    for row in (month.get("drift") or {}).get("late") or []:
+        if row.get("done", 0) >= 3 and (row.get("lateShare") or 0) >= 50:
+            big(f"cadence_{row['id']}", 22, f"Lengthen {row['label']}'s cadence or fix its day",
+                f"{row['late']} of {row.get('timed') or row['done']} ticks came late"
+                + (f", {row['slipDays']:g} d past the cadence on average." if row.get("slipDays") is not None else "."),
+                "2 min", "A chore that stops sliding — or a cadence that tells the truth.",
+                [{"action": "report-task", "id": row["id"], "label": "Open the task"}])
+    for item in (month.get("ageing") or {}).get("items") or []:
+        if item.get("status") == "overdue":
+            big(f"ageing_{item['id']}", 24, f"{item['label']}: {item['ageDays']:g} days on a {item['cadenceDays']}-day cadence",
+                f"Last logged {_day_text(item.get('lastAt'))}.", "varies", "Media doing its job; a probe reading the truth.",
+                [{"action": "report-task", "id": item["id"], "label": "Open the task"}])
+    for stage in (month.get("ageing") or {}).get("filters") or []:
+        if stage.get("status") == "overdue":
+            big(f"filter_{stage['id'] or stage['label']}", 26, f"Change the {stage['label']} — {stage['usedPct']:g} % of its rated litres",
+                f"{stage['litres']:g} L through it.", "20 min", "RODI that is actually pure.",
+                [{"action": "tab", "id": "mixing", "label": "Open the mixing station"}])
+    icp = month.get("icp") or {}
+    if icp.get("any") and not icp.get("inPeriod") and (icp.get("daysSinceLast") or 0) >= 120:
+        big("icp_due", 30, "Send off an ICP sample", f"The last ICP was {icp['daysSinceLast']:g} days ago.",
+            "a sample and a stamp", "Trace elements checked against a lab, not a guess.",
+            [{"action": "tab", "id": "icp", "label": "Open ICP"}])
+    raised = sorted({r["id"] for r in recs})
+    # Promotion: recommended in the two stored months before this one too.
+    earlier = [set(str((rec or {}).get("id") or "") for rec in (snap.get("recommendations") or []) if isinstance(rec, dict))
+               for snap in (history if isinstance(history, list) else [])[:2] if isinstance(snap, dict)]
+    for r in recs:
+        if len(earlier) >= 2 and all(r["id"] in ids for ids in earlier):
+            r["promoted"] = True
+            r["priority"] = -1
+            r["evidence"] = r["evidence"].rstrip() + " Third month running."
+    recs = [r for r in recs if r["id"] not in hidden]
+    recs.sort(key=lambda r: (r["priority"], r["id"]))
+    calm = not recs
+    if calm:
+        recs.append(_rec("keep_rhythm", 99, "Keep the rhythm", "Nothing in this month asked for a change.",
+                         "none", "The reef likes it this way.", [], size="big"))
+    kept = recs[:BIG_RECS_MAX]
+    for r in kept:
+        r.pop("priority", None)
+    return {"items": kept, "calm": calm, "snoozed": sorted(hidden), "raised": raised, "size": "big"}
+
+
 def compile_period(ctx: dict[str, Any]) -> dict[str, Any]:
     """The report. ``ctx`` (all optional but ``period``):
 
@@ -870,6 +1316,13 @@ def compile_period(ctx: dict[str, Any]) -> dict[str, Any]:
     corals, checkins, coralFeeds, coralStates ({cid: {score, grade, scoreBefore}})
     events, scoreLog
     upcoming                      [{id, label, dueAt, status, source}] from the maintenance evaluator
+    -- month reports (Stage F) --
+    items                         the stored snapshots (reports.items)
+    testSchedules                 manualTests.schedules
+    icpReports                    icpReports
+    saltState, saltHistory        mixing salt stock state + its ledger
+    rodiFilters                   mixingStation.rodi.filters
+    awcPlanDailyL, usualWeeklyL   the AWC schedule's litres a day; the keeper's recent weekly litres
     """
     period = ctx["period"]
     start, end = period["start"], period["end"]
@@ -928,5 +1381,18 @@ def compile_period(ctx: dict[str, Any]) -> dict[str, Any]:
     # Stage D: the Week Score and the small recommendations, both from the
     # compiled report so a fixture drives them too.
     report["score"] = week_score(report)
-    report["recommendations"] = recommend(report, ctx.get("snoozedRecs"), now)
+    if period["kind"] == "month":
+        # Stage F: the month's own sections, the BIG recommendations, and
+        # last month's recommendations checked against this compile.
+        report["month"] = month_sections(ctx, report)
+        start_d = start.date()
+        history = sorted((r for r in (ctx.get("items") if isinstance(ctx.get("items"), list) else [])
+                          if isinstance(r, dict) and r.get("kind") == "month" and str(r.get("start") or "")[:10] < start_d.isoformat()),
+                         key=lambda r: str(r.get("start")), reverse=True)
+        big = recommend_big(report, ctx.get("snoozedRecs"), now, history)
+        small = recommend(report, ctx.get("snoozedRecs"), now)
+        report["month"]["goals"] = goals_check(history[0] if history else None, set(big["raised"]) | set(small["raised"]))
+        report["recommendations"] = big
+    else:
+        report["recommendations"] = recommend(report, ctx.get("snoozedRecs"), now)
     return report
