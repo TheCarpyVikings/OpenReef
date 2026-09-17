@@ -53,7 +53,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.205"
+INTEGRATION_VERSION = "0.7.206"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
@@ -302,6 +302,12 @@ MAINTENANCE_CULTURE_TASK_PREFIX = "culture_"
 # by the panel when the keeper sets a cadence on the bottle (0.7.129).
 MAINTENANCE_SOURCE_SHELF = "shelf"
 MAINTENANCE_SHELF_TASK_PREFIX = "nps_dose_"
+# Phyto-drip-driven completions (Stage B, docs/phyto-drip-brainstorm.md §5.4):
+# the line-flush chore is synced from the channel's flushEveryDays (created
+# while the drip has one, disabled — never deleted — when it does not) and
+# marked done by the pump card's Flushed tap. Task ids are drip_flush_<cid>.
+MAINTENANCE_SOURCE_DOSING = "dosing"
+MAINTENANCE_DRIP_FLUSH_TASK_PREFIX = "drip_flush_"
 # Phone notification actions (V2 Stage B): the bus listener's unsub handle.
 NOTIFY_ACTION_UNSUB = "notify_action_unsub"
 

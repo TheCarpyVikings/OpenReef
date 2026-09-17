@@ -641,6 +641,58 @@ def test_guard_jar_past_its_day_is_a_nag_not_a_stop():
     assert "stale_food" in _codes(dosing.guard_reasons(brine, _live(), 720, now=NOW_UTC))
 
 
+def test_standing_care_stir_verdicts_plug_and_hand():
+    """Stage B: a plug stirs on its cadence (due once the cadence has run);
+    a hand-shaken jar warns at 48 h and degrades the freshness verdict at 96 h.
+    The stir in flight says so. None of it is a guard."""
+    plug = _standing_channel(state={"lastStirredAt": (NOW_UTC - timedelta(hours=3)).isoformat()})
+    plug["schedule"]["standing"]["stir"] = {"switchEntity": "switch.stirrer", "everyHours": 8, "burstMinutes": 2}
+    care = dosing.standing_care(plug, NOW_UTC)
+    assert care["stir"]["mode"] == "plug" and care["stir"]["status"] == "ok"
+    assert care["stir"]["text"] == "stirred 3 h ago · plug every 8 h, 2 min"
+    plug["state"]["lastStirredAt"] = (NOW_UTC - timedelta(hours=9)).isoformat()
+    assert dosing.standing_care(plug, NOW_UTC)["stir"]["status"] == "due"
+    plug["state"]["stirUntil"] = (NOW_UTC + timedelta(minutes=1)).isoformat()
+    assert dosing.standing_care(plug, NOW_UTC)["stir"]["text"] == "stirring now (2 min burst)"
+    hand = _standing_channel()
+    assert dosing.standing_care(hand, NOW_UTC)["stir"]["status"] == "unknown"
+    hand["state"] = {"lastStirredAt": (NOW_UTC - timedelta(hours=50)).isoformat()}
+    warn = dosing.standing_care(hand, NOW_UTC)["stir"]
+    assert warn["status"] == "warn" and warn["degrades"] is False and "settled phyto dies in days" in warn["text"]
+    hand["state"] = {"lastStirredAt": (NOW_UTC - timedelta(hours=100)).isoformat()}
+    late = dosing.standing_care(hand, NOW_UTC)["stir"]
+    assert late["status"] == "late" and late["degrades"] is True and late["text"].startswith("unstirred 4 d ago")
+    # The care never reaches the guards.
+    assert "stir" not in _codes(dosing.guard_reasons(hand, _live(), 720, now=NOW_UTC))
+
+
+def test_standing_care_fridge_and_flush():
+    """The fridge block exists only for a refrigerated jar with a sensor
+    (warm above its ceiling, unknown without a reading); the flush block runs
+    the cadence from the last Flushed tap — never flushed is due today."""
+    ch = _standing_channel(reservoir={"refrigerated": True})
+    ch["schedule"]["standing"]["fridge"] = {"tempEntity": "sensor.fridge", "maxC": 8}
+    ch["schedule"]["standing"]["flushEveryDays"] = 7
+    care = dosing.standing_care(ch, NOW_UTC, fridge_temp_c=11.2)
+    assert care["fridge"]["status"] == "warm" and care["fridge"]["text"].startswith("fridge warm — 11.2 °C, above 8 °C")
+    assert dosing.standing_care(ch, NOW_UTC, fridge_temp_c=4.0)["fridge"] == {
+        "tempEntity": "sensor.fridge", "tempC": 4.0, "maxC": 8.0, "status": "ok", "text": "fridge 4.0 °C"}
+    assert dosing.standing_care(ch, NOW_UTC)["fridge"]["status"] == "unknown"
+    assert dosing.standing_care(_standing_channel(), NOW_UTC, fridge_temp_c=4.0)["fridge"] is None
+    assert care["flush"]["status"] == "due" and care["flush"]["text"].startswith("line never flushed")
+    ch["state"] = {"lastFlushedAt": (NOW_UTC - timedelta(days=3)).isoformat()}
+    ok = dosing.standing_care(ch, NOW_UTC)["flush"]
+    assert ok["status"] == "ok" and ok["dueInDays"] == 4 and ok["text"] == "line flushed 3 d ago · next in 4 d"
+    ch["state"] = {"lastFlushedAt": (NOW_UTC - timedelta(days=9)).isoformat()}
+    assert dosing.standing_care(ch, NOW_UTC)["flush"]["status"] == "overdue"
+    ch["schedule"]["standing"]["flushEveryDays"] = 0
+    assert dosing.standing_care(ch, NOW_UTC)["flush"] is None
+    # The care rides standing_state when it is given the clock.
+    plan = dosing.compile_schedule(ch, None, NOW)["plan"]
+    st = dosing.standing_state(ch, plan, 52, {"cellsPerMl": 2e9}, now=NOW_UTC, fridge_temp_c=11.2)
+    assert st["fridge"]["status"] == "warm" and st["stir"]["status"] == "unknown" and st["flush"] is None
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

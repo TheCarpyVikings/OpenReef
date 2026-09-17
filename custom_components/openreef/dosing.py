@@ -54,6 +54,18 @@ STANDING_TURNOVER_MAX = 200.0
 STANDING_LINE_ML_DEFAULT = 3.0        # 2 mm ID × 1 m of dosing line
 STANDING_RESIDENCE_WARN_H = 12.0      # phyto sitting longer than this in a warm line is dying in it
 JAR_SHELF_LIFE_DAYS = 1.0             # a room-temperature jar, loaded fresh each day
+# Stage B (phyto-drip §5.4): the jar's care — a stirrer on a plug, the fridge
+# it may sit in, and the line that wants flushing. All advisory: none of it
+# ever stops the pump.
+STIR_EVERY_H_DEFAULT = 8.0            # a magnetic stirrer burst this often keeps the cells up
+STIR_EVERY_H_MAX = 48.0
+STIR_BURST_MIN_DEFAULT = 2            # minutes per burst (the dosing tick rounds it to the minute)
+STIR_BURST_MIN_MAX = 30
+STIR_WARN_H = 48.0                    # unstirred this long: settled phyto is dying at the bottom
+STIR_LATE_H = 96.0                    # unstirred this long: the freshness verdict degrades
+FRIDGE_MAX_C_DEFAULT = 8.0            # a phyto fridge warmer than this is not a fridge
+FLUSH_EVERY_DAYS_DEFAULT = 7          # a warm line grows a film; flush it weekly
+FLUSH_EVERY_DAYS_MAX = 90
 
 _CHEMICAL_LABELS = {
     "alk": "Alkalinity", "ca": "Calcium", "mg": "Magnesium",
@@ -722,11 +734,100 @@ def _standing_cfg(channel: dict[str, Any]) -> dict[str, Any]:
     return standing if isinstance(standing, dict) else {}
 
 
+def _hours_since(stamp: Any, now: datetime | None) -> float | None:
+    at = _parse_iso(stamp)
+    if at is None or now is None:
+        return None
+    try:
+        return max(0.0, (now - at).total_seconds() / 3600.0)
+    except TypeError:
+        return None
+
+
+def _ago(hours: float) -> str:
+    if hours < 1:
+        return "just now"
+    if hours < 48:
+        return f"{hours:.0f} h ago"
+    return f"{hours / 24:.0f} d ago"
+
+
+def standing_care(channel: dict[str, Any], now: datetime | None,
+                  fridge_temp_c: float | None = None) -> dict[str, Any]:
+    """Stage B: the jar's care as the card says it — stir, fridge, flush.
+    Every verdict is advice (the pump never waits on any of it); the stir
+    verdict past STIR_LATE_H also degrades the freshness verdict, which the
+    orchestrator applies at its one freshness choke point."""
+    standing = _standing_cfg(channel)
+    state = _cfg(channel, "state")
+    reservoir = _cfg(channel, "reservoir")
+    stir_cfg = standing.get("stir") if isinstance(standing.get("stir"), dict) else {}
+    plug = str(stir_cfg.get("switchEntity") or "")
+    every_h = _f(stir_cfg.get("everyHours"), STIR_EVERY_H_DEFAULT)
+    burst_min = int(_f(stir_cfg.get("burstMinutes"), STIR_BURST_MIN_DEFAULT))
+    mode = "plug" if plug and every_h > 0 else "hand"
+    since_h = _hours_since(state.get("lastStirredAt"), now)
+    running = bool(state.get("stirUntil"))
+    if running:
+        status, text = "ok", f"stirring now ({burst_min} min burst)"
+    elif since_h is None:
+        status = "unknown"
+        text = ("not stirred yet — the plug runs its first burst on the next tick" if mode == "plug"
+                else "not stirred yet — shake the jar and tap Stirred")
+    elif since_h >= STIR_LATE_H:
+        status, text = "late", f"unstirred {_ago(since_h)} — settled phyto dies in days; the freshness verdict is degraded"
+    elif since_h >= STIR_WARN_H:
+        status, text = "warn", f"unstirred {_ago(since_h)} — settled phyto dies in days"
+    elif mode == "plug" and since_h >= every_h:
+        status, text = "due", f"stirred {_ago(since_h)} · the plug is due its next burst"
+    else:
+        status = "ok"
+        text = (f"stirred {_ago(since_h)} · plug every {every_h:g} h, {burst_min} min"
+                if mode == "plug" else f"shaken {_ago(since_h)}")
+    stir = {"mode": mode, "switchEntity": plug, "everyHours": every_h, "burstMinutes": burst_min,
+            "lastStirredAt": str(state.get("lastStirredAt") or ""), "hoursSince": since_h,
+            "running": running, "status": status, "text": text,
+            "degrades": status == "late"}
+
+    fridge_cfg = standing.get("fridge") if isinstance(standing.get("fridge"), dict) else {}
+    fridge: dict[str, Any] | None = None
+    if reservoir.get("refrigerated") and fridge_cfg.get("tempEntity"):
+        max_c = _f(fridge_cfg.get("maxC"), FRIDGE_MAX_C_DEFAULT)
+        if fridge_temp_c is None:
+            f_status, f_text = "unknown", "fridge sensor not reading"
+        elif fridge_temp_c > max_c:
+            f_status, f_text = "warm", f"fridge warm — {fridge_temp_c:.1f} °C, above {max_c:g} °C; the bottle's clock runs faster than the shelf says"
+        else:
+            f_status, f_text = "ok", f"fridge {fridge_temp_c:.1f} °C"
+        fridge = {"tempEntity": str(fridge_cfg.get("tempEntity")), "tempC": fridge_temp_c,
+                  "maxC": max_c, "status": f_status, "text": f_text}
+
+    every_d = int(_f(standing.get("flushEveryDays"), FLUSH_EVERY_DAYS_DEFAULT))
+    flush: dict[str, Any] | None = None
+    if every_d > 0:
+        since_flush_h = _hours_since(state.get("lastFlushedAt"), now)
+        if since_flush_h is None:
+            fl_status, due_in, fl_text = "due", 0.0, "line never flushed — run fresh water through it and tap Flushed"
+        else:
+            due_in = round(every_d - since_flush_h / 24.0, 1)
+            if due_in <= -1:
+                fl_status, fl_text = "overdue", f"line flushed {_ago(since_flush_h)} · {-due_in:.0f} d overdue"
+            elif due_in <= 0:
+                fl_status, fl_text = "due", f"line flushed {_ago(since_flush_h)} · flush due today"
+            else:
+                fl_status, fl_text = "ok", f"line flushed {_ago(since_flush_h)} · next in {due_in:.0f} d"
+        flush = {"everyDays": every_d, "lastFlushedAt": str(state.get("lastFlushedAt") or ""),
+                 "dueInDays": due_in, "status": fl_status, "text": fl_text}
+    return {"stir": stir, "fridge": fridge, "flush": flush}
+
+
 def standing_state(channel: dict[str, Any], plan: dict[str, Any], tank_l: Any,
-                   product: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                   product: dict[str, Any] | None = None, now: datetime | None = None,
+                   fridge_temp_c: float | None = None) -> dict[str, Any] | None:
     """The phyto drip as the card says it: the density it holds (or that it is
     set by tint), the pulse it compiles to, the line residence time and the
-    coaching line. None for a channel that is not a standing drip."""
+    coaching line — and, given ``now``, the jar's care (Stage B). None for a
+    channel that is not a standing drip."""
     if not is_standing(channel):
         return None
     standing = _standing_cfg(channel)
@@ -795,6 +896,7 @@ def standing_state(channel: dict[str, Any], plan: dict[str, Any], tank_l: Any,
         "skimmer": policies["skimmer"],
         "uv": policies["uv"],
         "refrigerated": bool(_cfg(channel, "reservoir").get("refrigerated")),
+        **standing_care(channel, now, fridge_temp_c),
     }
 
 
@@ -1066,6 +1168,7 @@ def summary(
             "nextDose": next_dose_eta(plan, now_minutes) if channel.get("enabled") else None,
             "standing": _with_freshness(standing_state(
                 channel, plan, tank_l,
-                (products or {}).get(str(_cfg(channel, "reservoir").get("productId") or ""))), live),
+                (products or {}).get(str(_cfg(channel, "reservoir").get("productId") or "")),
+                now=now, fridge_temp_c=live.get("fridgeTempC")), live),
         }
     return out

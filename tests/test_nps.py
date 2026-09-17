@@ -4945,6 +4945,123 @@ def test_standing_band_holds_the_skimmer_through_a_disabled_truce():
     assert state["skimmer"]["turnedOff"] == [] and state["skimmer"]["band"] is False
     assert state["skimmer"]["history"] and state["skimmer"]["history"][-1]["until"]
 
+
+def _care_entry(channel_over=None, products=None):
+    cfg = {
+        "tank": {"volumeLitres": 52},
+        "consumables": {"products": products or {"rj": {"name": "Reef Flourish", "category": "phyto",
+                                                         "bottleMl": 250, "cellsPerMl": 2e9,
+                                                         "openedAt": _iso(datetime.now(timezone.utc) - timedelta(days=2)),
+                                                         "shelfLifeDaysOpened": 90}}},
+        "dosing": {"channels": {"drip": _drip_channel(**(channel_over or {}))}},
+    }
+    return FakeEntry(options={CONF_SETTINGS: integration._normalise_core_config(cfg)})
+
+
+def test_standing_care_tick_runs_the_stirrer_plug_on_its_cadence():
+    """Stage B: the plug turns on when the cadence has run (first tick with no
+    stamp), the burst end is stamped, and the tick past it turns the plug off,
+    stamps lastStirredAt and files the event. The pump is never touched."""
+    entry = _care_entry({"schedule": {"standing": {
+        "enabled": True, "targetCellsPerMl": 10000, "turnoverPerDay": 22, "lineMl": 3,
+        "stir": {"switchEntity": "switch.stirrer", "everyHours": 8, "burstMinutes": 2}}}})
+    hass = FakeHass(states={"switch.stirrer": "off"}, entries=[entry])
+    run(integration._async_dosing_standing_care_tick(hass, entry))
+    assert hass.states.get("switch.stirrer").state == "on"
+    state = integration._config_from_entry(entry)["dosing"]["channels"]["drip"]["state"]
+    assert state["stirUntil"] and not state["lastStirredAt"]
+    run(integration._async_dosing_standing_care_tick(hass, entry))   # mid-burst: nothing changes
+    assert hass.states.get("switch.stirrer").state == "on"
+    cfg = integration._config_from_entry(entry)
+    cfg["dosing"]["channels"]["drip"]["state"]["stirUntil"] = _iso(datetime.now(timezone.utc) - timedelta(seconds=5))
+    entry.options = {CONF_SETTINGS: cfg}
+    run(integration._async_dosing_standing_care_tick(hass, entry))
+    assert hass.states.get("switch.stirrer").state == "off"
+    channel = integration._config_from_entry(entry)["dosing"]["channels"]["drip"]
+    assert channel["state"]["stirUntil"] == "" and channel["state"]["lastStirredAt"]
+    assert channel["events"][0]["detail"] == "Stirred — 2 min on the plug"
+    run(integration._async_dosing_standing_care_tick(hass, entry))   # freshly stirred: stays off
+    assert hass.states.get("switch.stirrer").state == "off"
+    switch_calls = [(c.service) for c in hass.services.calls if c.domain == "switch"]
+    assert switch_calls == ["turn_on", "turn_off"], "the care tick touches only the plug, once each way"
+
+
+def test_standing_care_tick_fridge_warm_files_once_and_pushes():
+    """A refrigerated jar's sensor over its ceiling: one event + one activity
+    line on the way up, one push a shift, cleared when it cools."""
+    entry = _care_entry({"reservoir": {"refrigerated": True, "productId": "rj", "productIsBottle": True},
+                         "schedule": {"standing": {
+                             "enabled": True, "targetCellsPerMl": 10000, "turnoverPerDay": 22, "lineMl": 3,
+                             "fridge": {"tempEntity": "sensor.fridge", "maxC": 8}}}})
+    hass = FakeHass(states={"sensor.fridge": "11.4"}, entries=[entry])
+    hass.states.set("sensor.fridge", "11.4", {"unit_of_measurement": "°C"})
+    run(integration._async_dosing_standing_care_tick(hass, entry))
+    run(integration._async_dosing_standing_care_tick(hass, entry))
+    channel = integration._config_from_entry(entry)["dosing"]["channels"]["drip"]
+    assert channel["state"]["fridgeWarm"] is True
+    assert [e["detail"] for e in channel["events"]] == ["Phyto fridge warm — 11.4 °C, above 8 °C"]
+    notes = [c for c in hass.services.calls if c.domain == "persistent_notification" and c.service == "create"
+             and c.data.get("notification_id") == "openreef_dosing_fridge_drip"]
+    assert len(notes) == 1 and notes[0].data["title"].endswith("Phyto fridge warm"), "one push a shift"
+    hass.states.set("sensor.fridge", "4.2", {"unit_of_measurement": "°C"})
+    run(integration._async_dosing_standing_care_tick(hass, entry))
+    channel = integration._config_from_entry(entry)["dosing"]["channels"]["drip"]
+    assert channel["state"]["fridgeWarm"] is False and channel["events"][0]["detail"] == "Phyto fridge back to 4.2 °C"
+    # The summary block reads the same sensor.
+    now_local = datetime.now().astimezone()
+    block = integration._dosing_standing_payload(hass, integration._config_from_entry(entry), "drip", channel, now_local)
+    assert block["fridge"]["status"] == "ok" and block["fridge"]["tempC"] == 4.2
+
+
+def test_flush_chore_follows_the_drip_and_the_flushed_tap_marks_it_done():
+    """The line-flush chore is synced from flushEveryDays (made, kept in
+    step, disabled — never deleted — at 0), and the pump card's Flushed tap
+    stamps the line and logs the chore's completion."""
+    entry = _care_entry()
+    cfg = integration._config_from_entry(entry)
+    task = cfg["maintenance"]["tasks"]["drip_flush_drip"]
+    assert task["enabled"] is True and task["cadenceDays"] == 7 and task["label"] == "Flush the phyto line — Phyto drip"
+    assert integration._maintenance_task_source("drip_flush_drip") == "dosing"
+    cfg["dosing"]["channels"]["drip"]["schedule"]["standing"]["flushEveryDays"] = 14
+    cfg = integration._normalise_core_config(cfg)
+    assert cfg["maintenance"]["tasks"]["drip_flush_drip"]["cadenceDays"] == 14
+    cfg["dosing"]["channels"]["drip"]["schedule"]["standing"]["flushEveryDays"] = 0
+    cfg = integration._normalise_core_config(cfg)
+    assert cfg["maintenance"]["tasks"]["drip_flush_drip"]["enabled"] is False
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_dosing_mark_standing(hass, conn, {"id": 1, "channel_id": "drip", "what": "flushed"}))
+    assert not conn.errors
+    saved = integration._config_from_entry(entry)
+    channel = saved["dosing"]["channels"]["drip"]
+    assert channel["state"]["lastFlushedAt"] and channel["events"][0]["detail"] == "Line flushed"
+    done = saved["maintenance"]["completions"]["drip_flush_drip"]
+    assert len(done) == 1 and done[0]["source"] == "dosing"
+    run(integration.websocket_dosing_mark_standing(hass, conn, {"id": 2, "channel_id": "drip", "what": "stirred"}))
+    channel = integration._config_from_entry(entry)["dosing"]["channels"]["drip"]
+    assert channel["state"]["lastStirredAt"] and channel["events"][0]["detail"] == "Stirred by hand"
+    conn2 = FakeConnection()
+    cfg = integration._config_from_entry(entry)
+    cfg["dosing"]["channels"]["kalk"] = {**_drip_channel(), "schedule": {**_drip_channel()["schedule"], "standing": {"enabled": False}}}
+    entry.options = {CONF_SETTINGS: cfg}
+    run(integration.websocket_dosing_mark_standing(hass, conn2, {"id": 3, "channel_id": "kalk", "what": "stirred"}))
+    assert conn2.error_codes == ["not_standing"]
+
+
+def test_unstirred_jar_degrades_the_freshness_verdict_at_the_choke_point():
+    """Four days unstirred: fresh reads aging with the note, at the one
+    freshness function every surface reads — advisory, the guards see aging,
+    not stale."""
+    now = datetime.now(timezone.utc)
+    entry = _care_entry({"reservoir": {"mixedAt": _iso(now - timedelta(hours=2)), "productId": "rj", "productIsBottle": True},
+                         "state": {"lastStirredAt": _iso(now - timedelta(hours=100))}})
+    cfg = integration._config_from_entry(entry)
+    channel = cfg["dosing"]["channels"]["drip"]
+    fresh = integration._dosing_food_freshness(channel, now, cfg)
+    assert fresh["status"] == "aging" and fresh["note"] == "unstirred for days"
+    channel["state"]["lastStirredAt"] = _iso(now - timedelta(hours=3))
+    assert integration._dosing_food_freshness(channel, now, cfg)["status"] == "fresh"
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

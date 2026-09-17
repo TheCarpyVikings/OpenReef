@@ -355,3 +355,55 @@ truce on the fake HA), `test_panel_nps.mjs` +3. Unverified on Reece's HA.
 flush-reminder task (B); second stepper / phyto node, retract button (C); camera
 tint index → learned turnover → advisor (D). A phyto culture on the rack feeding
 the jar is a cultures-arc follow-on.
+
+## 11. Stage B as built (2026-09-17) — the jar's care
+
+Shipped the same day as Stage A, ahead of the mini-fridge conversion so the
+settings are waiting for it. Everything here is advice: the pump never waits
+on a stir, a fridge reading or a flush.
+
+**Config.** `schedule.standing.stir = {switchEntity, everyHours (default 8,
+0 = never on its own), burstMinutes (default 2)}`; `schedule.standing.fridge =
+{tempEntity, maxC (default 8)}` — fields shown only once the reservoir is
+refrigerated; `schedule.standing.flushEveryDays` (default 7, 0 = no chore).
+Channel state (server-written): `lastStirredAt`, `stirUntil`, `lastFlushedAt`,
+`fridgeWarm`.
+
+**The stirrer plug.** `_async_dosing_standing_care_tick` runs from the dosing
+tick after the band tick: the plug turns on when the cadence has run (or never
+ran), `stirUntil` is stamped for the burst, and the tick past it turns the plug
+off, stamps `lastStirredAt` and files "Stirred — 2 min on the plug". Both legs
+are to the nearest minute (the 60 s tick). A failed switch call retries next
+tick with the stamp untouched; unbinding the plug mid-burst clears the stamp.
+
+**The verdicts** live in `dosing.standing_care` (pure; rides `standing_state`
+when given the clock): stir `ok / due / warn (48 h) / late (96 h) / unknown`,
+fridge `ok / warm / unknown`, flush `ok / due / overdue`. Past 96 h unstirred
+the freshness verdict degrades fresh → aging with the note "unstirred for
+days", applied at `_dosing_food_freshness` (the one choke point), so the card,
+the summary and the guards all read the same thing — aging, never stale.
+
+**The fridge.** `_dosing_fridge_temp_c` reads the sensor (°F converted, -5…40
+°C plausible) into the channel's live snapshot; warm above `maxC` files one
+channel event and one activity warning on the way up, one push a shift
+(`fridge_<cid>`, 6 h), and clears on the way down.
+
+**The flush chore.** `_dosing_sync_flush_task` runs inside the standing
+post-pass: `drip_flush_<cid>` is made with the drip's cadence, kept in step,
+and DISABLED (never deleted) when the cadence is 0 or the drip is off. The
+pump card's Flushed tap (`dosing_mark_standing what=flushed`) stamps the line
+and logs the chore's completion with source `dosing`; Stirred (`what=stirred`)
+stamps the jar for keepers with no plug. A new drip's line reads "never
+flushed" and the chore is due until the first tap — honest, not fabricated.
+
+**Surfaces.** Pump card: Stir / Fridge / Line rows with Stirred ↺ and Flushed
+↺, pills `stir it`, `warm`, `due`/`overdue`; the jar line carries the degrade
+note. Pulse: the care warnings replace the calm detail and the card goes
+warning. Settings: the three field groups under the standing block.
+
+**Tests.** `test_dosing.py` +2, `test_nps.py` +4 (plug on/off through the fake
+HA, fridge warm event + push, chore sync + both taps, the degrade),
+`test_panel_nps.mjs` +2. Unverified on Reece's HA (no fridge built yet).
+
+**Left.** Second stepper / phyto node + retract (C); camera tint index →
+learned turnover → advisor (D).

@@ -124,6 +124,8 @@ from .const import (
     MANUAL_TEST_PARAMETERS,
     MAINTENANCE_MIXING_RETEST_TASK_ID,
     MAINTENANCE_SOURCE_MIXING,
+    MAINTENANCE_SOURCE_DOSING,
+    MAINTENANCE_DRIP_FLUSH_TASK_PREFIX,
     REPORT_EVENT_REPEAT_HOURS,
     REPORT_EVENT_TYPES,
     REPORT_EVENTS_MAX,
@@ -803,7 +805,10 @@ def _dosing_apply_standing(config: dict[str, Any]) -> list[str]:
         if isinstance(config.get("consumables"), dict) else {}
     tank_l = _awc_effective_tank_l(config)
     for cid, channel in channels.items():
-        if not isinstance(channel, dict) or not dosing_engine.is_standing(channel):
+        if not isinstance(channel, dict):
+            continue
+        _dosing_sync_flush_task(config, str(cid), channel)
+        if not dosing_engine.is_standing(channel):
             continue
         schedule = channel.get("schedule") or {}
         standing = schedule.get("standing") or {}
@@ -818,6 +823,52 @@ def _dosing_apply_standing(config: dict[str, Any]) -> list[str]:
             schedule["mlPerDay"] = derived
             changed.append(str(cid))
     return changed
+
+
+def _dosing_flush_task_id(cid: str) -> str:
+    return f"{MAINTENANCE_DRIP_FLUSH_TASK_PREFIX}{cid}"
+
+
+def _dosing_sync_flush_task(config: dict[str, Any], cid: str, channel: dict[str, Any]) -> None:
+    """Stage B: the line-flush chore follows the drip's flushEveryDays — made
+    when the drip has one, its cadence kept in step, DISABLED (never deleted,
+    the history is the keeper's) when the drip is off or the cadence is 0.
+    Label and steps are set once; the keeper may reword them after."""
+    maintenance = config.get("maintenance")
+    if not isinstance(maintenance, dict):
+        return
+    tasks = maintenance.get("tasks")
+    if not isinstance(tasks, dict):
+        return
+    task_id = _dosing_flush_task_id(cid)
+    standing = ((channel.get("schedule") or {}).get("standing") or {}) \
+        if isinstance(channel.get("schedule"), dict) else {}
+    every = int(_awc_num(standing.get("flushEveryDays"), 0, 0, dosing_engine.FLUSH_EVERY_DAYS_MAX))
+    wanted = bool(dosing_engine.is_standing(channel) and every > 0)
+    task = tasks.get(task_id)
+    if not isinstance(task, dict):
+        if not wanted:
+            return
+        name = str(channel.get("name") or cid)
+        task = tasks[task_id] = {
+            "label": f"Flush the phyto line — {name}"[:80],
+            "cadenceDays": every, "criticalAfterDays": every * 2, "enabled": True,
+            "notes": "A warm line grows a film that eats the phyto on its way in. "
+                     "Pull the jar, run fresh RO through the line, reload, tap Flushed on the pump card.",
+            "steps": ["Lift the line out of the jar",
+                      "Run fresh RO through it (Prime on the pump card)",
+                      "Back into the jar; tap Flushed"],
+            "builtin": False, "scheduleMode": "interval", "scheduleDays": [], "scheduleMonthDays": [],
+            "notify": True, "snoozedUntil": None, "logsVolume": False,
+        }
+        return
+    if wanted:
+        if int(_awc_num(task.get("cadenceDays"), 0, 0, 3650)) != every:
+            task["cadenceDays"] = every
+            task["criticalAfterDays"] = every * 2
+        task["enabled"] = True
+    else:
+        task["enabled"] = False
 
 
 def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
@@ -922,6 +973,25 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                         raw_standing.get("turnoverPerDay"), dosing_engine.STANDING_TURNOVER_DEFAULT,
                         0.1, dosing_engine.STANDING_TURNOVER_MAX),
                     "lineMl": _awc_num(raw_standing.get("lineMl"), dosing_engine.STANDING_LINE_ML_DEFAULT, 0, 100),
+                    # Stage B: the jar's care. A stirrer plug with a cadence and
+                    # a burst (0 h = no plug bursts, hand-shaken), the fridge's
+                    # sensor with a warm ceiling, and the line-flush cadence
+                    # (0 = no chore). All advisory — the pump never waits on them.
+                    "stir": {
+                        "switchEntity": _normalise_entity_id((raw_standing.get("stir") or {}).get("switchEntity")),
+                        "everyHours": _awc_num((raw_standing.get("stir") or {}).get("everyHours"),
+                                               dosing_engine.STIR_EVERY_H_DEFAULT, 0, dosing_engine.STIR_EVERY_H_MAX),
+                        "burstMinutes": int(_awc_num((raw_standing.get("stir") or {}).get("burstMinutes"),
+                                                     dosing_engine.STIR_BURST_MIN_DEFAULT, 1, dosing_engine.STIR_BURST_MIN_MAX)),
+                    },
+                    "fridge": {
+                        "tempEntity": _normalise_entity_id((raw_standing.get("fridge") or {}).get("tempEntity")),
+                        "maxC": _awc_num((raw_standing.get("fridge") or {}).get("maxC"),
+                                         dosing_engine.FRIDGE_MAX_C_DEFAULT, 0, 30),
+                    },
+                    "flushEveryDays": int(_awc_num(raw_standing.get("flushEveryDays"),
+                                                   dosing_engine.FLUSH_EVERY_DAYS_DEFAULT, 0,
+                                                   dosing_engine.FLUSH_EVERY_DAYS_MAX)),
                     **{
                         profile: {
                             "policy": "band" if (raw_standing.get(profile) or {}).get("policy") == "band" else "on",
@@ -1021,6 +1091,12 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                 "missedMl": _awc_num(raw_state.get("missedMl"), 0, 0, 1e6),
                 "missedSince": _awc_str(raw_state.get("missedSince"), 40),
                 "suspendedUntil": _awc_str(raw_state.get("suspendedUntil"), 40),
+                # The drip jar's care stamps (Stage B): written by the care
+                # tick and the Stirred / Flushed taps only.
+                "lastStirredAt": _awc_str(raw_state.get("lastStirredAt"), 40),
+                "stirUntil": _awc_str(raw_state.get("stirUntil"), 40),
+                "lastFlushedAt": _awc_str(raw_state.get("lastFlushedAt"), 40),
+                "fridgeWarm": bool(raw_state.get("fridgeWarm")),
                 "phLatchedHigh": bool(raw_state.get("phLatchedHigh")),
                 "rolloverAnomaly": bool(raw_state.get("rolloverAnomaly")),
                 "respread": {
@@ -3550,7 +3626,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             # which is what lets the panel tell the two apart in history and the chart.
             if item.get("source") in (MAINTENANCE_SOURCE_AWC, MAINTENANCE_SOURCE_HATCHERY,
                                       MAINTENANCE_SOURCE_MIXING, MAINTENANCE_SOURCE_CULTURES,
-                                      MAINTENANCE_SOURCE_SHELF):
+                                      MAINTENANCE_SOURCE_SHELF, MAINTENANCE_SOURCE_DOSING):
                 safe_entry["source"] = item["source"]
             volume = item.get("volume")
             if isinstance(volume, (int, float)) and not isinstance(volume, bool):
@@ -12684,7 +12760,14 @@ def _dosing_food_freshness(channel: dict[str, Any], now: datetime,
             shelf_h = _nps_batch_shelf_hours(reservoir.get("mixedAt"),
                                             hatchery.get("reservoir") or {}, now, room_h)
             reservoir = {**reservoir, "shelfLifeDays": shelf_h / 24.0}
-    return dosing_engine.freshness_state(reservoir, now)
+    fresh = dosing_engine.freshness_state(reservoir, now)
+    if dosing_engine.is_standing(channel) and fresh.get("status") == "fresh":
+        # Stage B (phyto-drip §5.4): a jar unstirred for days is settling
+        # and dying at the bottom — the verdict degrades to aging, advisory
+        # only (the keeper may have shaken it by hand; the pump never stops).
+        if dosing_engine.standing_care(channel, now)["stir"]["degrades"]:
+            fresh = {**fresh, "status": "aging", "note": "unstirred for days"}
+    return fresh
 
 
 def _dosing_live_state(hass: HomeAssistant, channel: dict[str, Any],
@@ -12755,7 +12838,30 @@ def _dosing_live_state(hass: HomeAssistant, channel: dict[str, Any],
         "boundCount": len(bound),
         "availableCount": available,
         "foodFreshness": _dosing_food_freshness(channel, datetime.now(timezone.utc), config),
+        "fridgeTempC": _dosing_fridge_temp_c(hass, channel),
     }
+
+
+def _dosing_fridge_temp_c(hass: HomeAssistant, channel: dict[str, Any]) -> float | None:
+    """Stage B: the phyto fridge's sensor, °F converted, None when unmapped,
+    unavailable, non-numeric or implausible for a fridge (-5…40 °C)."""
+    if not dosing_engine.is_standing(channel) or not (channel.get("reservoir") or {}).get("refrigerated"):
+        return None
+    fridge = ((channel.get("schedule") or {}).get("standing") or {}).get("fridge") or {}
+    entity_id = str(fridge.get("tempEntity") or "") if isinstance(fridge, dict) else ""
+    if not entity_id:
+        return None
+    st = hass.states.get(entity_id)
+    if st is None or str(st.state) in UNAVAILABLE_STATES:
+        return None
+    try:
+        value = float(st.state)
+    except (TypeError, ValueError):
+        return None
+    unit = str((getattr(st, "attributes", None) or {}).get("unit_of_measurement") or "").upper()
+    if "F" in unit:
+        value = (value - 32.0) * 5.0 / 9.0
+    return round(value, 1) if -5.0 <= value <= 40.0 else None
 
 
 # --- pH mirror: the fixed entity id the kalk firmware subscribes to ------------------------
@@ -13462,6 +13568,81 @@ async def _async_nps_standing_bands_tick(
         await _async_save_config(hass, entry, config)
 
 
+async def _async_dosing_standing_care_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """Stage B (phyto-drip §5.4): the jar's care, from the dosing tick. The
+    stirrer plug runs a burst every ``everyHours`` for ``burstMinutes`` (the
+    tick rounds both to the minute) and stamps lastStirredAt when the burst
+    ends; a refrigerated jar's sensor over its ceiling files one warning and
+    one push a shift. Advisory throughout — nothing here touches the pump."""
+    config = _config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+    changed = False
+    for cid, channel in _dosing_channels(config).items():
+        if not isinstance(channel, dict) or not dosing_engine.is_standing(channel) or not channel.get("enabled"):
+            continue
+        standing = (channel.get("schedule") or {}).get("standing") or {}
+        state = channel.setdefault("state", {})
+        name = channel.get("name") or cid
+        stir = standing.get("stir") if isinstance(standing.get("stir"), dict) else {}
+        plug = str(stir.get("switchEntity") or "")
+        every_h = _awc_num(stir.get("everyHours"), 0, 0, dosing_engine.STIR_EVERY_H_MAX)
+        until = _parse_datetime(state.get("stirUntil"))
+        if plug and until is not None and until <= now:
+            try:
+                await hass.services.async_call(
+                    "switch", "turn_off", {ATTR_ENTITY_ID: plug}, blocking=True)
+            except Exception:  # noqa: BLE001 — retry next tick, the stamp stays
+                _LOGGER.exception("Could not stop the phyto stirrer %s", plug)
+            else:
+                state["stirUntil"] = ""
+                state["lastStirredAt"] = now.isoformat()
+                _dosing_record_event(
+                    channel, "stir", f"Stirred — {int(_awc_num(stir.get('burstMinutes'), 2, 1, 60))} min on the plug")
+                changed = True
+        elif plug and every_h > 0 and until is None:
+            last = _parse_datetime(state.get("lastStirredAt"))
+            if last is None or (now - last).total_seconds() >= every_h * 3600:
+                burst = int(_awc_num(stir.get("burstMinutes"), dosing_engine.STIR_BURST_MIN_DEFAULT,
+                                     1, dosing_engine.STIR_BURST_MIN_MAX))
+                try:
+                    await hass.services.async_call(
+                        "switch", "turn_on", {ATTR_ENTITY_ID: plug}, blocking=True)
+                except Exception:  # noqa: BLE001 — try again next tick
+                    _LOGGER.exception("Could not start the phyto stirrer %s", plug)
+                else:
+                    state["stirUntil"] = (now + timedelta(minutes=burst)).isoformat()
+                    changed = True
+        elif not plug and state.get("stirUntil"):
+            state["stirUntil"] = ""      # the plug was unbound mid-burst: nothing to stop
+            changed = True
+
+        temp = _dosing_fridge_temp_c(hass, channel)
+        if temp is not None:
+            max_c = _awc_num((standing.get("fridge") or {}).get("maxC"), dosing_engine.FRIDGE_MAX_C_DEFAULT, 0, 30)
+            warm = temp > max_c
+            if warm and not state.get("fridgeWarm"):
+                _dosing_record_event(channel, "fridge", f"Phyto fridge warm — {temp:.1f} °C, above {max_c:g} °C")
+                _append_activity(config, f"Phyto fridge warm: {temp:.1f} °C at {name}", "warning")
+                state["fridgeWarm"] = True
+                changed = True
+            elif not warm and state.get("fridgeWarm"):
+                _dosing_record_event(channel, "fridge", f"Phyto fridge back to {temp:.1f} °C")
+                state["fridgeWarm"] = False
+                runtime.setdefault("notified", {}).pop(f"fridge_{cid}", None)
+                changed = True
+            if warm and _dosing_notify_enabled(config, "staleFood"):
+                await _async_dosing_notify_once(
+                    hass, config, runtime, f"fridge_{cid}", 6 * 3600,
+                    "Phyto fridge warm",
+                    f"{name}: the fridge reads {temp:.1f} °C, above {max_c:g} °C — "
+                    "the bottle will not keep as long as the shelf says.")
+    if changed:
+        await _async_save_config(hass, entry, config)
+
+
 async def _async_nps_truce_tick(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
@@ -14122,6 +14303,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     await _async_nps_truce_tick(hass, entry)
     # The phyto drip's skimmer/UV band (phyto-drip §5.5): same registry, own stamp.
     await _async_nps_standing_bands_tick(hass, entry)
+    await _async_dosing_standing_care_tick(hass, entry)
     # Hatch-ready push (hatchery v2): hour-precise, from this minutely tick —
     # the daily maintenance-reminder tick is far too coarse for a harvest
     # window. Runs BEFORE the no-channels bail-out: hand-dosers have no pumps.
@@ -14567,11 +14749,12 @@ def _dosing_standing_payload(hass: HomeAssistant, config: dict[str, Any], cid: s
         channel, _dosing_lighting_off_window(config, now_local), now_local)["plan"]
     product = ((config.get("consumables") or {}).get("products") or {}).get(
         str((channel.get("reservoir") or {}).get("productId") or ""))
+    live = _dosing_live_state(hass, channel, config)
     state = dosing_engine.standing_state(
-        channel, plan, _awc_effective_tank_l(config), product if isinstance(product, dict) else None)
+        channel, plan, _awc_effective_tank_l(config), product if isinstance(product, dict) else None,
+        now=now_local, fridge_temp_c=live.get("fridgeTempC"))
     if state is None:
         return None
-    live = _dosing_live_state(hass, channel, config)
     state["dosedTodayMl"] = round(_awc_num(live.get("dosedTodayMl"), 0, 0, 1e6), 2)
     state["freshness"] = live.get("foodFreshness")
     state["summaryText"] = plan.get("summaryText") or ""
@@ -14958,6 +15141,60 @@ async def websocket_dosing_mark_refreshed(
         else "Culture refreshed — freshness clock restarted")
     config = await _async_save_config(hass, entry, config)
     _async_kick_dosing_sync(hass, entry)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/dosing_mark_standing",
+    vol.Required("channel_id"): cv.string,
+    vol.Required("what"): vol.In(("stirred", "flushed")),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_dosing_mark_standing(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Stage B: the jar's two hand taps. 'stirred' — the keeper shook the jar
+    (or ran the stirrer by hand); 'flushed' — fresh water went through the
+    line, which also marks the line-flush chore done when the drip has one."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    channel = _dosing_channel_for_msg(connection, msg, config)
+    if channel is None:
+        return
+    if not dosing_engine.is_standing(channel):
+        connection.send_error(msg["id"], "not_standing", "That pump is not a phyto drip")
+        return
+    now = datetime.now(timezone.utc)
+    state = channel.setdefault("state", {})
+    if msg["what"] == "stirred":
+        state["lastStirredAt"] = now.isoformat()
+        _dosing_record_event(channel, "stir", "Stirred by hand")
+    else:
+        state["lastFlushedAt"] = now.isoformat()
+        _dosing_record_event(channel, "flush", "Line flushed")
+        maintenance = config.get("maintenance")
+        tasks = maintenance.get("tasks") if isinstance(maintenance, dict) else None
+        task_id = _dosing_flush_task_id(str(msg["channel_id"]))
+        if isinstance(tasks, dict) and isinstance(tasks.get(task_id), dict):
+            completions = maintenance.setdefault("completions", {})
+            if not isinstance(completions, dict):
+                completions = maintenance["completions"] = {}
+            entries = completions.setdefault(task_id, [])
+            if not isinstance(entries, list):
+                entries = completions[task_id] = []
+            stamp = now.isoformat()
+            entries.insert(0, {
+                "id": f"{task_id}:dosing:{stamp}", "timestamp": stamp,
+                "notes": "Logged automatically — Flushed tapped on the pump card",
+                "source": MAINTENANCE_SOURCE_DOSING,
+            })
+            del entries[MAINTENANCE_COMPLETIONS_MAX:]
+            tasks[task_id]["snoozedUntil"] = None
+    config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 
@@ -17117,6 +17354,8 @@ def _maintenance_task_source(task_id: str) -> str:
         return "cultures"
     if tid.startswith(MAINTENANCE_SHELF_TASK_PREFIX):
         return "shelf"
+    if tid.startswith(MAINTENANCE_DRIP_FLUSH_TASK_PREFIX):
+        return "dosing"
     return ""
 
 
@@ -24321,6 +24560,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_prime)
     websocket_api.async_register_command(hass, websocket_dosing_reset_reservoir)
     websocket_api.async_register_command(hass, websocket_dosing_mark_refreshed)
+    websocket_api.async_register_command(hass, websocket_dosing_mark_standing)
     websocket_api.async_register_command(hass, websocket_dosing_reset_tube)
     websocket_api.async_register_command(hass, websocket_mixing_summary)
     websocket_api.async_register_command(hass, websocket_mixing_start_mix)

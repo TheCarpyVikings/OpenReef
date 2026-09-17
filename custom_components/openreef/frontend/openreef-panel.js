@@ -2161,6 +2161,10 @@ class OpenReefPanel extends HTMLElement {
         { type: "openreef/dosing_mark_refreshed", channel_id: id },
         "Freshness clock restarted — dosing re-enables on the next sync.",
       );
+      if (action === "doser-mark-stirred") this._doserCall(
+        { type: "openreef/dosing_mark_standing", channel_id: id, what: "stirred" }, "Stirred — the jar's stir clock restarted.");
+      if (action === "doser-mark-flushed") this._doserCall(
+        { type: "openreef/dosing_mark_standing", channel_id: id, what: "flushed" }, "Line flushed — the flush chore is marked done.");
       if (action === "remove-doser-channel") this._removeDoserChannel(id);
       if (action === "doser-autobind") this._doserAutoBind(id);
       if (action === "doser-prime") this._doserCall({ type: "openreef/dosing_prime", channel_id: id, seconds: 10 }, "Priming ~10 s.");
@@ -2802,6 +2806,13 @@ class OpenReefPanel extends HTMLElement {
             channel.schedule.standing = channel.schedule.standing || {};
             channel.schedule.standing[profile] = channel.schedule.standing[profile] || {};
             channel.schedule.standing[profile][field] = value;
+          } else if (scope === "dosing-channel-standing-stir" || scope === "dosing-channel-standing-fridge") {
+            // Stage B: the jar's care — entity ids stay strings, the numbers coerce.
+            const block = scope.slice("dosing-channel-standing-".length);
+            channel.schedule = channel.schedule || {};
+            channel.schedule.standing = channel.schedule.standing || {};
+            channel.schedule.standing[block] = channel.schedule.standing[block] || {};
+            channel.schedule.standing[block][field] = coerced;
           } else if (scope === "dosing-channel-guards") {
             channel.guards = channel.guards || {};
             let guardValue = coerced;
@@ -16138,11 +16149,24 @@ const rigSteps = [
         : fresh.status === "aging" ? `aging — ~${this._format(fresh.hoursLeft, 0)} h left`
         : fresh.hoursLeft != null ? `fresh — ~${this._format(fresh.hoursLeft, 0)} h left`
         : "no day clock (shelf life 0)";
+      // Stage B: the jar's care — stir, fridge, line — each a line and a tap.
+      const stir = standing.stir || null;
+      const stirPill = stir && (stir.status === "late" || stir.status === "warn") ? ` <span class="pill warning">stir it</span>` : "";
+      const stirLine = stir ? `
+          <li><strong>Stir</strong> ${esc(stir.text)}${stirPill}
+            <button class="secondary inline-btn" data-action="doser-mark-stirred" data-id="${this._escape(id)}">Stirred ↺</button></li>` : "";
+      const fridge = standing.fridge || null;
+      const fridgeLine = fridge ? `
+          <li><strong>Fridge</strong> ${esc(fridge.text)}${fridge.status === "warm" ? ` <span class="pill warning">warm</span>` : ""}</li>` : "";
+      const flush = standing.flush || null;
+      const flushLine = flush ? `
+          <li><strong>Line</strong> ${esc(flush.text)}${flush.status === "overdue" ? ` <span class="pill warning">overdue</span>` : flush.status === "due" ? ` <span class="pill">due</span>` : ""}
+            <button class="secondary inline-btn" data-action="doser-mark-flushed" data-id="${this._escape(id)}">Flushed ↺</button></li>` : "";
       standingLines = `
           <li><strong>Standing density</strong> ${esc(standing.text)}${standing.residenceHours != null ? ` · ~${this._format(standing.residenceHours, 1)} h in the line` : ""}${standing.residenceWarn ? ` <span class="pill warning">line too slow</span>` : ""}<br>
             <small>${esc(standing.coaching)}${standing.bandNote ? ` ${esc(standing.bandNote)}` : ""} · ${esc(standing.skimmer?.text)} · ${esc(standing.uv?.text)}</small></li>
-          <li><strong>${jar}</strong> ${jarText}
-            <button class="secondary inline-btn" data-action="doser-mark-refreshed" data-id="${this._escape(id)}">Loaded ↺</button></li>`;
+          <li><strong>${jar}</strong> ${jarText}${fresh.note ? ` (${esc(fresh.note)})` : ""}
+            <button class="secondary inline-btn" data-action="doser-mark-refreshed" data-id="${this._escape(id)}">Loaded ↺</button></li>${stirLine}${fridgeLine}${flushLine}`;
     }
     const ramp = entry?.ramp;
     const rampLine = ramp
@@ -16386,6 +16410,12 @@ const rigSteps = [
             ${pol.policy === "band" ? `<label>${label} off from<input type="time" data-scope="dosing-channel-standing-${profile}" data-id="${eid}" data-field="start" value="${esc(pol.start || "22:00")}"></label>
             <label>${label} back on at<input type="time" data-scope="dosing-channel-standing-${profile}" data-id="${eid}" data-field="end" value="${esc(pol.end || "06:00")}"><small>Armed equipment only; restored on the stamp like the feed truce.</small></label>` : ""}`;
           }).join("")}
+          <label>Stirrer plug (optional)<input type="text" data-scope="dosing-channel-standing-stir" data-id="${eid}" data-field="switchEntity" value="${esc(standing.stir?.switchEntity || "")}" placeholder="switch.phyto_stirrer"><small>A magnetic stirrer on a smart plug. Leave blank and shake the jar by hand — tap Stirred on the pump card.</small></label>
+          <label>Stir every (hours)<input type="number" min="0" max="48" step="1" data-scope="dosing-channel-standing-stir" data-id="${eid}" data-field="everyHours" value="${esc(standing.stir?.everyHours ?? 8)}"><small>0 = the plug never runs on its own.</small></label>
+          <label>Stir burst (minutes)<input type="number" min="1" max="30" step="1" data-scope="dosing-channel-standing-stir" data-id="${eid}" data-field="burstMinutes" value="${esc(standing.stir?.burstMinutes ?? 2)}"><small>Long enough to lift the cells off the bottom; to the nearest minute.</small></label>
+          ${reservoir.refrigerated ? `<label>Fridge sensor (optional)<input type="text" data-scope="dosing-channel-standing-fridge" data-id="${eid}" data-field="tempEntity" value="${esc(standing.fridge?.tempEntity || "")}" placeholder="sensor.phyto_fridge_temperature"><small>Warns when the fridge runs warm. Advice only — the pump never waits on it.</small></label>
+          <label>Fridge warm above (°C)<input type="number" min="0" max="30" step="0.5" data-scope="dosing-channel-standing-fridge" data-id="${eid}" data-field="maxC" value="${esc(standing.fridge?.maxC ?? 8)}"></label>` : ""}
+          <label>Flush the line every (days)<input type="number" min="0" max="90" step="1" data-scope="dosing-channel-standing" data-id="${eid}" data-field="flushEveryDays" value="${esc(standing.flushEveryDays ?? 7)}"><small>A warm line grows a film. Makes a Maintenance chore at this cadence; 0 = none. Tap Flushed on the pump card when done.</small></label>
         </div>` : ""}` : ""}
         ${continuous ? `
           <label class="toggle-card compact-toggle">
@@ -19431,10 +19461,15 @@ const rigSteps = [
         const fresh = st.freshness || {};
         const stale = fresh.status === "stale";
         const jar = st.refrigerated ? "bottle" : "jar";
+        const care = [];
+        if (st.stir && (st.stir.status === "late" || st.stir.status === "warn")) care.push(`Stir the ${jar} — ${st.stir.text}.`);
+        if (st.fridge && st.fridge.status === "warm") care.push(`${st.fridge.text}.`);
+        if (st.flush && (st.flush.status === "overdue" || st.flush.status === "due")) care.push(`Flush the line — ${st.flush.text}.`);
         const detail = stale
           ? `The ${jar} is past its day — load today's phyto and tap Loaded.`
+          : care.length ? care.join(" ")
           : `${this._format(st.dosedTodayMl, 1)} of ${this._format(st.mlPerDay, 1)} ml so far today${fresh.hoursLeft != null ? ` · ${jar} good for ~${this._format(fresh.hoursLeft, 0)} h` : ""}`;
-        push(`phyto-drip-${c.id}`, `Phyto drip · ${c.name}`, st.text, detail, stale ? "warning" : "ok", [st.coaching]);
+        push(`phyto-drip-${c.id}`, `Phyto drip · ${c.name}`, st.text, detail, stale || care.length ? "warning" : "ok", [st.coaching]);
       });
     } catch { /* no card */ }
 

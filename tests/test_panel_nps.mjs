@@ -2627,5 +2627,53 @@ test("Pulse carries the drip: the density held, today's ml, the jar", async () =
   } finally { restore(); }
 });
 
+test("the drip card carries the jar's care: stir, fridge and the line, each with its tap (Stage B)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    dripPanel(panel, {
+      stir: { mode: "hand", status: "warn", text: "unstirred 2 d ago — settled phyto dies in days", degrades: false },
+      fridge: null,
+      flush: { everyDays: 7, status: "overdue", dueInDays: -2, text: "line flushed 9 d ago · 2 d overdue" },
+    });
+    const html = panel._npsTab();
+    assert(html.includes("<strong>Stir</strong> unstirred 2 d ago — settled phyto dies in days") && html.includes(">stir it</span>"), "the stir line warns");
+    assert(html.includes('data-action="doser-mark-stirred" data-id="drip"') && html.includes("Stirred ↺"), "Stirred is a tap on the card");
+    assert(html.includes("<strong>Line</strong> line flushed 9 d ago · 2 d overdue") && html.includes(">overdue</span>"), "the line's flush clock");
+    assert(html.includes('data-action="doser-mark-flushed" data-id="drip"') && html.includes("Flushed ↺"), "Flushed is a tap on the card");
+    assert(!html.includes("<strong>Fridge</strong>"), "no fridge line for a jar at the node");
+    noPlaceholders(html, "drip care");
+    dripPanel(panel, { refrigerated: true,
+      stir: { mode: "plug", status: "ok", text: "stirred 3 h ago · plug every 8 h, 2 min", degrades: false },
+      fridge: { status: "warm", tempC: 11.2, maxC: 8, text: "fridge warm — 11.2 °C, above 8 °C; the bottle's clock runs faster than the shelf says" },
+      flush: { everyDays: 7, status: "ok", dueInDays: 4, text: "line flushed 3 d ago · next in 4 d" },
+      freshness: { status: "aging", hoursLeft: 30, note: "unstirred for days" } });
+    const html2 = panel._npsTab();
+    assert(html2.includes("<strong>Fridge</strong> fridge warm — 11.2 °C") && html2.includes(">warm</span>"), "a warm fridge is pilled");
+    assert(html2.includes("<strong>Stir</strong> stirred 3 h ago · plug every 8 h, 2 min") && !html2.includes(">stir it</span>"), "a plug on its cadence is calm");
+    assert(html2.includes("(unstirred for days)"), "the degraded verdict says why");
+    const card = panel._pulseInsightCards().find((c) => c.key === "phyto-drip-drip");
+    assert(card.status === "warning" && card.detail.includes("fridge warm — 11.2 °C"), "Pulse carries the care warning");
+  } finally { restore(); }
+});
+
+test("the drip's settings take the stirrer plug, the fridge sensor and the flush cadence", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    dripPanel(panel);
+    panel._settingsSections = new Set(["dosing"]);
+    let html = panel._doserChannelSettingsCard("drip");
+    assert(html.includes('data-scope="dosing-channel-standing-stir" data-id="drip" data-field="switchEntity"'), "the plug field");
+    assert(html.includes('data-field="everyHours"') && html.includes('data-field="burstMinutes"'), "cadence and burst");
+    assert(html.includes('data-scope="dosing-channel-standing" data-id="drip" data-field="flushEveryDays"'), "the flush cadence");
+    assert(!html.includes('data-scope="dosing-channel-standing-fridge"'), "no fridge fields for a jar at the node");
+    panel._config.dosing.channels.drip.reservoir.refrigerated = true;
+    html = panel._doserChannelSettingsCard("drip");
+    assert(html.includes('data-scope="dosing-channel-standing-fridge" data-id="drip" data-field="tempEntity"') && html.includes('data-field="maxC"'), "fridge fields once refrigerated");
+    noPlaceholders(html, "drip settings");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();
