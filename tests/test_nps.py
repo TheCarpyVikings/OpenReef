@@ -4399,7 +4399,8 @@ def test_feed_log_sweeps_every_ledger_newest_first():
     assert rj["how"] == "hand" and rj["slot"] == "11:00" and rj["productId"] == "rj" and rj["ml"] == 2.0
     assert rj["undoable"] is True and rj["undone"] is False and rj["at"] == stamp(0, 11, 34)
     assert rj["id"] == f"shelf:rj@{stamp(0, 11, 34)}"
-    assert set(rj) == {"id", "at", "date", "time", "how", "source", "name", "productId", "ml", "from", "via",
+    assert set(rj) == {"drip", "running", "targetMl", "pulses",   # the drip's day-row fields (phyto-drip §5.6)
+                       "id", "at", "date", "time", "how", "source", "name", "productId", "ml", "from", "via",
                        "slot", "note", "undone", "undoneAt", "undoable"}
     undone = by[("2026-09-10", "09:00", "shelf:rj")]
     assert undone["undone"] is True and undone["undoneAt"] == stamp(0, 9, 4) and undone["undoable"] is False
@@ -4809,6 +4810,140 @@ def test_ws_summary_vessels_carry_their_reminder_clocks():
     assert hatchery["nextStartVessel"] == "v2"
     assert v2["start"] == {} or v2["start"]["reason"] == hatchery["nextHatch"]["status"]
 
+
+
+# --- The phyto drip (docs/phyto-drip-brainstorm.md): a standing density ----------
+
+def _drip_channel(**over):
+    ch = {
+        "name": "Phyto drip", "chemical": "food", "enabled": True,
+        "driver": {"type": "openreef_esphome_stepper", "entities": {}},
+        "schedule": {"enabled": True, "mlPerDay": 5.8, "mode": "continuous",
+                     "windowStart": "00:00", "windowEnd": "00:00",
+                     "standing": {"enabled": True, "targetCellsPerMl": 10000, "turnoverPerDay": 22,
+                                  "lineMl": 3, "skimmer": {"policy": "on"}, "uv": {"policy": "on"}}},
+        "reservoir": {"productId": "rj", "productIsBottle": True, "shelfLifeDays": 1},
+        "state": {}, "dailyLog": [], "events": [],
+    }
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(ch.get(key), dict):
+            ch[key].update(value)
+        else:
+            ch[key] = value
+    return ch
+
+
+def test_normalise_derives_the_drip_rate_from_a_counted_bottle():
+    """52 L × 10,000 cells/mL × 22 a day ÷ 2e9 cells/ml = 5.72 ml/day, written
+    over whatever the panel saved; an uncounted bottle leaves the keeper's
+    number alone; the jar gets its day clock by default."""
+    raw = {
+        "tank": {"volumeLitres": 52},
+        "consumables": {"products": {"rj": {"name": "Reef Flourish", "category": "phyto",
+                                            "bottleMl": 250, "cellsPerMl": 2e9}}},
+        "dosing": {"channels": {"drip": _drip_channel(schedule={"mlPerDay": 1})}},
+    }
+    config = integration._normalise_core_config(raw)
+    channel = config["dosing"]["channels"]["drip"]
+    assert channel["schedule"]["mlPerDay"] == 5.72
+    assert channel["schedule"]["standing"]["targetCellsPerMl"] == 10000
+    assert channel["reservoir"]["shelfLifeDays"] == 1 and channel["reservoir"]["refrigerated"] is False
+    assert config["consumables"]["products"]["rj"]["cellsPerMl"] == 2e9
+    # Idempotent: a second pass changes nothing.
+    assert integration._normalise_core_config(config) == config
+    raw["consumables"]["products"]["rj"]["cellsPerMl"] = 0
+    config = integration._normalise_core_config(raw)
+    assert config["dosing"]["channels"]["drip"]["schedule"]["mlPerDay"] == 1
+
+
+def test_feed_timeline_drip_band_says_the_density_it_holds():
+    now_local = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+    products = {"rj": _product(name="Reef Flourish", cellsPerMl=2e9, particleUmMax=20)}
+    tl = _tl(now_local, products=products, channels={"drip": _drip_channel()}, tank_l=52)
+    band = _by_id(tl, "channel:drip:band")[0]
+    assert band["kind"] == "band" and band["standing"] is True
+    assert band["note"] == "Holding ~10,000 cells/mL · 0.1 ml every 25 min · 5.8 ml/day"
+    plain = _tl(now_local, products=products,
+                channels={"p": {**_drip_channel(), "schedule": {**_drip_channel()["schedule"], "standing": {"enabled": False}}}})
+    assert _by_id(plain, "channel:p:band")[0]["standing"] is False
+
+
+def test_feed_log_drip_is_one_running_day_row_and_a_stall():
+    """Never a row per pulse (§8 Q8): today live from the sensor and still
+    running, yesterday from the channel's rollup, the bottle's coalesced pump
+    rows skipped, a held stall as its own row."""
+    tz = timezone.utc
+    now = datetime(2026, 9, 17, 12, 0, tzinfo=tz)
+    products = {"rj": _product(name="Reef Flourish", history=[
+        {"at": _iso(datetime(2026, 9, 17, 0, 25, tzinfo=tz)), "ml": 3.4, "kind": "pump", "drip": True},
+        {"at": _iso(datetime(2026, 9, 16, 0, 25, tzinfo=tz)), "ml": 5.7, "kind": "pump", "drip": True},
+    ])}
+    channels = {"drip": _drip_channel(
+        state={"lastSensorMl": 3.4, "missedSince": _iso(datetime(2026, 9, 17, 10, 10, tzinfo=tz)), "missedMl": 0.6},
+        dailyLog=[{"date": "2026-09-16", "targetMl": 5.8, "deliveredMl": 5.7}])}
+    log = nps.feed_log(now, products=products, channels=channels, days=7, live_dosed={"drip": 3.5})
+    drip = [r for r in log["rows"] if r["drip"]]
+    # Newest first: the stall stamped 10:10 sits above the day row it belongs to.
+    assert [r["source"] for r in log["rows"] if r["how"] == "pump"] == [
+        "channel:drip:stall", "channel:drip", "channel:drip"]
+    stall, today, yesterday = drip
+    assert today["running"] is True and today["ml"] == 3.5 and today["pulses"] == 35
+    # The target is the REALISED rate — 57 pulses of 0.1 ml at 25 min is 5.7,
+    # not the 5.8 typed — the same honesty the card's bar keeps.
+    assert today["note"] == "3.5 of 5.7 ml so far · 35 pulses · running"
+    assert today["date"] == "2026-09-17" and today["time"] == "00:00"
+    assert stall["time"] == "10:10" and stall["ml"] is None and "0.6 ml short" in stall["note"]
+    assert yesterday["date"] == "2026-09-16" and yesterday["ml"] == 5.7 and yesterday["note"] == "5.7 of 5.8 ml · 57 pulses"
+    assert not [r for r in log["rows"] if r["source"] == "shelf:rj"]
+    # Without a live reading the flushed sensor stands in.
+    log2 = nps.feed_log(now, products=products, channels=channels, days=1)
+    assert [r for r in log2["rows"] if r["running"]][0]["ml"] == 3.4
+
+
+def test_compile_feed_plan_carnation_is_held_by_the_drip():
+    products = {"rj": _product(name="Reef Flourish", cellsPerMl=2e9, particleUmMin=1, particleUmMax=20)}
+    plan = nps.compile_feed_plan(["dendronephthya"], products, {"drip": _drip_channel()})
+    dendro = plan["species"][0]
+    assert dendro["status"] == "covered"
+    assert dendro["standingPumps"] == [{"name": "Phyto drip", "held": "~10,000 cells/mL"}]
+    assert dendro["verdict"] == "Standing density held by Phyto drip (~10,000 cells/mL)."
+    assert plan["suggestions"][0]["standing"] is True and plan["suggestions"][0]["dosesPerDay"] == 0
+    products["rj"]["cellsPerMl"] = 0
+    plan = nps.compile_feed_plan(["dendronephthya"], products, {"drip": _drip_channel()})
+    assert plan["species"][0]["verdict"] == "Standing density held by Phyto drip (set by tint)."
+
+
+def test_standing_band_holds_the_skimmer_through_a_disabled_truce():
+    """The drip's own off-band (§5.5): engaged from the dosing tick, filed in
+    the truce's registry with the band flag, so a disabled truce does not
+    restore it early — the band end is its stamp, and that restores it."""
+    now_local = datetime.now().astimezone()
+    start = (now_local - timedelta(hours=1)).strftime("%H:%M")
+    end = (now_local + timedelta(hours=1)).strftime("%H:%M")
+    cfg = {
+        "nps": {"enabled": True,
+                "truce": {"enabled": False, "uvOffMinutes": 120, "ozoneOffMinutes": 120,
+                          "skimmerOffMinutes": 45, "state": {}}},
+        "equipment": {"skim1": {"armed": True, "type": "skimmer", "switch_entity_id": "switch.skimmer"}},
+        "dosing": {"channels": {"drip": _drip_channel(schedule={"standing": {
+            "enabled": True, "targetCellsPerMl": 10000, "turnoverPerDay": 22, "lineMl": 3,
+            "skimmer": {"policy": "band", "start": start, "end": end}, "uv": {"policy": "on"}}})}},
+    }
+    entry = FakeEntry(options={CONF_SETTINGS: cfg})
+    hass = FakeHass(states={"switch.skimmer": "on"}, entries=[entry])
+    run(integration._async_nps_standing_bands_tick(hass, entry))
+    assert hass.states.get("switch.skimmer").state == "off"
+    state = _truce_state(entry)
+    assert state["skimmer"]["turnedOff"] == ["switch.skimmer"] and state["skimmer"]["band"] is True
+    assert state["skimmer"]["restoreAt"]
+    run(integration._async_nps_truce_tick(hass, entry))
+    assert hass.states.get("switch.skimmer").state == "off"      # the truce is off; the band holds
+    state["skimmer"]["restoreAt"] = _iso(datetime.now(timezone.utc) - timedelta(minutes=1))
+    run(integration._async_nps_truce_tick(hass, entry))
+    assert hass.states.get("switch.skimmer").state == "on"
+    state = _truce_state(entry)
+    assert state["skimmer"]["turnedOff"] == [] and state["skimmer"]["band"] is False
+    assert state["skimmer"]["history"] and state["skimmer"]["history"][-1]["until"]
 
 if __name__ == "__main__":
     failures = 0

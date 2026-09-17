@@ -2784,6 +2784,24 @@ class OpenReefPanel extends HTMLElement {
             channel.schedule.night = channel.schedule.night || {};
             channel.schedule.night[field] = coerced;
             this._doserUpdateSummaryLine(id);
+          } else if (scope === "dosing-channel-standing") {
+            // The phyto drip (docs/phyto-drip-brainstorm.md §5.1). Turning it
+            // on gives a room-temperature jar its day clock; the backend
+            // derives ml/day when the bottle has a density.
+            channel.schedule = channel.schedule || {};
+            channel.schedule.standing = channel.schedule.standing || {};
+            channel.schedule.standing[field] = coerced;
+            if (field === "enabled" && value) {
+              channel.reservoir = channel.reservoir || {};
+              if (!channel.reservoir.refrigerated && !(Number(channel.reservoir.shelfLifeDays) > 0)) channel.reservoir.shelfLifeDays = 1;
+            }
+            this._doserUpdateSummaryLine(id);
+          } else if (scope === "dosing-channel-standing-skimmer" || scope === "dosing-channel-standing-uv") {
+            const profile = scope.slice("dosing-channel-standing-".length);
+            channel.schedule = channel.schedule || {};
+            channel.schedule.standing = channel.schedule.standing || {};
+            channel.schedule.standing[profile] = channel.schedule.standing[profile] || {};
+            channel.schedule.standing[profile][field] = value;
           } else if (scope === "dosing-channel-guards") {
             channel.guards = channel.guards || {};
             let guardValue = coerced;
@@ -3055,7 +3073,7 @@ class OpenReefPanel extends HTMLElement {
       if (scope) this._setDirty(true);
       if (scope === "display" && field === "themeColor") this._render();
       if (
-        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || (scope === "quiet-hours" && field === "enabled") || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-cultures" && field === "enabled") || (scope === "nps-culture-jar" && field === "species") || (scope === "nps-hatch-vessel" && field === "volumePreset") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl", "doseEveryUnit"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled"))
+        (scope === "mode-schedule" || scope === "mode-schedule-time" || scope === "mode-schedule-global" || scope === "manual-tests" || (scope === "manual-test" && ["enabled", "cadenceDays", "criticalAfterDays"].includes(field)) || scope === "maintenance" || scope === "maintenance-reminders" || scope === "pulse" || scope === "diagram" || (scope === "maintenance-task" && ["enabled", "cadenceDays", "criticalAfterDays", "scheduleMode", "scheduleDay", "notify", "logsVolume"].includes(field)) || scope === "dosing-system" || (scope === "dosing" && field === "productPreset") || (scope === "equipment" && field === "type") || (scope === "mode-preview") || (scope === "mode-equip-timer" && field === "enabled") || (scope === "tank" && field === "profile") || scope === "watchdog" || (scope === "quiet-hours" && field === "enabled") || scope === "sensor-health" || scope === "alert-escalation" || scope === "trust-check" || scope === "edge-failsafes" || scope === "lighting" || (scope === "awc" && field === "enabled") || (scope === "mixing" && ["enabled", "layout"].includes(field)) || (scope === "mixing-salt" && ["brand", "unit"].includes(field)) || (scope === "mixing-heat" && field === "enabled") || (scope === "vision" && field === "enabled") || (scope === "nps" && field === "enabled") || (scope === "nps-exchange" && ["enabled", "channelId"].includes(field)) || (scope === "nps-truce" && field === "enabled") || (scope === "nps-hatchery" && ["eggType", "enabled"].includes(field)) || (scope === "nps-cultures" && field === "enabled") || (scope === "nps-culture-jar" && field === "species") || (scope === "nps-hatch-vessel" && field === "volumePreset") || scope === "nps-species" || (scope === "consumable" && ["category", "shelfLifeDaysOpened", "bottleMl", "doseEveryUnit"].includes(field)) || (scope === "awc-schedule" && ["method", "amountUnit", "period", "enabled", "mode"].includes(field)) || (scope === "awc-policy" && field === "mode") || (scope === "dosing-spacing" && field === "enabled") || (scope === "dosing" && field === "enabled") || (scope === "dosing-channel" && ["chemical", "enabled"].includes(field)) || (scope === "dosing-channel-schedule" && ["mode", "enabled"].includes(field)) || (scope === "dosing-channel-night" && ["enabled", "useLightingSchedule"].includes(field)) || (scope === "dosing-channel-guards" && ["phEntity", "quietHoursEnabled"].includes(field)) || (scope === "dosing-channel-ramp" && field === "enabled") || (scope === "dosing-channel-standing" && field === "enabled") || ((scope === "dosing-channel-standing-skimmer" || scope === "dosing-channel-standing-uv") && field === "policy") || (scope === "dosing-channel-reservoir" && field === "refrigerated"))
         && event.type === "change"
       ) this._render();
     };
@@ -11057,6 +11075,8 @@ class OpenReefPanel extends HTMLElement {
       if (value === "hours") product.doseEveryHours = Math.min(24, perDay ? Math.round(24 / perDay * 10) / 10 : (n || 12));
       else if (value === "perDay") product.doseTimesPerDay = Math.min(24, hours ? Math.max(1, Math.round(24 / hours)) : Math.round(n || 2));
       else product.doseEveryDays = Math.round(n) || 1;
+    } else if (field === "cellsPerMlM") {
+      product.cellsPerMl = Math.max(0, Number(value) || 0) * 1e6;
     } else if (field === "doseEveryN") {
       const n = Math.max(0, Number(value) || 0);
       const unit = unitOf(product);
@@ -12736,8 +12756,9 @@ class OpenReefPanel extends HTMLElement {
       if (row.via) details.push(`via ${esc(row.via)}`);
       if (row.note) details.push(esc(row.note));
       if (row.undone) details.push("taken back");
-      const tone = row.undone ? "undone" : row.how === "pump" ? "pump" : "control";
-      const pill = row.undone ? "undone" : row.how === "pump" ? "pumped" : "by hand";
+      // A standing drip's day row (phyto-drip §5.6): one live row, or a stall.
+      const tone = row.undone ? "undone" : row.drip ? "drip" : row.how === "pump" ? "pump" : "control";
+      const pill = row.undone ? "undone" : row.drip ? (row.running ? "running" : String(row.source || "").endsWith(":stall") ? "stalled" : "drip") : row.how === "pump" ? "pumped" : "by hand";
       const undo = row.undoable && kind
         ? `<button class="secondary compact-button" data-action="nps-timeline-undo" data-kind="${kind}" data-id="${esc(pid)}" data-at="${esc(row.at)}" title="Takes this feed back — the ml returns where it came from and the strip's mark reopens">Undo</button>`
         : "";
@@ -13122,6 +13143,7 @@ class OpenReefPanel extends HTMLElement {
           <label>Remaining (ml)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="remainingMl" value="${esc(product.remainingMl)}"></label>
           <label>Low alert below (ml)<input type="number" min="0" placeholder="0 = auto 10%" data-scope="consumable" data-id="${eid}" data-field="lowThresholdMl" value="${esc(product.lowThresholdMl)}"></label>
           <label>Shelf life once opened (days)<input type="number" min="0" placeholder="0 = shelf-stable" data-scope="consumable" data-id="${eid}" data-field="shelfLifeDaysOpened" value="${esc(product.shelfLifeDaysOpened)}"></label>
+          ${product.category === "phyto" ? `<label>Cell density (million cells/ml)<input type="number" min="0" step="10" placeholder="0 = unknown" data-scope="consumable" data-id="${eid}" data-field="cellsPerMlM" value="${esc(Number(product.cellsPerMl) > 0 ? Math.round(Number(product.cellsPerMl) / 1e6) : "")}"><small>From the label — concentrates run ~2,000; a home culture is uncounted. A standing drip derives its ml/day from this; blank = set by tint.</small></label>` : ""}
           <label>Particle min (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMin" value="${esc(product.particleUmMin)}"></label>
           <label>Particle max (µm)<input type="number" min="0" data-scope="consumable" data-id="${eid}" data-field="particleUmMax" value="${esc(product.particleUmMax)}"></label>
           <label>Notes<input data-scope="consumable" data-id="${eid}" data-field="notes" value="${esc(product.notes)}"></label>
@@ -15678,7 +15700,10 @@ const rigSteps = [
   _doserFreshness(channel) {
     // Client-side mirror of the engine's freshness_state — display only; the
     // backend tick owns enforcement.
-    const res = channel.reservoir || {};
+    let res = channel.reservoir || {};
+    // A refrigerated bottle runs on the shelf's opened clock (phyto-drip §5.4).
+    const bottle = res.refrigerated ? this._config?.consumables?.products?.[res.productId] : null;
+    if (bottle && Number(bottle.shelfLifeDaysOpened) > 0 && bottle.openedAt) res = { ...res, mixedAt: bottle.openedAt, shelfLifeDays: bottle.shelfLifeDaysOpened };
     const shelfDays = Number(res.shelfLifeDays) || 0;
     if (shelfDays <= 0) return { status: "fresh", hoursLeft: null };
     const mixed = Date.parse(res.mixedAt || "");
@@ -15691,22 +15716,25 @@ const rigSteps = [
   _doserFreshnessBlock(eid, channel) {
     const res = channel.reservoir || {};
     const fresh = this._doserFreshness(channel);
+    const standing = !!channel.schedule?.standing?.enabled;
     const line = fresh.status === "stale"
-      ? `<strong>⛔ Stale — dosing is held off.</strong> Refresh the culture, then tap Refreshed.`
+      ? standing
+        ? `<strong>⚠ Past its day.</strong> Load today's phyto, then tap Loaded — the drip keeps running meanwhile.`
+        : `<strong>⛔ Stale — dosing is held off.</strong> Refresh the culture, then tap Refreshed.`
       : fresh.status === "aging"
         ? `⚠ Aging — about ${this._format(fresh.hoursLeft, 0)} h left.`
         : fresh.hoursLeft == null
           ? `Freshness tracking off (shelf life 0).`
           : `✅ Fresh — about ${this._format(fresh.hoursLeft, 0)} h left.`;
     return `
-        <div class="awc-section-title"><p class="eyebrow">Freshness (live food)</p></div>
+        <div class="awc-section-title"><p class="eyebrow">${standing ? (res.refrigerated ? "Freshness (the bottle)" : "The jar (phyto drip)") : "Freshness (live food)"}</p></div>
         <small>${line}</small>
         <div class="mini-grid">
-          <label>Shelf life (days)<input type="number" min="0" max="60" step="0.5" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="shelfLifeDays" value="${res.shelfLifeDays ?? 1}"><small>0 = never expires. Phyto/pods/baby brine keep about a day.</small></label>
+          <label>Shelf life (days)<input type="number" min="0" max="60" step="0.5" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="shelfLifeDays" value="${res.shelfLifeDays ?? 1}"${res.refrigerated ? " readonly" : ""}><small>${res.refrigerated ? "Read from the linked bottle's shelf life once opened." : standing ? "A room-temperature jar keeps about a day — load it fresh each morning; an air line in the jar stops the phyto settling." : "0 = never expires. Phyto/pods/baby brine keep about a day."}</small></label>
           <label>Fresh chaser (s)<input type="number" min="0" max="120" step="1" data-scope="dosing-channel" data-id="${eid}" data-field="chaserSeconds" value="${channel.chaserSeconds ?? 0}"><small>Post-dose rinse from the AWC fresh line — keeps the food line clear. 0 = off.</small></label>
         </div>
         <div class="button-row">
-          <button class="secondary" data-action="doser-mark-refreshed" data-id="${eid}">Refreshed today</button>
+          <button class="secondary" data-action="doser-mark-refreshed" data-id="${eid}">${standing ? "Loaded today" : "Refreshed today"}</button>
         </div>`;
   }
 
@@ -16098,6 +16126,24 @@ const rigSteps = [
         advisorLine = `<li><strong>Advisor</strong> ${this._escape(advisorItem.recommendationState || "learning")} — details in the Advisor section below</li>`;
       }
     }
+    // The phyto drip (phyto-drip §5.2): the density it holds, the pulse, the
+    // line, the coaching — and the jar's clock with its daily Loaded tap.
+    const standing = entry?.standing;
+    let standingLines = "";
+    if (standing) {
+      const esc = (v) => this._escape(v == null ? "" : String(v));
+      const fresh = standing.freshness || {};
+      const jar = standing.refrigerated ? "Bottle" : "Jar";
+      const jarText = fresh.status === "stale" ? "⚠ past its day — load today's phyto"
+        : fresh.status === "aging" ? `aging — ~${this._format(fresh.hoursLeft, 0)} h left`
+        : fresh.hoursLeft != null ? `fresh — ~${this._format(fresh.hoursLeft, 0)} h left`
+        : "no day clock (shelf life 0)";
+      standingLines = `
+          <li><strong>Standing density</strong> ${esc(standing.text)}${standing.residenceHours != null ? ` · ~${this._format(standing.residenceHours, 1)} h in the line` : ""}${standing.residenceWarn ? ` <span class="pill warning">line too slow</span>` : ""}<br>
+            <small>${esc(standing.coaching)}${standing.bandNote ? ` ${esc(standing.bandNote)}` : ""} · ${esc(standing.skimmer?.text)} · ${esc(standing.uv?.text)}</small></li>
+          <li><strong>${jar}</strong> ${jarText}
+            <button class="secondary inline-btn" data-action="doser-mark-refreshed" data-id="${this._escape(id)}">Loaded ↺</button></li>`;
+    }
     const ramp = entry?.ramp;
     const rampLine = ramp
       ? `<li><strong>Ramp</strong> ${this._format(ramp.percent, 0)}% — ${this._escape(ramp.hint || "")}${!ramp.complete
@@ -16118,6 +16164,7 @@ const rigSteps = [
         <ul class="dosing-card-lines">
           <li><strong>Today</strong> ${this._format(dosed, 1)} / ${this._format(target, 0)} ml · ${this._escape(nextText)}</li>
           <li><strong>Schedule</strong> ${this._escape(plan.summaryText || this._doserScheduleSummaryText(channel))}</li>
+          ${standingLines}
           <li><strong>Reservoir</strong> ${this._escape(reservoirText)}
             <button class="secondary inline-btn" data-action="doser-reset-reservoir" data-id="${this._escape(id)}">Refilled ↺</button></li>
           <li><strong>Integrity</strong> ${integrityText}</li>
@@ -16247,6 +16294,10 @@ const rigSteps = [
     const kalkish = channel.chemical === "kalk";
     const continuous = (s.mode || "continuous") === "continuous";
     const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["other", "Other"]];
+    const foodish = ["food", "livefood"].includes(channel.chemical);
+    const standing = s.standing || {};
+    const standingSum = this._doserSummary?.summary?.[id]?.standing || null;
+    const derivedMl = standingSum && standingSum.mode === "density" ? Number(standingSum.derivedMlPerDay) : null;
 
     const removeRow = this._doserRemoveConfirm === id
       ? `<div class="notice warning-notice"><small>The pump's enable switch is ON — removing only unlinks OpenReef; the on-device schedule keeps dosing until that switch is turned off.</small>
@@ -16304,15 +16355,38 @@ const rigSteps = [
           <span><strong>Scheduled dosing</strong><small>Compile the daily total below into the device's schedule.</small></span>
         </label>
         <div class="mini-grid">
-          <label>Daily volume (ml/day)<input type="number" min="0" step="1" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="mlPerDay" value="${esc(s.mlPerDay || 0)}"><small>The one number that matters — OpenReef derives dose size and cadence.</small></label>
+          <label>Daily volume (ml/day)<input type="number" min="0" step="${standing.enabled ? "0.1" : "1"}" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="mlPerDay" value="${esc(s.mlPerDay || 0)}"${derivedMl != null ? " readonly" : ""}><small>${derivedMl != null
+            ? `Derived for you — ${this._format(derivedMl, 2)} ml/day holds the density below with this bottle. Turn the dials, not this box.`
+            : standing.enabled ? "Set by tint: a faint green at the glass is right. Give the bottle a cell density on the shelf and this is derived instead."
+            : "The one number that matters — OpenReef derives dose size and cadence."}</small></label>
           <label>Mode<select data-scope="dosing-channel-schedule" data-id="${eid}" data-field="mode">
             <option value="continuous" ${continuous ? "selected" : ""}>Continuous micro-doses (kalk)</option>
             <option value="doses" ${!continuous ? "selected" : ""}>N doses per day (2-part)</option>
           </select></label>
           ${!continuous ? `<label>Doses per day<input type="number" min="1" max="96" step="1" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="dosesPerDay" value="${esc(s.dosesPerDay || 8)}"></label>` : ""}
           <label>Window start<input type="time" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="windowStart" value="${esc(s.windowStart || "00:00")}"></label>
-          <label>Window end<input type="time" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="windowEnd" value="${esc(s.windowEnd || "00:00")}"><small>Same start and end = around the clock.</small></label>
+          <label>Window end<input type="time" data-scope="dosing-channel-schedule" data-id="${eid}" data-field="windowEnd" value="${esc(s.windowEnd || "00:00")}"><small>Same start and end = around the clock${standing.enabled ? " — the drip's best window: nothing sits in the line overnight" : ""}.</small></label>
         </div>
+        ${foodish ? `
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-standing" data-id="${eid}" data-field="enabled" ${standing.enabled ? "checked" : ""}>
+          <span><strong>Standing density (phyto drip)</strong><small>Hold a live-phyto density for the filter feeders — the carnation coral's only proven method. Micro-pulses around the clock; they never trigger the feed truce.</small></span>
+        </label>
+        ${standing.enabled ? `<div class="mini-grid">
+          <label>Target density (cells/mL)<input type="number" min="100" step="1000" data-scope="dosing-channel-standing" data-id="${eid}" data-field="targetCellsPerMl" value="${esc(standing.targetCellsPerMl ?? 10000)}"><small>The carnation band is 5,000–50,000 — a faint green tint.</small></label>
+          <label>Turnover (× a day)<input type="number" min="0.1" step="1" data-scope="dosing-channel-standing" data-id="${eid}" data-field="turnoverPerDay" value="${esc(standing.turnoverPerDay ?? 10)}"><small>How many times a day the tank clears the standing stock — skimmer, mouths, cell death. Raise it when the tint fades by evening.</small></label>
+          <label>Line volume (ml)<input type="number" min="0" step="0.5" data-scope="dosing-channel-standing" data-id="${eid}" data-field="lineMl" value="${esc(standing.lineMl ?? 3)}"><small>2 mm ID × 1 m ≈ 3 ml — sets the residence-time warning.</small></label>
+          ${["skimmer", "uv"].map((profile) => {
+            const pol = standing[profile] || {};
+            const label = profile === "uv" ? "UV" : "Skimmer";
+            return `<label>${label} while dripping<select data-scope="dosing-channel-standing-${profile}" data-id="${eid}" data-field="policy">
+              <option value="on" ${pol.policy !== "band" ? "selected" : ""}>Leave running</option>
+              <option value="band" ${pol.policy === "band" ? "selected" : ""}>Off for a daily band</option>
+            </select><small>${profile === "uv" ? "UV kills phyto outright — a carnation tank does better without it." : "The skimmer strips phyto; that is part of the turnover, and it will run wet."}</small></label>
+            ${pol.policy === "band" ? `<label>${label} off from<input type="time" data-scope="dosing-channel-standing-${profile}" data-id="${eid}" data-field="start" value="${esc(pol.start || "22:00")}"></label>
+            <label>${label} back on at<input type="time" data-scope="dosing-channel-standing-${profile}" data-id="${eid}" data-field="end" value="${esc(pol.end || "06:00")}"><small>Armed equipment only; restored on the stamp like the feed truce.</small></label>` : ""}`;
+          }).join("")}
+        </div>` : ""}` : ""}
         ${continuous ? `
           <label class="toggle-card compact-toggle">
             <input type="checkbox" data-scope="dosing-channel-night" data-id="${eid}" data-field="enabled" ${night.enabled ? "checked" : ""}>
@@ -16365,12 +16439,16 @@ const rigSteps = [
         <label class="toggle-card compact-toggle">
           <input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="productIsBottle" ${reservoir.productIsBottle ? "checked" : ""}>
           <span><strong>The bottle IS the reservoir</strong><small>Every dose debits the linked bottle live (no separate refill step).</small></span>
+        </label>
+        <label class="toggle-card compact-toggle">
+          <input type="checkbox" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="refrigerated" ${reservoir.refrigerated ? "checked" : ""}>
+          <span><strong>Refrigerated</strong><small>The reservoir sits in a fridge: freshness reads the linked bottle's opened date and shelf life. Off = a room-temperature jar on its own day clock.</small></span>
         </label>` : ""}
         <div class="button-row">
           <button class="secondary" data-action="doser-reset-reservoir" data-id="${eid}">Refilled — reset ledger</button>
           <button class="secondary" data-action="doser-prime" data-id="${eid}">Re-prime 10 s</button>
         </div>
-        ${channel.chemical === "livefood" ? this._doserFreshnessBlock(eid, channel) : ""}
+        ${channel.chemical === "livefood" || standing.enabled ? this._doserFreshnessBlock(eid, channel) : ""}
 
         <div class="awc-section-title"><p class="eyebrow">Calibration</p></div>
         <small>${calStatus}</small>
@@ -19343,6 +19421,21 @@ const rigSteps = [
             item.status === "critical" ? "critical" : item.status === "warning" ? "warning" : "ok",
             [item.maintenanceText || item.doseText, item.correctionText]));
       }
+    } catch { /* no card */ }
+
+    // The phyto drip (phyto-drip §5.6): the density held, today's ml, the jar.
+    try {
+      const drips = (this._nps?.summary?.foodChannels || []).filter((c) => c && c.standing);
+      drips.slice(0, 1).forEach((c) => {
+        const st = c.standing;
+        const fresh = st.freshness || {};
+        const stale = fresh.status === "stale";
+        const jar = st.refrigerated ? "bottle" : "jar";
+        const detail = stale
+          ? `The ${jar} is past its day — load today's phyto and tap Loaded.`
+          : `${this._format(st.dosedTodayMl, 1)} of ${this._format(st.mlPerDay, 1)} ml so far today${fresh.hoursLeft != null ? ` · ${jar} good for ~${this._format(fresh.hoursLeft, 0)} h` : ""}`;
+        push(`phyto-drip-${c.id}`, `Phyto drip · ${c.name}`, st.text, detail, stale ? "warning" : "ok", [st.coaching]);
+      });
     } catch { /* no card */ }
 
     // Manual test kit nags: due or overdue only.

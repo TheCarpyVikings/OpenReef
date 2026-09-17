@@ -559,6 +559,88 @@ def test_spacing_phase_offsets_are_cumulative():
     assert dosing.phase_offsets({"enabled": False, "matrix": {"alk|ca": 30}}, ["alk", "ca"]) == {"alk": 0.0, "ca": 0.0}
 
 
+# --- The phyto drip (docs/phyto-drip-brainstorm.md): a standing density ----------
+
+def _standing_channel(**over):
+    ch = _channel("food", schedule={"mlPerDay": 5.8},
+                  reservoir={"productId": "rj", "productIsBottle": True, "shelfLifeDays": 1,
+                             "mixedAt": NOW_UTC.isoformat(), "refrigerated": False})
+    ch["schedule"]["standing"] = {
+        "enabled": True, "targetCellsPerMl": 10000, "turnoverPerDay": 10, "lineMl": 3,
+        "skimmer": {"policy": "on", "start": "22:00", "end": "06:00"},
+        "uv": {"policy": "band", "start": "22:00", "end": "06:00"},
+    }
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(ch.get(key), dict):
+            ch[key].update(value)
+        else:
+            ch[key] = value
+    return ch
+
+
+def test_standing_ml_per_day_holds_the_density():
+    """52 L at 10,000 cells/mL is 0.26 ml of a 2e9 concentrate — per turnover.
+    Unknown inputs give None: the maths never bosses an uncounted bottle."""
+    assert dosing.standing_ml_per_day(52, 10000, 1, 2e9) == 0.26
+    assert dosing.standing_ml_per_day(52, 10000, 22, 2e9) == 5.72
+    assert dosing.standing_ml_per_day(52, 10000, 22, 0) is None
+    assert dosing.standing_ml_per_day(0, 10000, 22, 2e9) is None
+    assert dosing.standing_ml_per_day(52, 10000, 0, 2e9) is None
+
+
+def test_standing_state_density_mode_and_the_residence_warning():
+    """A counted bottle: 'Holding ~10,000 cells/mL · 0.1 ml every 25 min'.
+    5.8 ml/day through 3 ml of line is ~12.4 h — past the 12 h warning."""
+    ch = _standing_channel()
+    plan = dosing.compile_schedule(ch, None, NOW)["plan"]
+    st = dosing.standing_state(ch, plan, 52, {"cellsPerMl": 2e9})
+    assert st["mode"] == "density"
+    assert st["text"] == "Holding ~10,000 cells/mL · 0.1 ml every 25 min · 5.8 ml/day"
+    assert st["derivedMlPerDay"] == 2.6
+    assert st["standingMl"] == 0.26
+    assert st["residenceHours"] == 12.4 and st["residenceWarn"] is True
+    assert st["coaching"].endswith("raise the turnover.")
+    assert st["skimmer"]["text"] == "Skimmer left running"
+    assert st["uv"]["text"] == "UV off 22:00–06:00"
+    assert st["bandNote"] == ""
+    assert dosing.standing_state(_channel("food"), plan, 52, None) is None
+
+
+def test_standing_state_tint_mode_when_the_bottle_is_uncounted():
+    ch = _standing_channel(schedule={"mlPerDay": 20})
+    ch["schedule"]["standing"]["targetCellsPerMl"] = 80000
+    plan = dosing.compile_schedule(ch, None, NOW)["plan"]
+    st = dosing.standing_state(ch, plan, 52, {"cellsPerMl": 0})
+    assert st["mode"] == "tint" and st["derivedMlPerDay"] is None
+    assert st["text"].startswith("Set by tint · ")
+    assert st["coaching"].endswith("raise the daily volume.")
+    assert st["residenceWarn"] is False          # 20 ml/day clears 3 ml in 3.6 h
+    assert "Above the 5,000–50,000" in st["bandNote"]
+
+
+def test_reservoir_clock_reads_the_shelf_for_a_refrigerated_bottle_only():
+    res = {"mixedAt": "2026-01-01T00:00:00+00:00", "shelfLifeDays": 1, "refrigerated": True}
+    bottle = {"openedAt": "2025-12-20T00:00:00+00:00", "shelfLifeDaysOpened": 90}
+    clock = dosing.reservoir_clock(res, bottle)
+    assert clock["mixedAt"] == bottle["openedAt"] and clock["shelfLifeDays"] == 90
+    # A jar at room temperature keeps its own day clock, bottle or not.
+    assert dosing.reservoir_clock({**res, "refrigerated": False}, bottle) == {**res, "refrigerated": False}
+    # A refrigerated bottle with no opened stamp must not read as fresh forever.
+    assert dosing.reservoir_clock(res, {"shelfLifeDaysOpened": 90}) == res
+
+
+def test_guard_jar_past_its_day_is_a_nag_not_a_stop():
+    """The drip's jar past its day warns (load today's phyto); a stale brine
+    culture on an ordinary live-food channel still blocks."""
+    stale_at = (NOW_UTC - timedelta(days=2)).isoformat()
+    jar = _standing_channel(reservoir={"mixedAt": stale_at})
+    reasons = dosing.guard_reasons(jar, _live(), 720, now=NOW_UTC)
+    assert [r["code"] for r in reasons if r["severity"] == "warn"] == ["jar_stale"]
+    assert "stale_food" not in _codes(reasons)
+    brine = _channel("livefood", reservoir={"mixedAt": stale_at, "shelfLifeDays": 1})
+    assert "stale_food" in _codes(dosing.guard_reasons(brine, _live(), 720, now=NOW_UTC))
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

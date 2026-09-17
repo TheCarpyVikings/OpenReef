@@ -44,6 +44,16 @@ MISSED_TOLERANCE_PCT = 10.0
 CAL_DRIFT_WARN_PCT = 10.0         # successive stepsPerMl values differing beyond this
 AUTO_DAILY_CAP_MULT = 1.25        # maxDailyMl 0 = auto ⇒ mlPerDay x this
 NIGHT_PERCENT_MAX = 90.0          # keep a residual day rate so the day interval stays finite
+# The phyto drip (docs/phyto-drip-brainstorm.md): a food channel held at a
+# standing cell density rather than a hand-set ml/day. The 5k–50k band is the
+# carnation-coral literature; the turnover is the tank's own, learned by eye.
+STANDING_TARGET_BAND = (5000.0, 50000.0)
+STANDING_TARGET_DEFAULT = 10000.0
+STANDING_TURNOVER_DEFAULT = 10.0      # ×/day the tank clears the standing stock (seeded from the per-litre guides)
+STANDING_TURNOVER_MAX = 200.0
+STANDING_LINE_ML_DEFAULT = 3.0        # 2 mm ID × 1 m of dosing line
+STANDING_RESIDENCE_WARN_H = 12.0      # phyto sitting longer than this in a warm line is dying in it
+JAR_SHELF_LIFE_DAYS = 1.0             # a room-temperature jar, loaded fresh each day
 
 _CHEMICAL_LABELS = {
     "alk": "Alkalinity", "ca": "Calcium", "mg": "Magnesium",
@@ -404,6 +414,12 @@ def guard_reasons(
         what = "live-food culture" if channel.get("chemical") == "livefood" else "food reservoir"
         if fresh["status"] == "soaking":
             block("food_soaking", "The brine enrichment soak is running; finish and rinse before dosing.")
+        elif fresh["status"] == "stale" and is_standing(channel) and channel.get("chemical") == "food":
+            # The drip's jar past its day: load today's phyto. A nag, not a
+            # stop — a few hours of tired phyto is not the danger a rotting
+            # brine culture is, and a stopped drip starves the carnation.
+            warn("jar_stale",
+                 "The jar is past its day — load today's phyto and tap 'Loaded'.")
         elif fresh["status"] == "stale":
             block("stale_food",
                   f"The {what} is past its shelf life — refresh the "
@@ -662,6 +678,134 @@ def freshness_state(reservoir: dict[str, Any] | None, now: datetime) -> dict[str
             "ageHours": round(age_h, 1)}
 
 
+def is_standing(channel: dict[str, Any]) -> bool:
+    """A food channel holding a standing density (the phyto drip): its ml/day
+    may be derived, its pulses never engage the feed truce, and its log is a
+    day row rather than a mark per pulse."""
+    if channel.get("chemical") not in ("food", "livefood"):
+        return False
+    standing = _cfg(channel, "schedule").get("standing")
+    return isinstance(standing, dict) and bool(standing.get("enabled"))
+
+
+def standing_ml_per_day(tank_l: Any, target_cells_per_ml: Any, turnover_per_day: Any,
+                        bottle_cells_per_ml: Any) -> float | None:
+    """The drip that holds a density: standing stock × turnover ÷ what a ml of
+    the bottle is worth. None when any input is unknown — the maths is never
+    the boss of a bottle nobody has counted (the keeper sets ml/day by tint)."""
+    tank = _f(tank_l)
+    target = _f(target_cells_per_ml)
+    turnover = _f(turnover_per_day)
+    bottle = _f(bottle_cells_per_ml)
+    if tank <= 0 or target <= 0 or turnover <= 0 or bottle <= 0:
+        return None
+    return round(tank * 1000.0 * target * turnover / bottle, 2)
+
+
+def reservoir_clock(reservoir: dict[str, Any] | None, product: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Which freshness clock a food reservoir runs on. A refrigerated bottle
+    that IS the reservoir keeps the shelf's clock (opened-at + shelf life once
+    opened); a room-temperature jar keeps its own (loaded-at + about a day).
+    Falls back to the reservoir's own clock when the bottle has no opened
+    stamp — an unknown opened date must not silently read as fresh."""
+    res = dict(reservoir or {})
+    if res.get("refrigerated") and isinstance(product, dict):
+        shelf_days = _f(product.get("shelfLifeDaysOpened"))
+        opened = str(product.get("openedAt") or "")
+        if shelf_days > 0 and opened:
+            return {**res, "mixedAt": opened, "shelfLifeDays": shelf_days}
+    return res
+
+
+def _standing_cfg(channel: dict[str, Any]) -> dict[str, Any]:
+    standing = _cfg(channel, "schedule").get("standing")
+    return standing if isinstance(standing, dict) else {}
+
+
+def standing_state(channel: dict[str, Any], plan: dict[str, Any], tank_l: Any,
+                   product: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The phyto drip as the card says it: the density it holds (or that it is
+    set by tint), the pulse it compiles to, the line residence time and the
+    coaching line. None for a channel that is not a standing drip."""
+    if not is_standing(channel):
+        return None
+    standing = _standing_cfg(channel)
+    target = _f(standing.get("targetCellsPerMl"), STANDING_TARGET_DEFAULT)
+    turnover = _f(standing.get("turnoverPerDay"), STANDING_TURNOVER_DEFAULT)
+    line_ml = _f(standing.get("lineMl"), STANDING_LINE_ML_DEFAULT)
+    bottle_cells = _f((product or {}).get("cellsPerMl")) if isinstance(product, dict) else 0.0
+    tank = _f(tank_l)
+    derived = standing_ml_per_day(tank, target, turnover, bottle_cells)
+    ml_per_day = _f(plan.get("mlPerDay"))
+    per_dose = _f(plan.get("perDoseMl"))
+    interval = int(_f(plan.get("dayIntervalMin")))
+    pulse_text = f"{per_dose:g} ml every {interval} min" if ml_per_day > 0 and per_dose > 0 else ""
+    win_start, win_end = int(_f(plan.get("windowStart"))), int(_f(plan.get("windowEnd")))
+    window_text = "around the clock" if win_start == win_end else f"{_fmt_hhmm(win_start)}–{_fmt_hhmm(win_end)}"
+    residence_h: float | None = None
+    if ml_per_day > 0 and line_ml > 0:
+        window_h = (window_minutes(win_start, win_end) or 1440) / 60.0
+        residence_h = round(line_ml / (ml_per_day / window_h), 1)
+    mode = "density" if derived is not None else "tint"
+    standing_ml = round(tank * 1000.0 * target / bottle_cells, 2) if bottle_cells > 0 and tank > 0 else None
+    if ml_per_day <= 0:
+        text = "No daily volume yet — set one by tint, or give the bottle a cell density."
+    elif mode == "density":
+        text = f"Holding ~{target:,.0f} cells/mL · {pulse_text} · {ml_per_day:g} ml/day"
+    else:
+        text = f"Set by tint · {pulse_text} · {ml_per_day:g} ml/day"
+    coaching = ("A faint green tint at the glass is right. Clear by evening means the tank "
+                "clears it faster than this — raise the "
+                + ("turnover." if mode == "density" else "daily volume."))
+    lo, hi = STANDING_TARGET_BAND
+    band_note = ""
+    if target < lo:
+        band_note = f"Below the {lo:,.0f}–{hi:,.0f} cells/mL band the carnation literature keeps to."
+    elif target > hi:
+        band_note = f"Above the {lo:,.0f}–{hi:,.0f} cells/mL band — more tint than the animals need."
+    policies = {}
+    for profile in ("skimmer", "uv"):
+        pol = standing.get(profile) if isinstance(standing.get(profile), dict) else {}
+        policy = "band" if pol.get("policy") == "band" else "on"
+        start, end = str(pol.get("start") or "22:00"), str(pol.get("end") or "06:00")
+        policies[profile] = {
+            "policy": policy, "start": start, "end": end,
+            "text": (f"{profile.upper() if profile == 'uv' else 'Skimmer'} off {start}–{end}"
+                     if policy == "band" else
+                     f"{profile.upper() if profile == 'uv' else 'Skimmer'} left running"),
+        }
+    return {
+        "enabled": True,
+        "mode": mode,
+        "targetCellsPerMl": target,
+        "turnoverPerDay": turnover,
+        "bottleCellsPerMl": bottle_cells,
+        "tankL": tank,
+        "derivedMlPerDay": derived,
+        "mlPerDay": ml_per_day,
+        "standingMl": standing_ml,
+        "pulseText": pulse_text,
+        "windowText": window_text,
+        "lineMl": line_ml,
+        "residenceHours": residence_h,
+        "residenceWarn": bool(residence_h is not None and residence_h > STANDING_RESIDENCE_WARN_H),
+        "text": text,
+        "coaching": coaching,
+        "bandNote": band_note,
+        "skimmer": policies["skimmer"],
+        "uv": policies["uv"],
+        "refrigerated": bool(_cfg(channel, "reservoir").get("refrigerated")),
+    }
+
+
+def _with_freshness(standing: dict[str, Any] | None, live: dict[str, Any]) -> dict[str, Any] | None:
+    """The card's jar clock rides the standing block (the orchestrator's live
+    freshness, which already knows a refrigerated bottle from a jar)."""
+    if standing is None:
+        return None
+    return {**standing, "freshness": live.get("foodFreshness")}
+
+
 def is_brushed(channel: dict[str, Any]) -> bool:
     """Driver-awareness helper: brushed DC heads have no stepper motion and no pH
     guard hardware — guards and calibration flows branch on this."""
@@ -854,9 +998,12 @@ def summary(
     live_map: dict[str, dict[str, Any]],
     now: datetime,
     lighting_window: tuple[int, int] | None = None,
+    tank_l: Any = 0,
+    products: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the Dosing tab needs, per channel. ``live_map`` carries the
-    orchestrator's entity snapshot per channel id (see guard_reasons for keys)."""
+    orchestrator's entity snapshot per channel id (see guard_reasons for keys).
+    ``tank_l`` + ``products`` let a standing drip say the density it holds."""
     now_minutes = now.hour * 60 + now.minute
     out: dict[str, Any] = {}
     for channel_id, channel in (channels or {}).items():
@@ -917,5 +1064,8 @@ def summary(
             },
             "ramp": ramp_target(_cfg(channel, "ramp"), plan["mlPerDay"]),
             "nextDose": next_dose_eta(plan, now_minutes) if channel.get("enabled") else None,
+            "standing": _with_freshness(standing_state(
+                channel, plan, tank_l,
+                (products or {}).get(str(_cfg(channel, "reservoir").get("productId") or ""))), live),
         }
     return out

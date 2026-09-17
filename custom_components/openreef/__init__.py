@@ -788,6 +788,38 @@ def _awc_num(value: Any, default: float, lo: float, hi: float | None = None) -> 
     return float(out)  # max/min can return an int bound; keep the type stable
 
 
+def _dosing_apply_standing(config: dict[str, Any]) -> list[str]:
+    """The phyto drip's derived rate (docs/phyto-drip-brainstorm.md §4): a
+    standing channel whose bottle has a cell density gets its ml/day from the
+    tank volume × target density × turnover ÷ density — recomputed on every
+    normalise, so a Profile volume edit, a bottle swap or a dial change flows
+    through at once and a stale panel save is corrected on the next pass.
+    A bottle with no density leaves ml/day as the keeper set it (by tint).
+    Returns the ids whose ml/day changed (the sync needs to know)."""
+    changed: list[str] = []
+    dosing = config.get("dosing") if isinstance(config.get("dosing"), dict) else {}
+    channels = dosing.get("channels") if isinstance(dosing.get("channels"), dict) else {}
+    products = ((config.get("consumables") or {}).get("products") or {}) \
+        if isinstance(config.get("consumables"), dict) else {}
+    tank_l = _awc_effective_tank_l(config)
+    for cid, channel in channels.items():
+        if not isinstance(channel, dict) or not dosing_engine.is_standing(channel):
+            continue
+        schedule = channel.get("schedule") or {}
+        standing = schedule.get("standing") or {}
+        product = products.get(str((channel.get("reservoir") or {}).get("productId") or ""))
+        derived = dosing_engine.standing_ml_per_day(
+            tank_l, standing.get("targetCellsPerMl"), standing.get("turnoverPerDay"),
+            (product or {}).get("cellsPerMl") if isinstance(product, dict) else 0)
+        if derived is None:
+            continue
+        derived = min(derived, DOSING_ML_PER_DAY_MAX)
+        if abs(_awc_num(schedule.get("mlPerDay"), 0, 0, DOSING_ML_PER_DAY_MAX) - derived) >= 0.005:
+            schedule["mlPerDay"] = derived
+            changed.append(str(cid))
+    return changed
+
+
 def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
     """Clamp/validate ``dosing.channels`` in place (the multi-pump dosing feature).
 
@@ -816,6 +848,7 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
 
         raw_schedule = raw.get("schedule") if isinstance(raw.get("schedule"), dict) else {}
         raw_night = raw_schedule.get("night") if isinstance(raw_schedule.get("night"), dict) else {}
+        raw_standing = raw_schedule.get("standing") if isinstance(raw_schedule.get("standing"), dict) else {}
         raw_guards = raw.get("guards") if isinstance(raw.get("guards"), dict) else {}
         raw_reservoir = raw.get("reservoir") if isinstance(raw.get("reservoir"), dict) else {}
         raw_cal = raw.get("calibration") if isinstance(raw.get("calibration"), dict) else {}
@@ -876,6 +909,28 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                     "windowStart": _normalise_schedule_time(raw_night.get("windowStart")) or "22:00",
                     "windowEnd": _normalise_schedule_time(raw_night.get("windowEnd")) or "08:00",
                 },
+                # The phyto drip (docs/phyto-drip-brainstorm.md): a food channel
+                # held at a standing cell density. ml/day is DERIVED by
+                # _dosing_apply_standing when the bottle has a density, hand-set
+                # (by tint) otherwise. The skimmer/UV policies ride the truce's
+                # turned-off registry for a daily band.
+                "standing": {
+                    "enabled": bool(raw_standing.get("enabled")),
+                    "targetCellsPerMl": _awc_num(
+                        raw_standing.get("targetCellsPerMl"), dosing_engine.STANDING_TARGET_DEFAULT, 100, 1e6),
+                    "turnoverPerDay": _awc_num(
+                        raw_standing.get("turnoverPerDay"), dosing_engine.STANDING_TURNOVER_DEFAULT,
+                        0.1, dosing_engine.STANDING_TURNOVER_MAX),
+                    "lineMl": _awc_num(raw_standing.get("lineMl"), dosing_engine.STANDING_LINE_ML_DEFAULT, 0, 100),
+                    **{
+                        profile: {
+                            "policy": "band" if (raw_standing.get(profile) or {}).get("policy") == "band" else "on",
+                            "start": _normalise_schedule_time((raw_standing.get(profile) or {}).get("start")) or "22:00",
+                            "end": _normalise_schedule_time((raw_standing.get(profile) or {}).get("end")) or "06:00",
+                        }
+                        for profile in ("skimmer", "uv")
+                    },
+                },
             },
             "guards": {
                 "phEntity": _normalise_entity_id(raw_guards.get("phEntity")),
@@ -900,10 +955,17 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                 # Live-food freshness: when the culture was mixed/refreshed, and how
                 # long it keeps (0 = never expires; livefood defaults to 1 day).
                 "mixedAt": _awc_str(raw_reservoir.get("mixedAt"), 40),
+                # A standing drip's room-temperature jar keeps about a day
+                # (the phyto-drip doc §5.4); a refrigerated bottle that IS the
+                # reservoir reads the shelf's opened clock instead.
                 "shelfLifeDays": _awc_num(
                     raw_reservoir.get("shelfLifeDays"),
-                    DOSING_LIVEFOOD_SHELF_LIFE_DAYS if raw.get("chemical") == "livefood" else 0,
+                    DOSING_LIVEFOOD_SHELF_LIFE_DAYS
+                    if raw.get("chemical") == "livefood"
+                    or (bool(raw_standing.get("enabled")) and not raw_reservoir.get("refrigerated"))
+                    else 0,
                     0, 60),
+                "refrigerated": bool(raw_reservoir.get("refrigerated")),
                 # Consumables bridge: which tracked bottle this reservoir draws
                 # from, and whether the bottle IS the reservoir (pump doses then
                 # debit the bottle ledger directly; otherwise 'Refilled' debits
@@ -1605,6 +1667,8 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             # only; the whole state block rides the stale-save guard.
             "pausedAt": _awc_str(raw_p.get("pausedAt"), 40),
             "history": [h for h in history if h["at"] and h["until"]][-nps_engine.TRUCE_HISTORY_MAX:],
+            # A standing drip's daily off-band holds through a disabled truce.
+            "band": bool(raw_p.get("band")),
         }
     # 0.7.192: the species list is DERIVED from the coral diary — one animal,
     # one record. An NPS coral (npsId) that is still in the tank is a ticked
@@ -1734,6 +1798,9 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             "shelfLifeDaysOpened": _awc_num(raw.get("shelfLifeDaysOpened"), 0, 0, 3650),
             "refrigerated": bool(raw.get("refrigerated")),
             "stirDaily": bool(raw.get("stirDaily")),
+            # Cells per ml of the bottle (0 = unknown — the label wins, and a
+            # standing drip is then set by tint, not by the maths).
+            "cellsPerMl": _awc_num(raw.get("cellsPerMl"), 0, 0, 1e12),
             # Particle window for the Stage D species/particle-size matcher.
             "particleUmMin": _awc_num(raw.get("particleUmMin"), 0, 0, 100000),
             "particleUmMax": _awc_num(raw.get("particleUmMax"), 0, 0, 100000),
@@ -3871,6 +3938,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
 
     _normalise_awc_config(config)
     _normalise_mixing_config(config)
+    _dosing_apply_standing(config)
 
     return config
 
@@ -12601,6 +12669,11 @@ def _dosing_food_freshness(channel: dict[str, Any], now: datetime,
     the saved channel settings. Other food channels keep their own clock."""
     reservoir = channel.get("reservoir") or {}
     if config is not None:
+        # A refrigerated bottle that IS the reservoir runs on the shelf's
+        # opened clock; a room-temperature jar on its own (phyto-drip §5.4).
+        product = ((config.get("consumables") or {}).get("products") or {}).get(
+            str(reservoir.get("productId") or ""))
+        reservoir = dosing_engine.reservoir_clock(reservoir, product if isinstance(product, dict) else None)
         nps_cfg = config.get("nps") or {}
         linked = _dosing_channels(config).get(str((nps_cfg.get("feedExchange") or {}).get("channelId") or ""))
         if linked is channel:
@@ -13282,51 +13355,110 @@ async def _async_nps_truce_engage(
     if not truce.get("enabled"):
         return
     now = datetime.now(timezone.utc)
-    state = truce.setdefault("state", {})
     changed = False
     for profile, minutes_key in _NPS_TRUCE_PROFILES:
         minutes = _awc_num(truce.get(minutes_key), 0, 0, 720)
         if minutes <= 0:
             continue
-        targets = _armed_equipment_by_profile(config, profile)
-        if not targets:
-            continue
-        pstate = state.setdefault(profile, {})
-        turned_off = [e for e in (pstate.get("turnedOff") or []) if isinstance(e, str)]
-        was_paused = bool(turned_off)
-        for _equipment_id, mapped in targets:
-            switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
-            if not switch_entity:
-                continue
-            live = hass.states.get(switch_entity)
-            if live is None or live.state != "on":
-                continue  # off already (keeper's choice) or unavailable — never claim it
-            try:
-                await hass.services.async_call(
-                    "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity},
-                    blocking=True, context=context)
-            except Exception:  # noqa: BLE001 — a dead switch must not kill the tick
-                continue
-            if switch_entity not in turned_off:
-                turned_off.append(switch_entity)
+        if await _async_nps_pause_profile(hass, config, profile, minutes, now, context=context):
             changed = True
-        if turned_off:
-            pstate["turnedOff"] = turned_off
-            # A new pause is stamped once; a repeat dose extends it (the band
-            # on the strip runs from the first dose, not the last).
-            if not was_paused:
-                pstate["pausedAt"] = now.isoformat()
-                changed = True
-            restore_at = now + timedelta(minutes=minutes)
-            existing = _parse_datetime(pstate.get("restoreAt"))
-            if existing is None or restore_at > existing:
-                pstate["restoreAt"] = restore_at.isoformat()
-                changed = True
     if changed:
         _append_activity(
             config,
             "Feed truce: plankton-hostile equipment paused after a food dose",
             "control")
+        await _async_save_config(hass, entry, config)
+
+
+async def _async_nps_pause_profile(
+    hass: HomeAssistant, config: dict[str, Any], profile: str, minutes: float,
+    now: datetime, context: Any = None, band: bool = False,
+) -> bool:
+    """Turn one equipment profile's armed switches off for ``minutes`` and
+    file them in the truce's turned-off registry — the one path that restores
+    equipment (stamp-driven, max-off). ``band``: a standing drip's daily
+    off-band (phyto-drip §5.5) rather than a post-dose truce; the restore tick
+    honours its stamp even when the truce itself is disabled. Returns whether
+    anything changed."""
+    targets = _armed_equipment_by_profile(config, profile)
+    if not targets or minutes <= 0:
+        return False
+    state = config.setdefault("nps", {}).setdefault("truce", {}).setdefault("state", {})
+    pstate = state.setdefault(profile, {})
+    turned_off = [e for e in (pstate.get("turnedOff") or []) if isinstance(e, str)]
+    was_paused = bool(turned_off)
+    changed = False
+    for _equipment_id, mapped in targets:
+        switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
+        if not switch_entity:
+            continue
+        live = hass.states.get(switch_entity)
+        if live is None or live.state != "on":
+            continue  # off already (keeper's choice) or unavailable — never claim it
+        try:
+            await hass.services.async_call(
+                "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity},
+                blocking=True, context=context)
+        except Exception:  # noqa: BLE001 — a dead switch must not kill the tick
+            continue
+        if switch_entity not in turned_off:
+            turned_off.append(switch_entity)
+        changed = True
+    if turned_off:
+        pstate["turnedOff"] = turned_off
+        # A new pause is stamped once; a repeat dose extends it (the band
+        # on the strip runs from the first dose, not the last).
+        if not was_paused:
+            pstate["pausedAt"] = now.isoformat()
+            changed = True
+        if band and not pstate.get("band"):
+            pstate["band"] = True
+            changed = True
+        restore_at = now + timedelta(minutes=minutes)
+        existing = _parse_datetime(pstate.get("restoreAt"))
+        if existing is None or restore_at > existing:
+            pstate["restoreAt"] = restore_at.isoformat()
+            changed = True
+    return changed
+
+
+async def _async_nps_standing_bands_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    """The phyto drip's equipment policy (phyto-drip §5.5): a standing channel
+    may hold the skimmer or the UV off for a daily band. Engages through the
+    truce's registry so the restore is the same stamp-driven path — the band
+    end is the restore stamp, never more than a day away."""
+    config = _config_from_entry(entry)
+    now_utc = datetime.now(timezone.utc)
+    now_local = dt_util.now()
+    now_min = now_local.hour * 60 + now_local.minute
+    state = ((config.get("nps") or {}).get("truce") or {}).get("state") or {}
+    changed = False
+    for channel in _dosing_channels(config).values():
+        if not dosing_engine.is_standing(channel) or not channel.get("enabled"):
+            continue
+        schedule = channel.get("schedule") or {}
+        if not schedule.get("enabled"):
+            continue
+        standing = schedule.get("standing") or {}
+        for profile in ("skimmer", "uv"):
+            policy = standing.get(profile) if isinstance(standing.get(profile), dict) else {}
+            if policy.get("policy") != "band":
+                continue
+            start = awc_engine.parse_hhmm(policy.get("start"), 1320)
+            end = awc_engine.parse_hhmm(policy.get("end"), 360)
+            if start == end or not awc_engine.within_window(now_min, start, end):
+                continue
+            if (state.get(profile) or {}).get("turnedOff"):
+                continue  # already held, by this band or a truce
+            remaining = (end - now_min) % 1440 or 1440
+            if await _async_nps_pause_profile(hass, config, profile, remaining, now_utc, band=True):
+                changed = True
+                _append_activity(
+                    config, f"Phyto drip: {profile} held off until {policy.get('end')} (its band)",
+                    "control")
+    if changed:
         await _async_save_config(hass, entry, config)
 
 
@@ -13348,7 +13480,10 @@ async def _async_nps_truce_tick(
         if not turned_off:
             continue
         restore_at = _parse_datetime(pstate.get("restoreAt"))
-        due = (not truce.get("enabled")) or restore_at is None or restore_at <= now
+        # A disabled truce restores at once — unless the hold is a standing
+        # drip's band, which runs to its own stamp.
+        due = restore_at is None or restore_at <= now \
+            or (not truce.get("enabled") and not pstate.get("band"))
         if not due:
             continue
         remaining: list[str] = []
@@ -13374,9 +13509,13 @@ async def _async_nps_truce_tick(
                 pstate["history"] = history[-nps_engine.TRUCE_HISTORY_MAX:]
             pstate["pausedAt"] = ""
             pstate["restoreAt"] = ""
+            was_band = bool(pstate.pop("band", False))
             wet = " — expect it to run wet for a while (that's the export working)" \
                 if profile == "skimmer" else ""
-            _append_activity(config, f"Feed truce over: {profile} back on{wet}", "control")
+            _append_activity(
+                config,
+                f"{'Phyto drip band over' if was_band else 'Feed truce over'}: {profile} back on{wet}",
+                "control")
     if changed:
         await _async_save_config(hass, entry, config)
 
@@ -13451,7 +13590,7 @@ async def _async_dosing_ha_finish(
         wear["doseCount"] = int(_awc_num(wear.get("doseCount"), 0, 0, 1e9)) + 1
         # The same NPS hooks firmware channels get from their dosed-today sensor.
         await _async_nps_feed_exchange_accrue(hass, entry, cid, dosed_ml, 0.0)
-        if channel.get("chemical") in ("livefood", "food"):
+        if channel.get("chemical") in ("livefood", "food") and not dosing_engine.is_standing(channel):
             await _async_nps_truce_engage(hass, entry)
     await _async_dosing_save(hass, entry, config)
 
@@ -13981,6 +14120,8 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     # Feed-truce restore backstop (Stage C): stamp-driven, fetch-fresh — runs
     # before the snapshot below so a restore can never be clobbered by it.
     await _async_nps_truce_tick(hass, entry)
+    # The phyto drip's skimmer/UV band (phyto-drip §5.5): same registry, own stamp.
+    await _async_nps_standing_bands_tick(hass, entry)
     # Hatch-ready push (hatchery v2): hour-precise, from this minutely tick —
     # the daily maintenance-reminder tick is far too coarse for a harvest
     # window. Runs BEFORE the no-channels bail-out: hand-dosers have no pumps.
@@ -14125,7 +14266,9 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                         hass, entry, cid, delta, chaser_credit_ml)
                     # Feed truce (Stage C): a food dose landed — pause UV/ozone/
                     # skimmer for their windows so the food survives to be eaten.
-                    if channel.get("chemical") in ("livefood", "food"):
+                    # A standing drip's pulses never do (phyto-drip §5.5): sixty
+                    # micro-doses a day would hold the skimmer off for good.
+                    if channel.get("chemical") in ("livefood", "food") and not dosing_engine.is_standing(channel):
                         await _async_nps_truce_engage(hass, entry)
 
         # --- respread staleness (R17): a schedule edit after an accepted respread
@@ -14200,6 +14343,19 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 # Fresh again (mark_refreshed landed): re-assert the desired ON state
                 # promptly rather than waiting for drift repair.
                 _async_kick_dosing_sync(hass, entry)
+        elif channel.get("chemical") == "food" and dosing_engine.is_standing(channel):
+            # The drip's jar past its day is a nag, never a stop (phyto-drip
+            # §5.4): the pump keeps running, the keeper gets one push a day.
+            fresh = _dosing_food_freshness(channel, now_utc, config)
+            if fresh["status"] == "stale":
+                if _dosing_notify_enabled(config, "staleFood"):
+                    await _async_dosing_notify_once(
+                        hass, config, runtime, f"stale_{cid}", 20 * 3600,
+                        "Load today's phyto",
+                        f"{channel.get('name') or cid}: the jar is past its day — "
+                        "load fresh phyto and tap 'Loaded'.")
+            else:
+                runtime.setdefault("notified", {}).pop(f"stale_{cid}", None)
 
         # --- missed-dose watcher (baselined, availability-gated, 2-tick debounce) ----
         # The baseline anchors "expected" to the moment the current plan took effect,
@@ -14365,7 +14521,8 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 if product_id and reservoir.get("productIsBottle"):
                     product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
                     if isinstance(product, dict):
-                        _consumable_debit(product, pending_ml, "pump")
+                        _consumable_debit(product, pending_ml, "pump",
+                                          coalesce_day=dosing_engine.is_standing(channel))
             if rt.get("pendingRunSeconds"):
                 wear["runSeconds"] = (wear.get("runSeconds") or 0.0) + rt.pop("pendingRunSeconds")
             if rt.get("pendingDoses"):
@@ -14397,6 +14554,28 @@ async def _async_dosing_press(hass: HomeAssistant, channel: dict[str, Any], role
         return False
     await hass.services.async_call("button", "press", {ATTR_ENTITY_ID: ent}, blocking=True)
     return True
+
+
+def _dosing_standing_payload(hass: HomeAssistant, config: dict[str, Any], cid: str,
+                             channel: dict[str, Any], now_local: datetime) -> dict[str, Any] | None:
+    """The phyto drip as one channel's card says it — compiled plan + the
+    standing maths + the jar's clock, for surfaces that do not poll the
+    dosing summary (the NPS tab, Pulse). None for an ordinary channel."""
+    if not dosing_engine.is_standing(channel):
+        return None
+    plan = dosing_engine.compile_schedule(
+        channel, _dosing_lighting_off_window(config, now_local), now_local)["plan"]
+    product = ((config.get("consumables") or {}).get("products") or {}).get(
+        str((channel.get("reservoir") or {}).get("productId") or ""))
+    state = dosing_engine.standing_state(
+        channel, plan, _awc_effective_tank_l(config), product if isinstance(product, dict) else None)
+    if state is None:
+        return None
+    live = _dosing_live_state(hass, channel, config)
+    state["dosedTodayMl"] = round(_awc_num(live.get("dosedTodayMl"), 0, 0, 1e6), 2)
+    state["freshness"] = live.get("foodFreshness")
+    state["summaryText"] = plan.get("summaryText") or ""
+    return state
 
 
 def _dosing_record_event(channel: dict[str, Any], kind: str, detail: str,
@@ -14450,7 +14629,10 @@ async def websocket_dosing_summary(
         }
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
     verifying = set(runtime.get("desired", {}) or {})
-    summary = dosing_engine.summary(channels, live_map, now_local, _dosing_lighting_off_window(config, now_local))
+    summary = dosing_engine.summary(
+        channels, live_map, now_local, _dosing_lighting_off_window(config, now_local),
+        tank_l=_awc_effective_tank_l(config),
+        products=(config.get("consumables") or {}).get("products") or {})
     for cid in summary:
         if cid in verifying:
             summary[cid]["sync"]["state"] = "verifying"
@@ -14770,7 +14952,10 @@ async def websocket_dosing_mark_refreshed(
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
     runtime.setdefault("channels", {}).setdefault(msg["channel_id"], {})["staleFood"] = False
     runtime.setdefault("notified", {}).pop(f"stale_{msg['channel_id']}", None)
-    _dosing_record_event(channel, "refresh", "Culture refreshed — freshness clock restarted")
+    _dosing_record_event(
+        channel, "refresh",
+        "Jar loaded — the day's clock restarted" if dosing_engine.is_standing(channel)
+        else "Culture refreshed — freshness clock restarted")
     config = await _async_save_config(hass, entry, config)
     _async_kick_dosing_sync(hass, entry)
     _awc_send(connection, msg, hass, config)
@@ -14780,7 +14965,7 @@ async def websocket_dosing_mark_refreshed(
 
 def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
                       at: datetime | None = None, slot: str = "",
-                      to: str = "", jar_id: str = "") -> None:
+                      to: str = "", jar_id: str = "", coalesce_day: bool = False) -> None:
     """The single choke point for bottle ledger movement (the _awc_debit_source
     pattern): decrement remainingMl and append the usage history the runway
     forecast reads. Never raises — a bad bottle must not break a dose flush.
@@ -14796,6 +14981,14 @@ def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
     remaining = max(0.0, float(product.get("remainingMl") or 0.0))
     product["remainingMl"] = round(max(0.0, remaining - ml), 2)
     history = product.setdefault("history", [])
+    if isinstance(history, list) and coalesce_day and at is None and history:
+        # A standing drip debits the bottle every flush: one row a day, or
+        # the 50-row history is two days deep and the runway forecast blind.
+        last = history[-1]
+        if (isinstance(last, dict) and last.get("kind") == kind and last.get("drip")
+                and str(last.get("at") or "")[:10] == datetime.now(timezone.utc).isoformat()[:10]):
+            last["ml"] = round(float(last.get("ml") or 0.0) + ml, 2)
+            return
     if isinstance(history, list):
         row = {
             "at": (at or datetime.now(timezone.utc)).isoformat(),
@@ -14804,6 +14997,8 @@ def _consumable_debit(product: dict[str, Any], ml: float, kind: str,
         }
         if slot:
             row["slot"] = slot
+        if coalesce_day:
+            row["drip"] = True
         if to in nps_engine.DOSE_DESTINATIONS:
             row["to"] = to
             if to == "jar" and jar_id:
@@ -18801,7 +18996,11 @@ async def websocket_nps_summary(
         now_local, products=products, channels=channels, cultures=cultures_cfg,
         hatchery=hatchery_cfg, brine_feeds=brine_feeds,
         days=msg.get("log_days") or nps_engine.FEED_LOG_DAYS_DEFAULT,
-        quiet_product_ids=quiet_products, culture_bottle_species=bottle_species)
+        quiet_product_ids=quiet_products, culture_bottle_species=bottle_species,
+        # A standing drip's day row reads the live sensor, not the hourly flush.
+        live_dosed={cid: _dosing_live_state(hass, ch, config).get("dosedTodayMl")
+                    for cid, ch in channels.items()
+                    if isinstance(ch, dict) and dosing_engine.is_standing(ch)})
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
         "shelf": {
@@ -18828,7 +19027,9 @@ async def websocket_nps_summary(
             "drainActive": hass.data.get(DOMAIN, {}).get(NPS_DRAIN_UNSUB) is not None,
         },
         "foodChannels": [
-            {"id": cid, "name": ch.get("name") or cid, "chemical": ch.get("chemical")}
+            {"id": cid, "name": ch.get("name") or cid, "chemical": ch.get("chemical"),
+             # The phyto drip's card line (phyto-drip §5.2), backend-composed.
+             "standing": _dosing_standing_payload(hass, config, cid, ch, now_local)}
             for cid, ch in sorted(channels.items())
             if isinstance(ch, dict) and ch.get("chemical") in ("livefood", "food")
         ],

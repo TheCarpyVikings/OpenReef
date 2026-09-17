@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .awc import _f, _parse_iso
+from .dosing import compile_schedule, is_standing, standing_state
 # The jar's own harvest clock (0.7.158): the strip reads the same function the
 # Cultures card and the culture reminders read — never a re-derived copy.
 from .cultures import culture_state
@@ -1913,8 +1914,8 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
                 gaps.append(
                     f"{sp['name']}: nothing on the shelf feeds it "
                     f"(needs {wanted}, {sp['particleUmMin']:g}–{sp['particleUmMax']:g} µm).")
-        entry = {**card, "status": status, "fedBy": fed_by, "pumps": [], "coming": coming,
-                 "needs": needs, "cultureFeeds": spoken_for, "verdict": ""}
+        entry = {**card, "status": status, "fedBy": fed_by, "pumps": [], "standingPumps": [],
+                 "coming": coming, "needs": needs, "cultureFeeds": spoken_for, "verdict": ""}
         entries.append(entry)
         by_id[sp["id"]] = entry
 
@@ -1942,6 +1943,25 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
             by_id[sp["id"]]["pumps"].append(str(channel.get("name") or cid))
         # The hungriest matching species shapes the schedule.
         driver_sp = max(matches, key=lambda s: s["feedsPerDay"])
+        if is_standing(channel):
+            # The phyto drip holds a density; there is no dose count to suggest.
+            standing = (channel.get("schedule") or {}).get("standing") or {}
+            target = _f(standing.get("targetCellsPerMl"))
+            known = _f(product.get("cellsPerMl")) > 0
+            held = (f"~{target:,.0f} cells/mL" if known and target > 0 else "set by tint")
+            for sp in matches:
+                by_id[sp["id"]]["standingPumps"].append(
+                    {"name": str(channel.get("name") or cid), "held": held})
+            suggestions.append({
+                "channelId": cid,
+                "channelName": channel.get("name") or cid,
+                "for": driver_sp["name"],
+                "dosesPerDay": 0,
+                "night": False,
+                "standing": True,
+                "note": f"Standing density — the drip holds it ({held})",
+            })
+            continue
         doses = max(1, int(driver_sp["feedsPerDay"]))
         if driver_sp["cadence"] == "continuous":
             doses = max(doses, 8)
@@ -1959,7 +1979,14 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
 
     # One sentence per animal, now the pumps are known.
     for entry in entries:
-        if entry["status"] == "covered":
+        if entry["status"] == "covered" and entry["standingPumps"]:
+            # The carnation's verdict (phyto-drip §5.6): a density held, not
+            # a count of doses.
+            held = _words([f"{p['name']} ({p['held']})" for p in entry["standingPumps"]])
+            others = [n for n in entry["pumps"] if n not in {p["name"] for p in entry["standingPumps"]}]
+            verdict = (f"Standing density held by {held}"
+                       f"{f', plus doses from {_words(others)}' if others else ''}.")
+        elif entry["status"] == "covered":
             fed = _words([f["name"] for f in entry["fedBy"]])
             pumps = _words(entry["pumps"])
             verdict = f"Fed by {fed}{f', dosed by {pumps}' if pumps else ''}."
@@ -2192,7 +2219,9 @@ def _event(**fields: Any) -> dict[str, Any]:
             "doneStamp": None, "undoable": False,
             # What the feed truce will do after this pump dose (doc §13.17):
             # "UV 2 h · skimmer 45 min" — empty when nothing is armed.
-            "truce": ""}
+            "truce": "",
+            # A standing drip's band (phyto-drip §5.6): held density, no marks.
+            "standing": False}
     base.update(fields)
     return base
 
@@ -2334,9 +2363,16 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         is_fx = bool(fx_channel_id) and str(cid) == str(fx_channel_id)
         note = "Live brine — the chaser flush banks owed drain for the matched exchange" if is_fx else ""
         if str(sched.get("mode") or "doses") == "continuous":
+            band_note = note or f"continuous — {ml_day:g} ml over the window"
+            if is_standing(ch):
+                # The phyto drip (phyto-drip §5.6): a band, not sixty marks —
+                # labelled with the density it holds and the pulse it runs.
+                standing = standing_state(ch, compile_schedule(ch)["plan"], tank_l,
+                                          products.get(pid) if isinstance(products.get(pid), dict) else None)
+                band_note = standing["text"] if standing else band_note
             events.append(ev(id=f"{source}:band", how="pump", source=source, name=name, productId=pid,
                              ml=round(ml_day, 2), kind="band", band=[ws, (ws + span) % 1440 or 1440],
-                             status="planned", note=note or f"continuous — {ml_day:g} ml over the window"))
+                             status="planned", note=band_note, standing=bool(is_standing(ch))))
             continue
         n = max(1, min(96, int(_f(sched.get("dosesPerDay")) or 1)))
         step = span / n
@@ -2712,7 +2748,10 @@ def _log_row(**fields: Any) -> dict[str, Any]:
     verbatim, so an undo can name the row exactly as the strip does."""
     base = {"id": "", "at": "", "date": "", "time": "", "how": "hand", "source": "", "name": "",
             "productId": "", "ml": None, "from": "", "via": "", "slot": "", "note": "",
-            "undone": False, "undoneAt": None, "undoable": False}
+            "undone": False, "undoneAt": None, "undoable": False,
+            # A standing drip's day row (phyto-drip §5.6): one live row a day,
+            # running until midnight closes it; a stall lands its own row.
+            "drip": False, "running": False, "targetMl": None, "pulses": None}
     base.update(fields)
     return base
 
@@ -2722,7 +2761,7 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
              brine_feeds: list[dict[str, Any]] | None = None,
              days: Any = FEED_LOG_DAYS_DEFAULT,
              quiet_product_ids: Any = None, culture_bottle_species: Any = None,
-             limit: int = FEED_LOG_MAX) -> dict[str, Any]:
+             limit: int = FEED_LOG_MAX, live_dosed: dict[str, Any] | None = None) -> dict[str, Any]:
     """The feeds of the last ``days`` local days (today counts as one), newest
     first, with per-day counts and the plain-English line. ``now_local`` must
     be tz-aware in the keeper's zone — every stamp is bucketed by that day.
@@ -2767,6 +2806,7 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
     # --- Pumps: which shelf bottle each food channel draws from (its pump
     # rows are the record), and the doses OpenReef timed itself otherwise.
     bottle_channel: dict[str, str] = {}
+    drip_products: set[str] = set()
     unrecorded: list[str] = []
     for cid in sorted(channels):
         ch = channels[cid]
@@ -2776,6 +2816,45 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
         reservoir = ch.get("reservoir") if isinstance(ch.get("reservoir"), dict) else {}
         pid = str(reservoir.get("productId") or "")
         bound = bool(pid and reservoir.get("productIsBottle") and isinstance(products.get(pid), dict) and pid not in quiet)
+        if is_standing(ch):
+            # The phyto drip (phyto-drip §5.6, Q8): never a row per pulse.
+            # Past days from the channel's own daily rollup, today live from
+            # the sensor (``live_dosed``) and still running; a stall the
+            # missed-dose watcher is holding lands as its own row.
+            if bound:
+                drip_products.add(pid)
+                bottle_channel.setdefault(pid, name)
+            source = f"channel:{cid}"
+            plan = compile_schedule(ch)["plan"]
+            per = _f(plan.get("perDoseMl"))
+            target = round(_f(plan.get("realisedMlPerDay")) or _f(plan.get("mlPerDay")), 2)
+            state = ch.get("state") if isinstance(ch.get("state"), dict) else {}
+            today_ml = _f((live_dosed or {}).get(cid), _f(state.get("lastSensorMl")))
+            today_ml = round(max(0.0, today_ml), 2)
+            pulses_today = int(round(today_ml / per)) if per > 0 and today_ml > 0 else 0
+            day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            add(day_start.isoformat(), how="pump", source=source, name=name, productId=pid,
+                ml=today_ml, drip=True, running=True, targetMl=target, pulses=pulses_today,
+                note=(f"{today_ml:g} of {target:g} ml so far · {pulses_today} pulse"
+                      f"{'' if pulses_today == 1 else 's'} · running"))
+            for item in (ch.get("dailyLog") if isinstance(ch.get("dailyLog"), list) else []):
+                if not isinstance(item, dict) or not item.get("date"):
+                    continue
+                try:
+                    day = datetime.fromisoformat(str(item["date"])).replace(tzinfo=tz)
+                except (TypeError, ValueError):
+                    continue
+                delivered = round(_f(item.get("deliveredMl")), 2)
+                day_target = round(_f(item.get("targetMl")), 2)
+                pulses = int(round(delivered / per)) if per > 0 and delivered > 0 else 0
+                add(day.isoformat(), how="pump", source=source, name=name, productId=pid,
+                    ml=delivered, drip=True, targetMl=day_target, pulses=pulses,
+                    note=f"{delivered:g} of {day_target:g} ml · {pulses} pulse{'' if pulses == 1 else 's'}")
+            if state.get("missedSince"):
+                short = round(_f(state.get("missedMl")), 2)
+                add(state.get("missedSince"), how="pump", source=f"{source}:stall", name=name, productId=pid,
+                    ml=None, drip=True, note=f"drip stalled — {short:g} ml short, waiting on your call")
+            continue
         if bound:
             bottle_channel.setdefault(pid, name)
             continue
@@ -2806,6 +2885,8 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
             if not dose_feeds_tank(item, legacy_tank):
                 continue
             pumped = item.get("kind") == "pump"
+            if pumped and (item.get("drip") or pid in drip_products):
+                continue  # the drip's day rows are the channel's (above)
             add(item.get("at"), how="pump" if pumped else "hand", source=source, name=name, productId=pid,
                 ml=round(_f(item.get("ml")), 2), via=bottle_channel.get(pid, "") if pumped else "",
                 slot=str(item.get("slot") or ""), undone=bool(item.get("undoneAt")),

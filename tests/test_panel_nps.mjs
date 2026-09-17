@@ -2528,5 +2528,104 @@ test("a refused tap outlives the summary reload — the loader clears only its o
   assert(panel._nps.error === REFUSAL, "a refusal after a failed load survives the good reload that follows");
 });
 
+// --- The phyto drip (docs/phyto-drip-brainstorm.md §5.2/5.6): the card, the log, Pulse.
+
+function dripPanel(panel, standingOver = {}) {
+  panel._config.dosing = { enabled: true, channels: { drip: {
+    name: "Phyto drip", chemical: "food", enabled: true,
+    schedule: { enabled: true, mlPerDay: 5.8, mode: "continuous", windowStart: "00:00", windowEnd: "00:00",
+                standing: { enabled: true, targetCellsPerMl: 10000, turnoverPerDay: 22, lineMl: 3 } },
+    reservoir: { productId: "phyto", productIsBottle: true, shelfLifeDays: 1, refrigerated: false },
+    calibration: { stepsPerMl: 11851 },
+    driver: { type: "openreef_esphome_stepper", entities: { doseVolumeNumber: "number.drip_dose" } },
+  } } };
+  const standing = {
+    enabled: true, mode: "density", targetCellsPerMl: 10000, turnoverPerDay: 22, bottleCellsPerMl: 2e9,
+    derivedMlPerDay: 5.72, mlPerDay: 5.8, pulseText: "0.1 ml every 25 min", windowText: "around the clock",
+    lineMl: 3, residenceHours: 12.4, residenceWarn: true, bandNote: "", refrigerated: false,
+    text: "Holding ~10,000 cells/mL · 0.1 ml every 25 min · 5.8 ml/day",
+    coaching: "A faint green tint at the glass is right. Clear by evening means the tank clears it faster than this — raise the turnover.",
+    skimmer: { policy: "on", text: "Skimmer left running" }, uv: { policy: "band", text: "UV off 22:00–06:00" },
+    freshness: { status: "aging", hoursLeft: 5, ageHours: 19 }, dosedTodayMl: 3.4, summaryText: "",
+    ...standingOver,
+  };
+  panel._doserSummary = { summary: { drip: {
+    name: "Phyto drip", chemical: "food", enabled: true, guards: [], dosedTodayMl: 3.4,
+    plan: { mlPerDay: 5.8, realisedMlPerDay: 5.76, maxDailyMl: 10, perDoseMl: 0.1, dayIntervalMin: 25,
+            summaryText: "5.8 ml/day continuous, 0.1 ml every 25 min all day" },
+    reservoir: { daysUntilEmpty: 40, remainingMl: 230 }, integrity: { status: "ok", reasons: [] },
+    calibration: { stepsPerMl: 11851 }, sync: { state: "synced" }, nextDose: { inMinutes: 12, ml: 0.1 },
+    standing,
+  } }, bindings: { drip: { bound: 1 } } };
+  panel._nps.summary.foodChannels = [{ id: "drip", name: "Phyto drip", chemical: "food", standing }];
+  return standing;
+}
+
+test("a standing drip's pump card says the density it holds, warns on the line and offers Loaded", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    dripPanel(panel);
+    const html = panel._npsTab();
+    assert(html.includes("Holding ~10,000 cells/mL · 0.1 ml every 25 min · 5.8 ml/day"), "the density line is the card's");
+    assert(html.includes("~12.4 h in the line") && html.includes("line too slow"), "the residence time and its warning show");
+    assert(html.includes("raise the turnover."), "the coaching line rides the card");
+    assert(html.includes("Skimmer left running") && html.includes("UV off 22:00–06:00"), "the equipment policy is stated");
+    assert(html.includes("<strong>Jar</strong> aging — ~5 h left"), "the jar's clock is on the card");
+    assert(html.includes('data-action="doser-mark-refreshed" data-id="drip"') && html.includes("Loaded ↺"), "Loaded is a daily action on the card");
+    noPlaceholders(html, "drip card");
+    // A refrigerated bottle past its day, set by tint.
+    dripPanel(panel, { refrigerated: true, mode: "tint", derivedMlPerDay: null,
+      text: "Set by tint · 0.1 ml every 25 min · 5.8 ml/day", freshness: { status: "stale", hoursLeft: 0 } });
+    const html2 = panel._npsTab();
+    assert(html2.includes("Set by tint · ") && html2.includes("<strong>Bottle</strong> ⚠ past its day"), "tint mode and the bottle wording");
+  } finally { restore(); }
+});
+
+test("the feeding log shows a drip as one running day row, never a mark per pulse", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    dripPanel(panel);
+    panel._nps.summary.feedLog = {
+      date: "2026-08-13", since: "2026-08-07", truncated: false,
+      rows: [
+        { id: "channel:drip@a", at: "2026-08-13T00:00:00+00:00", date: "2026-08-13", time: "00:00", how: "pump", source: "channel:drip",
+          name: "Phyto drip", productId: "phyto", ml: 3.4, drip: true, running: true, targetMl: 5.8, pulses: 34,
+          note: "3.4 of 5.8 ml so far · 34 pulses · running", undone: false, undoable: false },
+        { id: "channel:drip:stall@b", at: "2026-08-13T10:10:00+00:00", date: "2026-08-13", time: "10:10", how: "pump", source: "channel:drip:stall",
+          name: "Phyto drip", productId: "phyto", ml: null, drip: true, running: false, note: "drip stalled — 0.6 ml short, waiting on your call", undone: false, undoable: false },
+        { id: "channel:drip@c", at: "2026-08-12T00:00:00+00:00", date: "2026-08-12", time: "00:00", how: "pump", source: "channel:drip",
+          name: "Phyto drip", productId: "phyto", ml: 5.7, drip: true, running: false, targetMl: 5.8, pulses: 57, note: "5.7 of 5.8 ml · 57 pulses", undone: false, undoable: false },
+      ],
+      perDay: [{ date: "2026-08-13", feeds: 1, hand: 0, pump: 1, undone: 0 }, { date: "2026-08-12", feeds: 1, hand: 0, pump: 1, undone: 0 }],
+      counts: { feeds: 2, hand: 0, pump: 2, undone: 0 }, text: "",
+    };
+    const html = panel._npsTab();
+    assert(html.includes(">running</span>"), "today's drip row is pilled running");
+    assert(html.includes(">stalled</span>"), "a held stall is its own pilled row");
+    assert(html.includes(">drip</span>"), "a closed day is pilled drip");
+    assert(html.includes("3.4 of 5.8 ml so far · 34 pulses · running"), "the day row carries its note");
+    assert((html.match(/Phyto drip · /g) || []).length === 2, "one ml-bearing row per day, none per pulse");
+    noPlaceholders(html, "drip log");
+  } finally { restore(); }
+});
+
+test("Pulse carries the drip: the density held, today's ml, the jar", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    dripPanel(panel);
+    const card = panel._pulseInsightCards().find((c) => c.key === "phyto-drip-drip");
+    assert(card, "the drip has a Pulse card");
+    assert(card.kicker === "Phyto drip · Phyto drip" && card.title.startsWith("Holding ~10,000 cells/mL"), "the card leads with the density");
+    assert(card.detail.includes("3.4 of 5.8 ml so far today") && card.detail.includes("jar good for ~5 h"), "today's ml and the jar clock");
+    assert(card.status === "ok", "an aging jar is not a warning");
+    dripPanel(panel, { freshness: { status: "stale", hoursLeft: 0 } });
+    const stale = panel._pulseInsightCards().find((c) => c.key === "phyto-drip-drip");
+    assert(stale.status === "warning" && stale.detail.includes("load today's phyto"), "a stale jar warns with the action");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();
