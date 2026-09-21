@@ -1570,5 +1570,92 @@ test("Stage C report viewer: a vessel's splits and litres, an animal's home phyt
   assert(section.includes("1 harvest (625 ml) · 340 ml of home phyto"), `the animal's home phyto: ${section.match(/Rotifers A[^<]*<\/strong>[^<]*/)}`);
 });
 
+// --- 0.7.210 — Stage D: the index (doc §6, §13) ---
+function stageDIndex(over = {}) {
+  return { available: true, readings: 7, bands: { pale: 0.2, green: 0.6, dark: 0.9 }, counts: { pale: 3, green: 2, dark: 2 }, darkOd: 0.9,
+    fit: { available: true, points: 7, ratePerDay: 0.255, doublingDays: 2.7, r2: 0.6 }, daysToDark: 1, readsDark: false, lastOd: 0.7, lastAt: iso(2), lastSource: "phone", looksOff: false,
+    line: "Index: your index: pale ~0.2, green ~0.6, dark ~0.9 (7 readings) · it doubles every ~2.7 d (7 readings, your fit) · today's 0.7 is ~1 d from dark",
+    calibration: null, estimate: null, ph: { available: false, trend: "unknown", line: "" }, phNow: { min: null, max: null, day: "" },
+    sensor: { bound: false, baseline: null, phEntity: "" }, note: "Depth on the stick, density from the index.", ...over };
+}
+
+test("Stage D tile: the index line, the estimate, the pH slope, the buttons and the Index settings group", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = phytoJar({ index: stageDIndex({ calibration: { cellsPerMl: 4260000, od: 0.213, at: iso(20) }, estimate: { available: true, cellsPerMl: 9040000, note: "~9,040,000 cells/ml, estimated from your count of 4,260,000 at an index of 0.213" },
+      ph: { available: true, trend: "falling", line: "pH falling 9.1 → 8.4 over 2 d — a crash? look at it, smell it", days: 3 }, sensor: { bound: true, baseline: { r: 1200, g: 2400, b: 0, at: iso(30) }, phEntity: "sensor.nanno_ph" } }) });
+    const config = phytoConfig();
+    config.cameras = { cam: { entity_id: "camera.tank", label: "Tank" } };
+    config.nps.cultures.jars.n1.index = { phEntity: "sensor.nanno_ph", redEntity: "sensor.nanno_red", greenEntity: "sensor.nanno_green", blueEntity: "" };
+    const panel = await culturesPanel(config, phytoSummary(jar));
+    const html = panel._culturesTab();
+    noPlaceholders(html, "tile with the index");
+    assert(html.includes('data-culture-index="7"') && html.includes("it doubles every ~2.7 d") && html.includes("0.7 is ~1 d from dark · last from the phone."), "the index line");
+    assert(html.includes("data-culture-estimate") && html.includes("estimated from your count of 4,260,000"), "the estimate through the count");
+    assert(html.includes('data-culture-ph="falling"') && html.includes("a crash? look at it, smell it"), "the pH slope");
+    assert(html.includes('data-action="cultures-index-open" data-id="n1"') && html.includes('data-action="cultures-index-camera" data-id="n1"') && html.includes('data-action="cultures-index-blank" data-id="n1"'), "Photo index, Camera index, Set blank");
+    const dark = phytoJar({ index: stageDIndex({ readsDark: true, lastOd: 0.95, daysToDark: 0, line: "Index: your index: dark ~0.9 (7 readings) · today's 0.95 reads dark — look, then split" }), densityAdvice: { action: "split_now", reason: "your index reads dark (0.95 ≥ 0.9) — look, then split" } });
+    const html2 = panel._culturesPhytoTile(dark, phytoSummary(dark), [dark]);
+    assert(html2.includes('style="color:var(--warning-color,#f5a524)" data-culture-index="7"') && html2.includes("your index reads dark (0.95 ≥ 0.9)"), "split now off the curve");
+    const bare = phytoJar({ index: stageDIndex({ available: false, readings: 0, line: "" }) });
+    const html3 = panel._culturesPhytoTile(bare, phytoSummary(bare), [bare]);
+    assert(html3.includes('data-culture-index="0"') && html3.includes("no readings yet — photograph the vessel against a white card"), "how to start");
+    assert(!html3.includes("cultures-index-blank"), "no sensor, no blank tap");
+    const settings = panel._culturesSettings();
+    assert(settings.includes('data-culture-index="n1"') && settings.includes('data-field="index.phEntity" value="sensor.nanno_ph"') && settings.includes('data-field="index.redEntity" value="sensor.nanno_red"'), "the Index settings group");
+  } finally { restore(); }
+});
+
+test("Stage D dialog: two taps on the photo, the preview maths, the log payload and the count", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = phytoJar({ index: stageDIndex({ lastAt: iso(5 * 24), lastOd: 0.7 }) });
+    const panel = await culturesPanel(phytoConfig(), phytoSummary(jar));
+    assert(JSON.stringify(panel._culturesIndexMaths({ r: 120, g: 180, b: 40 }, { r: 240, g: 240, b: 240 })) === JSON.stringify({ od: 0.213, odR: 0.301, odG: 0.125, odB: 0.778, brighter: false, looksOff: false }), "the preview is the backend's maths");
+    assert(panel._culturesIndexMaths({ r: 250, g: 250, b: 250 }, { r: 200, g: 200, b: 200 }).brighter, "brighter than the card");
+    // A fake 100 × 100 image: green culture on the left half, white card on the right.
+    const ctx = { getImageData: (x, y, w, h) => { const data = new Uint8ClampedArray(w * h * 4); for (let j = 0; j < h; j += 1) for (let i = 0; i < w; i += 1) { const px = x + i; const o = (j * w + i) * 4; const c = px < 50 ? [120, 180, 40] : [240, 240, 240]; data[o] = c[0]; data[o + 1] = c[1]; data[o + 2] = c[2]; data[o + 3] = 255; } return { data }; } };
+    const box = panel._culturesIndexSample(ctx, 100, 100, 25, 50);
+    assert(box.r === 120 && box.g === 180 && box.b === 40 && box.box.w === 4, `a box around the tap: ${JSON.stringify(box)}`);
+    panel._culturesIndexOpen("n1", "phone");
+    let dialog = panel._cultureIndexDialog();
+    assert(dialog.includes("culture-index-dialog") && dialog.includes('data-cultures-index-file="n1"') && dialog.includes('capture="environment"') && dialog.includes("The index · Nanno A"), "the phone dialog offers the camera input");
+    assert(dialog.includes('data-action="cultures-index-log" disabled'), "nothing to log yet");
+    panel._cultureIndexDraft.imageUrl = "data:image/jpeg;base64,x"; panel._cultureIndexDraft.width = 100; panel._cultureIndexDraft.height = 100;
+    panel._culturesIndexPoint(0.25, 0.5, ctx);
+    dialog = panel._cultureIndexDialog();
+    assert(dialog.includes("Now tap the white card.") && dialog.includes("culture R 120 G 180 B 40") && dialog.includes("🟢"), "the first tap is the culture");
+    panel._culturesIndexPoint(0.75, 0.5, ctx);
+    dialog = panel._cultureIndexDialog();
+    noPlaceholders(dialog, "index dialog");
+    assert(dialog.includes('data-cultures-index-preview="0.213"') && dialog.includes("Index <strong>0.213</strong>") && dialog.includes("your dark band is ~0.9") && dialog.includes("⚪"), "the second tap is the card and the number shows");
+    assert(dialog.includes('data-action="cultures-index-log" >'), "Log index is live");
+    let sent = null;
+    panel._culturesCall = (msg) => { sent = msg; };
+    panel._culturesIndexLog();
+    assert(sent && sent.type === "openreef/cultures_index" && sent.r === 120 && sent.g === 180 && sent.b === 40 && sent.ref_r === 240 && sent.source === "phone", `the log carries the channel means: ${JSON.stringify(sent)}`);
+    assert(!panel._cultureIndexOpen && !panel._cultureIndexDraft, "the dialog closes on log");
+    // The count: disabled without a fresh reading, live within two days of one.
+    panel._culturesIndexOpen("n1", "phone");
+    assert(panel._cultureIndexDialog().includes('data-cultures-count="n1" disabled'), "a five-day-old reading cannot be counted against");
+    const fresh = phytoJar({ index: stageDIndex({ lastAt: iso(3), lastOd: 0.7 }) });
+    panel._cultures.summary = phytoSummary(fresh);
+    const d2 = panel._cultureIndexDialog();
+    assert(d2.includes('data-cultures-count="n1" >') && d2.includes("against the index of 0.7"), "a reading from three hours ago takes a count");
+    panel.shadowRoot = { querySelector: (sel) => sel.includes("cultures-count") ? { value: "4260000" } : null };
+    panel._culturesCalibrate("n1");
+    assert(sent.type === "openreef/cultures_calibrate" && sent.cells_per_ml === 4260000, `the count is sent: ${JSON.stringify(sent)}`);
+    // A third tap starts over; the camera path opens loading.
+    panel._cultureIndexDraft = { source: "phone", imageUrl: "data:x", width: 100, height: 100, culture: { x: 0.2, y: 0.5 }, card: { x: 0.8, y: 0.5 }, sample: { r: 1, g: 1, b: 1 }, ref: { r: 2, g: 2, b: 2 }, preview: { od: 0.3 }, error: "" };
+    panel._culturesIndexPoint(0.3, 0.5, ctx);
+    assert(panel._cultureIndexDraft.culture.x === 0.3 && panel._cultureIndexDraft.card === null && panel._cultureIndexDraft.preview === null, "a third tap restarts at the culture");
+    panel._culturesIndexGrabCamera = async () => {};
+    panel._culturesIndexOpen("n1", "camera");
+    assert(panel._cultureIndexDialog().includes("Reading the camera…") && !panel._cultureIndexDialog().includes("data-cultures-index-file"), "the camera dialog waits for the frame");
+    const demo = panel._culturesDemoData().summary.jars.find((j) => j.kind === "phyto");
+    assert(demo.index && demo.index.line.startsWith("Index:"), "the demo vessel carries an index");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

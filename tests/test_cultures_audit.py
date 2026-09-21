@@ -441,6 +441,33 @@ def test_three_way_jug_conserves_volume_and_salt_and_a_refused_phyto_refill_writ
     finally:
         integration._mixing_hatchery_debit = real
 
+def test_an_index_reading_moves_no_clock_and_no_tint_and_cells_come_only_through_a_count():
+    """0.7.210: over many readings the vessel's clocks, colour and counter are
+    untouched — only the index stamps, the look and the journal move; the home
+    bottle's density is written at a split ONLY when a count calibrated it."""
+    from test_cultures import _phyto_jar, _phyto_entry, _cultures
+    vessel = _phyto_jar(started_ago_days=10, lastTint="green", lastHarvestAt=_iso(REAL - timedelta(days=3)), cyclesSinceFresh=1)
+    entry = _phyto_entry(jars={"c1": vessel})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    keep = ("startedAt", "lastRestartAt", "lastHarvestAt", "lastTint", "cyclesSinceFresh", "workingL", "lastSignAt", "lastSign", "crashedAt")
+    before = {k: _cultures(entry)["jars"]["c1"]["state"].get(k) for k in keep}
+    for i, (r, g) in enumerate(((200, 220), (150, 200), (100, 170), (60, 120), (40, 100))):
+        run(integration.websocket_cultures_index(hass, conn, {"id": i, "jar_id": "c1", "r": r, "g": g, "b": 30, "ref_r": 240, "ref_g": 240, "ref_b": 240}))
+    assert not conn.errors, conn.errors
+    jar = _cultures(entry)["jars"]["c1"]
+    assert {k: jar["state"].get(k) for k in keep} == before, "never a clock, never a tint"
+    assert sum(1 for row in jar["history"] if row["event"] == "index") == 5 and all("estCellsPerMl" not in row for row in jar["history"])
+    # A split without a count: the bottle stays uncounted.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] = "dark"
+    cfg["nps"]["cultures"]["jars"]["c1"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "dark"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_split(hass, conn, {"id": 10, "jar_id": "c1"}))
+    assert not conn.errors, conn.errors
+    bottle = _config(entry)["consumables"]["products"]["home_phyto_c1"]
+    assert bottle["cellsPerMl"] == 0 and "cellsPerMlSource" not in bottle, "no count, no cells — the drip stays by tint"
+
 if __name__ == '__main__':
     names = [k for k in sorted(globals()) if k.startswith('test_')]
     failures = 0

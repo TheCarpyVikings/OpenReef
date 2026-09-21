@@ -1,6 +1,6 @@
 # Phyto culture — Nannochloropsis on the rack · brainstorm (2026-09-20)
 
-> **STATUS: §8 LOCKED 2026-09-20. Stages A (0.7.207, §10), B (0.7.208, §11) and C (0.7.209, §12) BUILT 2026-09-21 — unverified on Reece's HA. Stage D (the camera/phone green index) parked with drip Stage D; the hardware track shelved.**
+> **STATUS: §8 LOCKED 2026-09-20. Stages A (0.7.207, §10), B (0.7.208, §11), C (0.7.209, §12) and D (0.7.210, §13) BUILT 2026-09-21 — the whole software arc, unverified on Reece's HA. Only the hardware track (§5.7) stays shelved.**
 > Grows the cultures arc (docs/live-cultures-brainstorm.md — the v1 grill parked "own phyto
 > culture = a later card, needs light", 2026-09-03) and closes the phyto-drip brief's loose end
 > (docs/phyto-drip-brainstorm.md §5.4 Q3 / §10: "a phyto culture on the rack feeding the jar is a
@@ -544,7 +544,7 @@ The original questions, for the record:
   restart (three-way jug when salinities differ, the still-green refusal), the cone's default dose
   from a home bottle, the printable Secchi stick + log fit off the accrued cm readings, Reef Report
   yield.
-- **Stage D — the index:** the camera/phone green index (shared with drip Stage D), optional pH /
+- **Stage D — the index (BUILT 0.7.210, §13):** the camera/phone green index (shared with drip Stage D), optional pH /
   colour-sensor entities, "split now" advice off the curve, the bottle's estimated density feeding
   the drip's line.
 - **Hardware track (shelved):** the reactor as the drip's reservoir source (pump pauses on a
@@ -767,6 +767,66 @@ The rotifer coupling and the stick. Code only; nothing here has run on Reece's H
   to 1000 ml with the one-tint hint; the demo vessel's cones and stick.
 - **Tests**: `test_cultures.py` +6 (102), `test_cultures_audit.py` +1 (30),
   `test_panel_cultures.mjs` +3 (52); the full regression green.
-- **Not built (parked with the arc):** Stage D — the camera/phone green index shared with drip
-  Stage D, the optional pH / colour-sensor entities, "split now" advice off the curve, the
-  bottle's estimated density feeding the drip's line; the hardware track (§5.7).
+- **Not built in C (built in D, §13):** the camera/phone green index shared with drip Stage D,
+  the optional pH / colour-sensor entities, "split now" advice off the curve, the bottle's
+  estimated density feeding the drip's line. The hardware track (§5.7) stays shelved.
+
+## 13. As built — Stage D (0.7.210, 2026-09-21)
+
+The index — the tint as a number, built once and used twice (§6: this is the drip's Stage D).
+Code only; nothing here has run on Reece's HA yet.
+
+- **The green index** (`cultures.green_index(sample, reference)`): the culture patch's channel
+  means against the white card's in the SAME shot (or the colour sensor's channels against the
+  blank the keeper set): per channel T = patch / card, OD = −log₁₀ T capped at 3 (black); the
+  index = the mean of the red and green densities (chlorophyll's bands — blue is reported, never
+  used); `looksOff` = green absorbed more than red (yellow-brown, a hint to look, never a sign);
+  `brighter` = the patch brighter than the card (the card was not lit the same — refused). The
+  panel sends channel means, the sensor its counts; the maths lives in one place.
+- **The curve** (`index_samples` / `index_fit` / `index_dark_days`): each reading paired with the
+  keeper's tint tap nearest in time within half a day (either order; a split resets the colour
+  to pale, a draw does not); per-tint median **bands** (two readings beside a tint before it has
+  one) — the dark band is what *split now* reads off; the **log fit** of ln(index) against days
+  since the split (four points over two days, an upward slope only) → the doubling time and the
+  days a reading is from dark; `readsDark`; the index at or over the dark band for three days
+  without a split = the peak-held watch off the curve. `estimate_cells(od, calibration)`: cells
+  ONLY through the keeper's own count (§7) — N at index X makes index Y worth N·Y/X, labelled and
+  dated. `ph_trend`: the daily pH maxima the tick banks — rising (growing), flat (stationary:
+  split), falling (*a crash? look at it, smell it*); two days before it speaks.
+- **Ceremonies** (`__init__.py`): `cultures_index {jar_id, r, g, b, ref_r, ref_g, ref_b, source}`
+  → `_cultures_index_apply`: an `index` row (`od / odR / odG / odB / source / looksOff /
+  estCellsPerMl`), `lastIndexAt` / `lastIndexOd`; a phone or camera reading against the card IS
+  the day's look (the look chore logs done) but the tint stays the keeper's word; a sensor
+  reading logs no look; never a clock, never a tint; refusals `invalid_reading`,
+  `brighter_than_card`, `not_phyto`, `jar_idle`. `cultures_calibrate {jar_id, cells_per_ml}`:
+  a count against the last index read within two days (`no_index` otherwise) →
+  `state.calibration {cellsPerMl, od, at}`; zero clears it. `cultures_index_blank {jar_id}`:
+  the colour sensor's channels now become `index.baseline`. Undo takes an index reading back
+  (the last index re-read from the surviving rows; the look completion goes with a phone/camera
+  reading). **The split** (`_cultures_crop_estimate`): with a calibration and an index inside two
+  days, the home bottle gets `cellsPerMl` = the estimate, `cellsPerMlSource: "index"`,
+  `cellsPerMlAt` (server-written — the products preserve guard keeps it over a stale save);
+  the drip's `standing_state` flips to density mode and its line says *the bottle's density is
+  an estimate from your count*. Without a count the bottle stays uncounted.
+- **The tick** (`_async_cultures_light_tick`): a bound pH probe (`index.phEntity`) banks today's
+  range (`phDay` / `phMinToday` / `phMaxToday`; a bound that moved by 0.05 is worth a save) and
+  at the day roll writes `phMin` / `phMax` into the daily `light` row; a bound colour sensor
+  with a blank takes one `index` reading a day at the roll (`_cultures_sensor_reading`).
+- **Payload**: per vessel `index {…index_fit, calibration, estimate, ph, phNow, sensor {bound,
+  baseline, phEntity}, note}`; the density advice becomes `split_now` — *"your index reads dark
+  (0.95 ≥ 0.9) — look, then split"* — or appends *"your index says ~N d"*; `risk_line(…,
+  index=)` carries the held-at-peak watch, the yellow-brown hint, the falling pH. Normaliser:
+  the `index` block (`phEntity`, `redEntity`, `greenEntity`, `blueEntity`, `baseline`), the state
+  stamps, the row fields, the products' `cellsPerMlSource` / `cellsPerMlAt`.
+- **Panel**: the tile's Index line (or how to start), the estimate line, the pH line; the
+  **Photo index** / **Camera index** / **Set blank** taps; the index dialog
+  (`culture-index-dialog`: take or choose a photo with `capture="environment"`, or the camera's
+  live frame / still; tap the culture 🟢 then the card ⚪ — `_culturesIndexSample` averages a
+  small box around each tap, `_culturesIndexMaths` previews the backend's number; **Log index**;
+  a third tap starts over; the **Count** row, live within two days of a reading, **Save count**);
+  the Index settings group (pH probe, colour sensor red / green / blue); the demo vessel's index.
+- **Tests**: `test_cultures.py` +4 (106), `test_cultures_audit.py` +1 (31),
+  `test_panel_cultures.mjs` +2 (54); the full regression green.
+- **The arc's software track is complete.** Left: the hardware track (§5.7 — the reactor as the
+  drip's reservoir with the pump pausing on a crashed source culture, the phyto node with the OD
+  shroud, the continuous reactor) — to lock when the hardware exists.

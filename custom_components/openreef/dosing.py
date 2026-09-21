@@ -849,10 +849,12 @@ def standing_state(channel: dict[str, Any], plan: dict[str, Any], tank_l: Any,
         residence_h = round(line_ml / (ml_per_day / window_h), 1)
     mode = "density" if derived is not None else "tint"
     standing_ml = round(tank * 1000.0 * target / bottle_cells, 2) if bottle_cells > 0 and tank > 0 else None
+    estimated = isinstance(product, dict) and str(product.get("cellsPerMlSource") or "") == "index"
     if ml_per_day <= 0:
         text = "No daily volume yet — set one by tint, or give the bottle a cell density."
     elif mode == "density":
-        text = f"Holding ~{target:,.0f} cells/mL · {pulse_text} · {ml_per_day:g} ml/day"
+        text = (f"Holding ~{target:,.0f} cells/mL · {pulse_text} · {ml_per_day:g} ml/day"
+                + (" · the bottle's density is an estimate from your count" if estimated else ""))
     else:
         text = f"Set by tint · {pulse_text} · {ml_per_day:g} ml/day"
     coaching = ("A faint green tint at the glass is right. Clear by evening means the tank "

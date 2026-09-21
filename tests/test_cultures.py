@@ -2909,6 +2909,221 @@ def test_cone_default_dose_from_the_home_bottle_and_the_report_yield():
     assert "Nanno A: 1 looks, 3 splits — 1.6 L (1.1 L bottle, 0.17 L cone, 0.21 L tank, 0.08 L waste)" in text, text[:600]
     assert "Rotifers A: 2 feeds, 0 looks, 1 harvests, 340 ml of home phyto" in text
 
+# --------------------------------------------------------------------------- #
+# 0.7.210 — the phyto vessel, Stage D: the index (doc §6, §13)
+# --------------------------------------------------------------------------- #
+def test_green_index_reads_the_patch_against_the_card():
+    # Half the red, three quarters of the green through the culture: OD 0.30 and 0.125 → index 0.213.
+    g = cultures.green_index({"r": 120, "g": 180, "b": 40}, {"r": 240, "g": 240, "b": 240})
+    assert g["available"] and (g["odR"], g["odG"], g["odB"]) == (0.301, 0.125, 0.778) and g["od"] == 0.213
+    assert (g["tR"], g["tG"]) == (0.5, 0.75) and not g["looksOff"] and not g["brighter"]
+    # Green absorbed more than red: yellow-brown, a hint to look.
+    assert cultures.green_index({"r": 150, "g": 100, "b": 40}, {"r": 240, "g": 240, "b": 240})["looksOff"]
+    # Brighter than the card: the card was not lit the same — flagged, OD 0.
+    b = cultures.green_index({"r": 250, "g": 250, "b": 250}, {"r": 200, "g": 200, "b": 200})
+    assert b["brighter"] and b["od"] == 0.0
+    # Black against the card saturates at the cap.
+    assert cultures.green_index({"r": 0, "g": 0, "b": 0}, {"r": 240, "g": 240, "b": 240})["saturated"]
+    # Missing channels, a dark card: not a reading.
+    assert cultures.green_index({"r": 10, "g": 10}, {"r": 240, "g": 240, "b": 240})["available"] is False
+    assert cultures.green_index({"r": 10, "g": 10, "b": 10}, {"r": 0, "g": 240, "b": 240})["available"] is False
+    assert cultures.green_index(None, None)["available"] is False
+
+
+def test_index_fit_bands_curve_days_to_dark_and_the_estimate():
+    def iso(d, h=0):
+        return _iso(NOW - timedelta(days=d, hours=h))
+    hist = [{"event": "seeded", "at": iso(14)},
+            {"event": "index", "at": iso(13), "od": 0.12, "source": "phone"}, {"event": "tint", "at": iso(13, -1), "tint": "pale"},
+            {"event": "index", "at": iso(11), "od": 0.25, "source": "phone"}, {"event": "tint", "at": iso(11, 1), "tint": "pale"},
+            {"event": "index", "at": iso(9), "od": 0.5, "source": "phone"}, {"event": "tint", "at": iso(9), "tint": "green"},
+            {"event": "index", "at": iso(7), "od": 0.95, "source": "phone"}, {"event": "tint", "at": iso(7, -2), "tint": "dark"},
+            {"event": "harvest", "at": iso(6), "ml": 750},
+            {"event": "index", "at": iso(5), "od": 0.4, "source": "camera"}, {"event": "tint", "at": iso(5), "tint": "pale"},
+            {"event": "index", "at": iso(3), "od": 0.6, "source": "camera"}, {"event": "tint", "at": iso(3), "tint": "green"},
+            {"event": "index", "at": iso(1), "od": 0.9, "source": "camera"}, {"event": "tint", "at": iso(1), "tint": "dark"}]
+    samples = cultures.index_samples(hist)
+    assert len(samples) == 7 and [s["tint"] for s in samples] == ["pale", "pale", "green", "dark", "pale", "green", "dark"], "the nearest tap, either side"
+    assert samples[4]["days"] == 1.0, "days since the LAST split"
+    fit = cultures.index_fit(hist, 0.7)
+    assert fit["bands"] == {"pale": 0.25, "green": 0.55, "dark": 0.925} and fit["darkOd"] == 0.925 and fit["counts"]["dark"] == 2
+    assert fit["fit"]["available"] and fit["fit"]["doublingDays"] == 2.7 and fit["fit"]["points"] == 7 and fit["fit"]["ratePerDay"] > 0
+    assert fit["daysToDark"] == 1.1 and fit["readsDark"] is False and fit["lastOd"] == 0.9 and fit["lastSource"] == "camera"
+    assert fit["line"] == ("Index: your index: pale ~0.25, green ~0.55, dark ~0.925 (7 readings) · it doubles every ~2.7 d (7 readings, your fit) · "
+                           "today's 0.7 is ~1.1 d from dark")
+    dark = cultures.index_fit(hist, 0.95)
+    assert dark["readsDark"] is True and dark["daysToDark"] == 0.0 and "today's 0.95 reads dark — look, then split" in dark["line"]
+    assert cultures.index_dark_days(hist, NOW) == 0.0, "0.9 a day ago sits under the 0.925 band — no run"
+    # A falling index is no curve; one reading is a number with no bands; a draw does not reset the tint.
+    falling = [{"event": "seeded", "at": iso(8)}] + [{"event": "index", "at": iso(7 - d), "od": 0.9 - d * 0.15, "source": "phone"} for d in range(5)]
+    ff = cultures.index_fit(falling, 0.3)
+    assert ff["fit"]["available"] is False and ff["fit"]["ratePerDay"] < 0 and ff["darkOd"] is None
+    one = cultures.index_fit([{"event": "seeded", "at": iso(3)}, {"event": "index", "at": iso(1), "od": 0.3, "source": "phone"}], 0.3)
+    assert one["available"] and one["line"] == "Index: today's index 0.3 — the bands come with the tints you log beside it"
+    drawn = hist + [{"event": "harvest", "at": iso(0, 6), "ml": 60, "draw": True}, {"event": "index", "at": iso(0, 5), "od": 0.92, "source": "phone"}]
+    assert cultures.index_samples(drawn)[-1]["tint"] == "dark", "a draw keeps the colour"
+    # The estimate only ever comes through a count.
+    assert cultures.estimate_cells(0.7, None)["available"] is False
+    est = cultures.estimate_cells(0.7, {"cellsPerMl": 1.2e7, "od": 0.9, "at": iso(1)})
+    assert est["available"] and est["cellsPerMl"] == 9333333.0 and est["factor"] == 13333333 and "estimated from your count of 12,000,000 at an index of 0.9" in est["note"]
+    assert cultures.estimate_cells(-1, {"cellsPerMl": 1.2e7, "od": 0.9})["available"] is False
+    # The pH: rising, flat, falling — two days before it speaks.
+    ph = [{"event": "light", "at": iso(d), "lightH": 15, "phMax": v} for d, v in ((4, 8.4), (3, 8.6), (2, 8.9), (1, 9.1))]
+    t = cultures.ph_trend(ph)
+    assert t["trend"] == "rising" and t["line"] == "pH 8.4 → 9.1 over 3 d — growing" and t["days"] == 4
+    assert cultures.ph_trend([{"event": "light", "at": iso(d), "phMax": 9.1} for d in (3, 2, 1)])["trend"] == "flat"
+    down = cultures.ph_trend([{"event": "light", "at": iso(d), "phMax": v} for d, v in ((2, 9.1), (1, 8.4))])
+    assert down["trend"] == "falling" and "a crash? look at it" in down["line"]
+    assert cultures.ph_trend([{"event": "light", "at": iso(1), "phMax": 9.1}])["available"] is False
+    # The learned block carries all three; the risk line reads them.
+    jar = _phyto_jar(started_ago_days=14, now=NOW, lastTint="green", lastHarvestAt=iso(6))
+    jar["history"] = list(reversed(hist + ph))
+    learned = cultures.learned_cadences(jar, [jar["history"]], NOW)
+    assert learned["index"]["darkOd"] == 0.925 and learned["ph"]["trend"] == "rising"
+    st = cultures.culture_state(jar, NOW)
+    ok_temp = {"available": True, "status": "ok", "tempC": 23.0}
+    risk = cultures.risk_line(jar, st, ok_temp, NOW, index={**learned["index"], "ph": {"trend": "falling", "line": "pH falling 9.1 → 8.4 over 2 d — a crash? look at it, smell it"}})
+    assert risk["level"] == "watch" and "pH falling" in risk["reason"]
+    # The index held at the dark band while the taps say green: the keeper
+    # tapped green half a day ago (the tint run ends), the index kept reading
+    # 0.95 — three and a half days on, the curve's own watch speaks.
+    later = NOW + timedelta(days=3)
+    jar["history"] = list(reversed(hist + [{"event": "tint", "at": iso(0, 12), "tint": "green"},
+                                           {"event": "index", "at": iso(0, 11), "od": 0.95, "source": "phone"}]))
+    jar["state"]["lastTint"] = "green"
+    st = cultures.culture_state(jar, later)
+    learned = cultures.learned_cadences(jar, [jar["history"]], later)
+    assert learned["index"]["darkOd"] == 0.925 and not st["peakHeld"]
+    assert cultures.index_dark_days(jar["history"], later) == 3.5
+    assert "the index has read dark for 3.5 days" in cultures.risk_line(jar, st, ok_temp, later, index=learned["index"])["reason"]
+    assert "reads yellow-brown" in cultures.risk_line(jar, st, ok_temp, NOW, index={"looksOff": True})["reason"]
+
+
+def test_ws_index_reading_logs_the_look_calibrates_by_count_and_fills_the_bottle_at_the_split():
+    vessel = _phyto_jar(started_ago_days=9, lastTint="green", lastLookedAt=_iso(REAL - timedelta(hours=30)))
+    entry = _phyto_entry(jars={"c1": vessel}, maintenance={"tasks": {"culture_c1_look": {"label": "Look", "enabled": True, "cadenceDays": 1}}, "completions": {}, "reminders": {"enabled": True}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_calibrate(hass, conn, {"id": 1, "jar_id": "c1", "cells_per_ml": 1.5e7}))
+    assert conn.errors[-1].code == "no_index", "a count needs an index to hang on"
+    run(integration.websocket_cultures_index(hass, conn, {"id": 2, "jar_id": "c1", "r": 250, "g": 250, "b": 250, "ref_r": 200, "ref_g": 200, "ref_b": 200}))
+    assert conn.errors[-1].code == "brighter_than_card"
+    run(integration.websocket_cultures_index(hass, conn, {"id": 3, "jar_id": "c1", "r": 120, "g": 180, "b": 40, "ref_r": 240, "ref_g": 240, "ref_b": 240, "source": "phone"}))
+    assert len(conn.errors) == 2, conn.errors[-1]
+    cfg = _config(entry)
+    jar = cfg["nps"]["cultures"]["jars"]["c1"]
+    row = jar["history"][0]
+    assert row["event"] == "index" and row["od"] == 0.213 and row["odR"] == 0.301 and row["source"] == "phone" and "estCellsPerMl" not in row
+    assert jar["state"]["lastIndexOd"] == 0.213 and jar["state"]["lastIndexAt"] and jar["state"]["lastTint"] == "green", "the tint stays the keeper's word"
+    assert (REAL - integration._parse_datetime(jar["state"]["lastLookedAt"])).total_seconds() < 60, "a photo against the card is the day's look"
+    assert cfg["maintenance"]["completions"]["culture_c1_look"][0]["notes"].startswith("Logged automatically — the index read")
+    assert jar["state"]["lastHarvestAt"] == "" and jar["state"]["cyclesSinceFresh"] == 0, "never a clock"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 4}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["index"]["readings"] == 1 and j["index"]["lastOd"] == 0.213 and j["index"]["estimate"] is None and j["index"]["calibration"] is None
+    assert j["index"]["line"] == "Index: today's index 0.213 — the bands come with the tints you log beside it"
+    # The count: within two days of the reading it calibrates; the estimate follows every later reading.
+    run(integration.websocket_cultures_calibrate(hass, conn, {"id": 5, "jar_id": "c1", "cells_per_ml": 4.26e6}))
+    assert len(conn.errors) == 2, conn.errors[-1]
+    cfg = _config(entry)
+    cal = cfg["nps"]["cultures"]["jars"]["c1"]["state"]["calibration"]
+    assert cal["cellsPerMl"] == 4260000.0 and cal["od"] == 0.213 and cal["at"]
+    run(integration.websocket_cultures_index(hass, conn, {"id": 6, "jar_id": "c1", "r": 60, "g": 120, "b": 40, "ref_r": 240, "ref_g": 240, "ref_b": 240, "source": "camera"}))
+    cfg = _config(entry)
+    row = cfg["nps"]["cultures"]["jars"]["c1"]["history"][0]
+    assert row["od"] == 0.452 and row["estCellsPerMl"] == 9040000.0 and row["source"] == "camera", row
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 7}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["index"]["estimate"]["cellsPerMl"] == 9040000.0 and "estimated from your count of 4,260,000" in j["index"]["estimate"]["note"]
+    # The split: the bottle carries the estimate, marked; the drip's line reads it.
+    from test_nps import _drip_channel
+    channel = _drip_channel(reservoir={"productId": "home_phyto_c1", "productIsBottle": False, "volumeMl": 500, "remainingMl": 100, "refrigerated": True})
+    cfg["dosing"] = {**(cfg.get("dosing") or {}), "channels": {"drip": channel}}
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] = "dark"
+    cfg["nps"]["cultures"]["jars"]["c1"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "dark"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_split(hass, conn, {"id": 8, "jar_id": "c1", "to": [{"to": "bottle", "ml": 750}]}))
+    assert len(conn.errors) == 2, conn.errors[-1]
+    cfg = _config(entry)
+    bottle = cfg["consumables"]["products"]["home_phyto_c1"]
+    assert bottle["cellsPerMl"] == 9040000.0 and bottle["cellsPerMlSource"] == "index" and bottle["cellsPerMlAt"]
+    assert any("~9,040,000 cells/ml estimated from your count" in a["message"] for a in cfg["activity"])
+    from openreef import dosing as dosing_engine
+    plan = {"mlPerDay": 41, "perDoseMl": 0.5, "dayIntervalMin": 20, "windowStart": 0, "windowEnd": 0}
+    standing = dosing_engine.standing_state(channel, plan, 52, bottle)
+    assert standing["mode"] == "density" and "the bottle's density is an estimate from your count" in standing["text"], standing["text"]
+    # A stale client that never saw the estimate cannot wipe it.
+    stale = copy.deepcopy(cfg)
+    stale["consumables"]["products"]["home_phyto_c1"].pop("cellsPerMlSource", None)
+    stale["consumables"]["products"]["home_phyto_c1"].pop("cellsPerMlAt", None)
+    stale["consumables"]["products"]["home_phyto_c1"]["cellsPerMl"] = 0
+    integration._nps_preserve_runtime(cfg, stale)
+    assert stale["consumables"]["products"]["home_phyto_c1"]["cellsPerMl"] == 9040000.0 and stale["consumables"]["products"]["home_phyto_c1"]["cellsPerMlSource"] == "index"
+    # Clearing the count: the index is a number again; the next split writes no density.
+    run(integration.websocket_cultures_calibrate(hass, conn, {"id": 9, "jar_id": "c1", "cells_per_ml": 0}))
+    assert _cultures(entry)["jars"]["c1"]["state"]["calibration"] is None
+    # An index reading can be taken back; the look goes with it.
+    stamp = _cultures(entry)["jars"]["c1"]["history"][1]["at"] if _cultures(entry)["jars"]["c1"]["history"][0]["event"] != "index" else _cultures(entry)["jars"]["c1"]["history"][0]["at"]
+    row = next(r for r in _cultures(entry)["jars"]["c1"]["history"] if r["event"] == "index")
+    run(integration.websocket_cultures_undo(hass, conn, {"id": 10, "jar_id": "c1", "at": row["at"]}))
+    assert len(conn.errors) == 2, conn.errors[-1]
+    jar = _cultures(entry)["jars"]["c1"]
+    assert next(r for r in jar["history"] if r["at"] == row["at"])["undoneAt"] and jar["state"]["lastIndexOd"] == 0.213
+    # Refusals write nothing: a bad reading, a jar that is not a vessel, an idle one.
+    run(integration.websocket_cultures_index(hass, conn, {"id": 11, "jar_id": "c1", "r": 10, "g": 10, "b": 10, "ref_r": 0, "ref_g": 240, "ref_b": 240}))
+    assert conn.errors[-1].code == "invalid_reading"
+    rot = _phyto_entry(jars={"c1": _jar(started_ago_days=5)})
+    conn2 = FakeConnection()
+    run(integration.websocket_cultures_index(FakeHass(entries=[rot]), conn2, {"id": 1, "jar_id": "c1", "r": 100, "g": 100, "b": 100, "ref_r": 240, "ref_g": 240, "ref_b": 240}))
+    assert conn2.errors[-1].code == "not_phyto"
+
+
+def test_light_tick_banks_the_ph_and_reads_the_colour_sensor_against_its_blank():
+    now = datetime.now(timezone.utc)
+    now_local = integration.dt_util.as_local(now)
+    yesterday = (now_local - timedelta(days=1)).date().isoformat()
+    jar = _phyto_jar(started_ago_days=6, lastTint="green")
+    jar["light"] = {"mode": "sun", "switchEntity": "", "onAt": "07:00", "latestOff": "00:00", "tempEntity": ""}
+    jar["index"] = {"phEntity": "sensor.nanno_ph", "redEntity": "sensor.nanno_red", "greenEntity": "sensor.nanno_green", "blueEntity": "", "baseline": None}
+    jar["state"].update({"lightDay": yesterday, "lightMinutesToday": 0, "phDay": yesterday, "phMinToday": 8.4, "phMaxToday": 8.9})
+    entry = _phyto_entry(jars={"c1": jar})
+    hass = FakeHass(states={"sensor.nanno_ph": "8.7", "sensor.nanno_red": "1200", "sensor.nanno_green": "2400",
+                            "sun.sun": FakeState("above_horizon", {"next_rising": _iso(now + timedelta(hours=20)), "next_setting": _iso(now + timedelta(hours=6))})},
+                    entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_index_blank(hass, conn, {"id": 1, "jar_id": "c1"}))
+    assert not conn.errors, conn.errors
+    blank = _cultures(entry)["jars"]["c1"]["index"]["baseline"]
+    assert blank["r"] == 1200 and blank["g"] == 2400 and blank["at"]
+    # The culture in front of the sensor: red halves, green to three quarters.
+    hass.states.set("sensor.nanno_red", "600")
+    hass.states.set("sensor.nanno_green", "1800")
+    run(integration._async_cultures_light_tick(hass, entry, now))
+    jar_after = _cultures(entry)["jars"]["c1"]
+    day_row = next(r for r in jar_after["history"] if r["event"] == "light")
+    assert day_row["phMin"] == 8.4 and day_row["phMax"] == 8.9, "yesterday's range on yesterday's row"
+    idx_row = next(r for r in jar_after["history"] if r["event"] == "index")
+    assert idx_row["source"] == "sensor" and idx_row["od"] == 0.213 and idx_row["odR"] == 0.301
+    assert jar_after["state"]["phDay"] == now_local.date().isoformat() and jar_after["state"]["phMinToday"] == 8.7 == jar_after["state"]["phMaxToday"]
+    assert jar_after["state"]["lastLookedAt"] == jar["state"].get("lastLookedAt", ""), "a sensor reading is not the keeper's look"
+    # A new extreme moves the range; a wobble under 0.05 does not save.
+    hass.states.set("sensor.nanno_ph", "9.0")
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=1)))
+    assert _cultures(entry)["jars"]["c1"]["state"]["phMaxToday"] == 9.0
+    hass.states.set("sensor.nanno_ph", "9.02")
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=2)))
+    assert _cultures(entry)["jars"]["c1"]["state"]["phMaxToday"] == 9.0
+    # No blank, no reading: the sensor without one is refused at the blank tap and skipped by the tick.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["index"]["redEntity"] = ""
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_index_blank(hass, conn, {"id": 2, "jar_id": "c1"}))
+    assert conn.errors[-1].code == "no_sensor"
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["index"]["sensor"]["bound"] is False and j["index"]["sensor"]["phEntity"] == "sensor.nanno_ph" and j["index"]["phNow"]["max"] == 9.0
+    assert j["index"]["ph"]["available"] is False, "one day of pH is not a trend"
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0

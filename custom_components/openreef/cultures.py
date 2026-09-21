@@ -91,6 +91,17 @@ CONE_TINT_CELLS_PER_ML = 1.0e6
 PHYTO_DRAW_MAX_PCT = 30.0
 SECCHI_FIT_MIN_POINTS = 4          # cm readings across ≥ 2 days before the fit speaks
 SECCHI_BAND_MIN_READINGS = 2       # readings at a tint before its band is drawn on the stick
+# Stage D (doc §6): the green index — the culture's optical density against
+# the white card behind it (a phone photo, the camera's frame) or a colour
+# sensor's blank. Red and green carry the chlorophyll; blue carries nothing.
+INDEX_SOURCES: tuple[str, ...] = ("phone", "camera", "sensor")
+INDEX_OD_MAX = 3.0                 # past this the patch is black: saturated, not measured
+INDEX_FIT_MIN_POINTS = 4           # readings across ≥ 2 days before the curve speaks
+INDEX_BAND_MIN_READINGS = 2        # readings beside a tint before that tint has an index band
+INDEX_PEAK_DAYS = 3.0              # the index at or over dark this long without a split = held at peak
+INDEX_CALIBRATION_MAX_AGE_DAYS = 2.0   # a count calibrates the index read within two days of it
+PH_TREND_DAYS = 3                  # daily pH maxima compared over this many days
+PH_FLAT_DELTA = 0.05               # pH per day under which the curve is flat
 LEARN_SAMPLES = 3          # rolling window, the hatch clock's contract
 SLOW_FACTOR = 1.5          # two slower clearing observations prompt inspection
 # Supplier-specific soak default; storage/boost windows are scheduling estimates,
@@ -1019,12 +1030,12 @@ def secchi_samples(history: Any) -> list[dict[str, Any]]:
     return out
 
 
-def _median(values: list[float]) -> float | None:
+def _median(values: list[float], digits: int = 1) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
     mid = len(ordered) // 2
-    return round(ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0, 1)
+    return round(ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0, digits)
 
 
 def secchi_fit(history: Any, cm_now: Any = None) -> dict[str, Any]:
@@ -1086,6 +1097,202 @@ def secchi_fit(history: Any, cm_now: Any = None) -> dict[str, Any]:
     return {"available": bool(words), "readings": len(samples), "bands": bands, "counts": counts,
             "stick": stick, "fit": fit, "daysToDark": days_to_dark, "lastCm": samples[-1]["cm"] if samples else None,
             "line": "Secchi: " + " · ".join(words) if words else ""}
+
+
+def green_index(sample: Any, reference: Any) -> dict[str, Any]:
+    """The green index (doc §6, Stage D): the optical density of the culture
+    patch against the white card in the same shot (or a sensor's blank).
+    Per channel T = patch / card (a patch brighter than its card reads 0 —
+    the card was not lit the same), OD = −log10 T capped at INDEX_OD_MAX;
+    the index is the mean of the red and green densities (chlorophyll's
+    bands — blue carries nothing and is only reported). ``looksOff`` = green
+    absorbed more than red: the patch reads yellow-brown, not green — a hint
+    to look, never a sign by itself. Pure; the panel sends channel means,
+    the sensor its counts, and this is the only place the maths lives."""
+    def chan(src: Any, key: str) -> float:
+        val = _f((src or {}).get(key), -1.0) if isinstance(src, dict) else -1.0
+        return val if math.isfinite(val) else -1.0
+    r, g, b = chan(sample, "r"), chan(sample, "g"), chan(sample, "b")
+    rr, rg, rb = chan(reference, "r"), chan(reference, "g"), chan(reference, "b")
+    if min(r, g, b) < 0 or min(rr, rg) <= 0 or rb < 0:
+        return {"available": False, "reason": "a reading needs the culture patch and the white card, both lit", "od": None,
+                "odR": None, "odG": None, "odB": None, "tR": None, "tG": None, "tB": None, "looksOff": False, "brighter": False}
+    def od(v: float, ref: float) -> tuple[float, float]:
+        if ref <= 0:
+            return 1.0, 0.0
+        t = max(1e-3, min(1.0, v / ref))
+        return round(t, 4), round(min(INDEX_OD_MAX, max(0.0, -math.log10(t))), 3)
+    t_r, od_r = od(r, rr)
+    t_g, od_g = od(g, rg)
+    t_b, od_b = od(b, rb) if rb > 0 else (None, None)
+    brighter = (r > rr * 1.05) or (g > rg * 1.05)
+    index = round((od_r + od_g) / 2.0, 3)
+    return {"available": True, "od": index, "odR": od_r, "odG": od_g, "odB": od_b, "tR": t_r, "tG": t_g, "tB": t_b,
+            "looksOff": bool(od_g > od_r + 0.02 and index > 0.05), "brighter": bool(brighter),
+            "saturated": bool(index >= INDEX_OD_MAX)}
+
+
+def index_samples(history: Any) -> list[dict[str, Any]]:
+    """Every index reading with the days since the split it belongs to and
+    the tint logged with (or nearest before) it. Oldest first; a crash ends
+    the cycle; taken-back rows never count."""
+    rows = _chronological(history)
+    # The tint beside a reading: the keeper's tap nearest in time within half
+    # a day (photo then tap, or tap then photo — either order), else the last
+    # tint seen before it. A split resets the colour to pale.
+    taps = [(at, str(row.get("tint"))) for at, row in rows if str(row.get("tint") or "") in PHYTO_TINTS]
+    def tint_for(at: datetime, before: str) -> str:
+        near = [(abs((tap_at - at).total_seconds()), tint) for tap_at, tint in taps
+                if abs((tap_at - at).total_seconds()) <= 12 * 3600]
+        return min(near)[1] if near else before
+    out: list[dict[str, Any]] = []
+    anchor: datetime | None = None
+    tint = ""
+    for at, row in rows:
+        event = row.get("event")
+        if event in ("seeded", "harvest", "restart"):
+            anchor = at
+            if not row.get("draw"):
+                tint = "pale"
+            continue
+        if event == "crashed":
+            anchor = None
+            tint = ""
+            continue
+        if str(row.get("tint") or "") in PHYTO_TINTS:
+            tint = str(row.get("tint"))
+        if event != "index":
+            continue
+        od_val = row.get("od")
+        if not isinstance(od_val, (int, float)) or isinstance(od_val, bool) or not math.isfinite(od_val) or od_val < 0:
+            continue
+        days = round((at - anchor).total_seconds() / 86400.0, 2) if anchor is not None else None
+        out.append({"at": at.isoformat(), "od": round(float(od_val), 3), "tint": tint_for(at, tint),
+                    "source": str(row.get("source") or ""),
+                    "days": days if days is not None and 0 <= days <= 30 else None,
+                    "looksOff": bool(row.get("looksOff"))})
+    return out
+
+
+def index_fit(history: Any, od_now: Any = None) -> dict[str, Any]:
+    """The curve (doc §6): per-tint median index BANDS (two readings beside a
+    tint before it has one) — the dark band is what "split now" reads off —
+    and the LOG FIT of ln(index) against days since the split: the growth
+    rate, the doubling time, and how many days a reading of ``od_now`` is
+    from the dark band. Four points over two days, an upward slope only.
+    ``readsDark`` = today's index at or over the dark band. Never cells."""
+    samples = index_samples(history)
+    by_tint: dict[str, list[float]] = {}
+    for smp in samples:
+        if smp["tint"] in ("pale", "green", "dark"):
+            by_tint.setdefault(smp["tint"], []).append(smp["od"])
+    bands = {tint: _median(vals, 3) if len(vals) >= INDEX_BAND_MIN_READINGS else None for tint, vals in by_tint.items()}
+    counts = {tint: len(vals) for tint, vals in by_tint.items()}
+    dark_od = bands.get("dark")
+    points = [(smp["days"], math.log(smp["od"])) for smp in samples if smp["days"] is not None and smp["od"] > 0]
+    fit: dict[str, Any] = {"available": False, "points": len(points), "ratePerDay": None, "doublingDays": None, "r2": None}
+    if len(points) >= INDEX_FIT_MIN_POINTS and len({round(d, 1) for d, _ in points}) >= 2:
+        n = float(len(points))
+        mx = sum(d for d, _ in points) / n
+        my = sum(y for _, y in points) / n
+        sxx = sum((d - mx) ** 2 for d, _ in points)
+        sxy = sum((d - mx) * (y - my) for d, y in points)
+        syy = sum((y - my) ** 2 for _, y in points)
+        if sxx > 0:
+            slope = sxy / sxx
+            fit.update({"ratePerDay": round(slope, 3), "r2": round((sxy * sxy) / (sxx * syy), 2) if syy > 0 else 0.0})
+            if slope > 0:
+                fit["available"] = True
+                fit["doublingDays"] = round(math.log(2.0) / slope, 1)
+    now_od = _f(od_now, -1.0)
+    days_to_dark = None
+    reads_dark = None
+    if dark_od and now_od >= 0:
+        reads_dark = now_od >= dark_od
+        if fit["available"] and now_od > 0:
+            days_to_dark = 0.0 if reads_dark else round(math.log(dark_od / now_od) / fit["ratePerDay"], 1)
+    words: list[str] = []
+    if any(v is not None for v in bands.values()):
+        named = [f"{tint} ~{bands[tint]:g}" for tint in ("pale", "green", "dark") if bands.get(tint) is not None]
+        words.append("your index: " + ", ".join(named) + f" ({len(samples)} readings)")
+    if fit["available"]:
+        words.append(f"it doubles every ~{fit['doublingDays']:g} d ({fit['points']} readings, your fit)")
+    if reads_dark:
+        words.append(f"today's {now_od:g} reads dark — look, then split")
+    elif days_to_dark is not None:
+        words.append(f"today's {now_od:g} is ~{days_to_dark:g} d from dark")
+    elif now_od >= 0 and not words:
+        words.append(f"today's index {now_od:g} — the bands come with the tints you log beside it")
+    return {"available": bool(samples), "readings": len(samples), "bands": bands, "counts": counts, "darkOd": dark_od,
+            "fit": fit, "daysToDark": days_to_dark, "readsDark": reads_dark, "lastOd": samples[-1]["od"] if samples else None,
+            "lastAt": samples[-1]["at"] if samples else None, "lastSource": samples[-1]["source"] if samples else "",
+            "looksOff": bool(samples and samples[-1]["looksOff"]),
+            "line": "Index: " + " · ".join(words) if words else ""}
+
+
+def index_dark_days(history: Any, now: datetime) -> float:
+    """Days the index has read at or over the dark band without a split —
+    the peak-held clock off the curve. 0 without a dark band."""
+    fit = index_fit(history)
+    dark_od = fit.get("darkOd")
+    if not dark_od:
+        return 0.0
+    run_start: datetime | None = None
+    for at, row in _chronological(history):
+        if at > now:
+            continue
+        if row.get("event") in ("harvest", "restart", "seeded", "crashed") and not row.get("draw"):
+            run_start = None
+            continue
+        if row.get("event") != "index":
+            continue
+        od_val = _f(row.get("od"), -1.0)
+        if od_val >= dark_od:
+            run_start = run_start or at
+        elif od_val >= 0:
+            run_start = None
+    return round(max(0.0, (now - run_start).total_seconds() / 86400.0), 1) if run_start else 0.0
+
+
+def estimate_cells(od: Any, calibration: Any) -> dict[str, Any]:
+    """Cells per ml from an index reading, ONLY through the keeper's own count
+    (doc §7: never a figure without a count or a calibrated index): a count of
+    N at an index of X makes today's index Y worth N × Y / X — Beer–Lambert's
+    straight line, labelled an estimate and dated to the count."""
+    cal = calibration if isinstance(calibration, dict) else {}
+    cells = _f(cal.get("cellsPerMl"))
+    cal_od = _f(cal.get("od"))
+    od_now = _f(od, -1.0)
+    if cells <= 0 or cal_od <= 0 or od_now < 0:
+        return {"available": False, "cellsPerMl": None, "factor": None, "calibratedAt": str(cal.get("at") or ""), "note": ""}
+    factor = cells / cal_od
+    est = round(od_now * factor)
+    return {"available": True, "cellsPerMl": float(est), "factor": round(factor), "calibratedAt": str(cal.get("at") or ""),
+            "calibrationOd": round(cal_od, 3), "calibrationCells": cells,
+            "note": f"~{est:,.0f} cells/ml, estimated from your count of {cells:,.0f} at an index of {cal_od:g}"}
+
+
+def ph_trend(history: Any, days: int = PH_TREND_DAYS) -> dict[str, Any]:
+    """The vessel's pH as the cheapest "is it alive" signal (doc §6): the
+    daily maxima the tick banks — rising while it grows, flat at stationary
+    (split), falling on a crash. Advice only; two days before it speaks."""
+    rows = [(at, row) for at, row in _chronological(history) if row.get("event") == "light" and not row.get("undoneAt")
+            and isinstance(row.get("phMax"), (int, float)) and not isinstance(row.get("phMax"), bool)]
+    rows.sort(key=lambda item: item[0])
+    recent = rows[-(days + 1):]
+    if len(recent) < 2:
+        return {"available": False, "trend": "unknown", "line": "", "days": len(recent), "first": None, "last": None}
+    first, last = _f(recent[0][1].get("phMax")), _f(recent[-1][1].get("phMax"))
+    span_days = max(1.0, (recent[-1][0] - recent[0][0]).total_seconds() / 86400.0)
+    per_day = (last - first) / span_days
+    if per_day >= PH_FLAT_DELTA:
+        trend, line = "rising", f"pH {first:.1f} → {last:.1f} over {span_days:.0f} d — growing"
+    elif per_day <= -PH_FLAT_DELTA:
+        trend, line = "falling", f"pH falling {first:.1f} → {last:.1f} over {span_days:.0f} d — a crash? look at it, smell it"
+    else:
+        trend, line = "flat", f"pH flat at ~{last:.1f} — stationary; a culture that has stopped climbing is ready to split"
+    return {"available": True, "trend": trend, "line": line, "days": len(recent), "first": round(first, 2), "last": round(last, 2),
+            "perDay": round(per_day, 3)}
 
 
 def daily_draw_pct(split_pct: Any, days_to_dark: Any) -> float:
@@ -1479,7 +1686,7 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # V2 Stage B — the journal that learns (doc §8.5)
 # --------------------------------------------------------------------------- #
-UNDOABLE_EVENTS = ("feed", "tint", "skip", "sign")
+UNDOABLE_EVENTS = ("feed", "tint", "skip", "sign", "index")
 
 
 def _chronological(history: Any) -> list[tuple[datetime, dict[str, Any]]]:
@@ -1732,6 +1939,11 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
         last_cm = next((row.get("secchiCm") for row in history[::-1]
                         if isinstance(row.get("secchiCm"), (int, float)) and not isinstance(row.get("secchiCm"), bool)), None)
         out["secchi"] = secchi_fit(history, last_cm)
+        # Stage D: the index's bands and curve, the pH's slope.
+        last_od = next((row.get("od") for row in history[::-1]
+                        if row.get("event") == "index" and isinstance(row.get("od"), (int, float)) and not isinstance(row.get("od"), bool)), None)
+        out["index"] = index_fit(history, last_od)
+        out["ph"] = ph_trend(history)
         out["light"] = {"weekH": week_h, "days": len(week),
                         "line": (f"a week under {LIGHT_WEEK_LOW_H:g} h of light (~{week_h:g} h a day) beside a slow cycle — "
                                  "the light is the first thing to check; nothing here proves it")
@@ -1740,7 +1952,7 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
 
 
 def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now: datetime,
-              light: Any = None) -> dict[str, Any]:
+              light: Any = None, index: Any = None) -> dict[str, Any]:
     """The hatchery nose, made explainable (doc §8.8): one sentence with the
     cause, built only from stamps — never a score. ``act`` = do something
     today, ``watch`` = look harder, ``ok`` = leave it alone. ``light`` is the
@@ -1791,6 +2003,17 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
         starter = starter_state(state.get("starterOpenedAt"), preset.get("starterShelfDays"), now)
         if st.get("status") == "establishing" and starter.get("status") == "stale":
             watch.append("the starter bottle is past its four weeks — seed from it today or not at all")
+        # Stage D (doc §6): the index held at the dark band, a photo that reads
+        # yellow-brown, a pH that has turned down — advice off the curve.
+        index = index if isinstance(index, dict) else {}
+        held = index_dark_days(jar.get("history"), now) if index.get("darkOd") else 0.0
+        if held >= INDEX_PEAK_DAYS and not st.get("peakHeld"):
+            watch.append(f"the index has read dark for {held:g} days without a split — a culture held at peak turns")
+        if index.get("looksOff") and tint != "off":
+            watch.append("the last photo reads yellow-brown against the card, not green — look at it")
+        ph = index.get("ph") if isinstance(index.get("ph"), dict) else {}
+        if ph.get("trend") == "falling":
+            watch.append(ph.get("line") or "the pH is falling — a crash? look at it")
         if act:
             return {"level": "act", "reason": "; ".join(act)}
         if watch:

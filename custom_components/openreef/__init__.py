@@ -1242,6 +1242,19 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                    if isinstance(secchi, (int, float)) and not isinstance(secchi, bool) else {}),
                 **({"arrivalTint": str(item.get("arrivalTint"))}
                    if str(item.get("arrivalTint") or "") in cultures_engine.PHYTO_TINTS else {}),
+                # Stage D: an index reading (the culture's optical density against
+                # the white card / the sensor's blank), where it came from, the
+                # estimate it carried once a count calibrated it, the yellow-brown
+                # hint; and the daily row's pH minimum / maximum.
+                **({"od": round(_awc_num(item.get("od"), 0, 0, 5), 3)} if item.get("od") is not None else {}),
+                **({"odR": round(_awc_num(item.get("odR"), 0, 0, 5), 3)} if item.get("odR") is not None else {}),
+                **({"odG": round(_awc_num(item.get("odG"), 0, 0, 5), 3)} if item.get("odG") is not None else {}),
+                **({"odB": round(_awc_num(item.get("odB"), 0, 0, 5), 3)} if item.get("odB") is not None else {}),
+                **({"source": str(item.get("source"))} if str(item.get("source") or "") in cultures_engine.INDEX_SOURCES else {}),
+                **({"estCellsPerMl": _awc_num(item.get("estCellsPerMl"), 0, 0, 1e12)} if item.get("estCellsPerMl") is not None else {}),
+                **({"looksOff": True} if item.get("looksOff") is True else {}),
+                **({"phMin": round(_awc_num(item.get("phMin"), 0, 0, 14), 2)} if item.get("phMin") is not None else {}),
+                **({"phMax": round(_awc_num(item.get("phMax"), 0, 0, 14), 2)} if item.get("phMax") is not None else {}),
                 # Stage C: a rotifer refill that carried phyto (ml + where from),
                 # and a phyto split that was only a DRAW (no clock, no tint).
                 **({"phytoMl": _awc_num(item.get("phytoMl"), 0, 0, 100000)} if item.get("phytoMl") is not None else {}),
@@ -1278,6 +1291,9 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
         harvest_to = str(raw_jar.get("harvestTo") or "")
         raw_nutrient = raw_jar.get("nutrient") if isinstance(raw_jar.get("nutrient"), dict) else {}
         raw_light = raw_jar.get("light") if isinstance(raw_jar.get("light"), dict) else {}
+        raw_index = raw_jar.get("index") if isinstance(raw_jar.get("index"), dict) else {}
+        raw_blank = raw_index.get("baseline") if isinstance(raw_index.get("baseline"), dict) else {}
+        raw_cal = raw_state.get("calibration") if isinstance(raw_state.get("calibration"), dict) else {}
         jars[jid] = {
             "name": _awc_str(raw_jar.get("name"), 40) or f"Culture {len(jars) + 1}",
             "species": species,
@@ -1325,6 +1341,18 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "latestOff": _normalise_schedule_time(raw_light.get("latestOff")) or cultures_engine.LIGHT_LATEST_OFF_DEFAULT,
                 "tempEntity": _normalise_entity_id(raw_light.get("tempEntity")),
             },
+            # The index's sensors (doc §6, Stage D): a pH probe on the vessel,
+            # a colour sensor (TCS34725 in a shroud) with the blank the keeper
+            # set — all optional, all advisory; the phone needs none of them.
+            "index": {
+                "phEntity": _normalise_entity_id(raw_index.get("phEntity")),
+                "redEntity": _normalise_entity_id(raw_index.get("redEntity")),
+                "greenEntity": _normalise_entity_id(raw_index.get("greenEntity")),
+                "blueEntity": _normalise_entity_id(raw_index.get("blueEntity")),
+                "baseline": ({"r": _awc_num(raw_blank.get("r"), 0, 0, 1e9), "g": _awc_num(raw_blank.get("g"), 0, 0, 1e9),
+                              "b": _awc_num(raw_blank.get("b"), 0, 0, 1e9), "at": _awc_str(raw_blank.get("at"), 40)}
+                             if _awc_num(raw_blank.get("r"), 0, 0, 1e9) > 0 and _awc_num(raw_blank.get("g"), 0, 0, 1e9) > 0 else None),
+            },
             "cadence": cultures_engine.cadence_for(species, raw_cad),
             "state": {
                 "startedAt": _awc_str(raw_state.get("startedAt"), 40),
@@ -1365,6 +1393,16 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "lightDay": _awc_str(raw_state.get("lightDay"), 10),
                 "lightWatchAt": _awc_str(raw_state.get("lightWatchAt"), 40),
                 "lightLostDay": _awc_str(raw_state.get("lightLostDay"), 10),
+                # Stage D (server-written): the last index reading, the keeper's
+                # count against it, and today's pH range the tick is banking.
+                "lastIndexAt": _awc_str(raw_state.get("lastIndexAt"), 40),
+                "lastIndexOd": round(_awc_num(raw_state.get("lastIndexOd"), 0, 0, 5), 3),
+                "calibration": ({"cellsPerMl": _awc_num(raw_cal.get("cellsPerMl"), 0, 0, 1e12),
+                                 "od": round(_awc_num(raw_cal.get("od"), 0, 0, 5), 3), "at": _awc_str(raw_cal.get("at"), 40)}
+                                if _awc_num(raw_cal.get("cellsPerMl"), 0, 0, 1e12) > 0 and _awc_num(raw_cal.get("od"), 0, 0, 5) > 0 else None),
+                "phDay": _awc_str(raw_state.get("phDay"), 10),
+                "phMinToday": (round(_awc_num(raw_state.get("phMinToday"), 0, 0, 14), 2) if raw_state.get("phMinToday") is not None else None),
+                "phMaxToday": (round(_awc_num(raw_state.get("phMaxToday"), 0, 0, 14), 2) if raw_state.get("phMaxToday") is not None else None),
             },
             "history": history[:600],
         }
@@ -1958,8 +1996,12 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
             "refrigerated": bool(raw.get("refrigerated")),
             "stirDaily": bool(raw.get("stirDaily")),
             # Cells per ml of the bottle (0 = unknown — the label wins, and a
-            # standing drip is then set by tint, not by the maths).
+            # standing drip is then set by tint, not by the maths). Stage D: a
+            # home bottle's figure may be an ESTIMATE from the vessel's index
+            # through the keeper's own count — the source and its stamp say so.
             "cellsPerMl": _awc_num(raw.get("cellsPerMl"), 0, 0, 1e12),
+            **({"cellsPerMlSource": "index", "cellsPerMlAt": _awc_str(raw.get("cellsPerMlAt"), 40)}
+               if str(raw.get("cellsPerMlSource") or "") == "index" else {}),
             # Particle window for the Stage D species/particle-size matcher.
             "particleUmMin": _awc_num(raw.get("particleUmMin"), 0, 0, 100000),
             "particleUmMax": _awc_num(raw.get("particleUmMax"), 0, 0, 100000),
@@ -8846,6 +8888,12 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
             dst_shake = _parse_datetime(dst.get("lastShakenAt"))
             if src_shake is not None and (dst_shake is None or src_shake > dst_shake):
                 dst["lastShakenAt"] = src["lastShakenAt"]
+            # Stage D: a home bottle's density estimated by the split (from the
+            # vessel's index through the keeper's count) is server-written.
+            src_est = _parse_datetime(src.get("cellsPerMlAt")) if src.get("cellsPerMlSource") == "index" else None
+            dst_est = _parse_datetime(dst.get("cellsPerMlAt")) if dst.get("cellsPerMlSource") == "index" else None
+            if src_est is not None and (dst_est is None or src_est > dst_est) and dst.get("cellsPerMlSource") in ("index", None, ""):
+                dst["cellsPerMl"], dst["cellsPerMlSource"], dst["cellsPerMlAt"] = src.get("cellsPerMl"), "index", src.get("cellsPerMlAt")
         # The home phyto bottle (0.7.207) is created SERVER-side at the seed:
         # a stale client that never saw it must not delete it while its
         # vessel still stands. A deleted vessel takes its bottle with it.
@@ -17893,6 +17941,217 @@ def _cultures_vessel_temp_c(hass: HomeAssistant, jar: dict[str, Any]) -> float |
     return _entity_temp_c(hass, light.get("tempEntity"))
 
 
+def _entity_number(hass: HomeAssistant, entity_id: Any, lo: float, hi: float) -> float | None:
+    """One numeric entity within [lo, hi]; None when unmapped, unavailable,
+    non-numeric or out of range."""
+    if not entity_id:
+        return None
+    state = hass.states.get(str(entity_id))
+    if state is None or str(state.state) in UNAVAILABLE_STATES:
+        return None
+    try:
+        value = float(state.state)
+    except (TypeError, ValueError):
+        return None
+    return value if lo <= value <= hi else None
+
+
+def _cultures_crop_estimate(jar: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    """The crop's density at a split (Stage D): the latest index inside two
+    days through the keeper's calibration. None without both."""
+    state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
+    last_at = _parse_datetime(state.get("lastIndexAt"))
+    if last_at is None or (now - last_at).total_seconds() > cultures_engine.INDEX_CALIBRATION_MAX_AGE_DAYS * 86400:
+        return None
+    est = cultures_engine.estimate_cells(state.get("lastIndexOd"), state.get("calibration"))
+    return est if est.get("available") else None
+
+
+def _cultures_sensor_reading(hass: HomeAssistant, jar: dict[str, Any]) -> dict[str, Any] | None:
+    """The colour sensor's channels now (Stage D): the red / green (blue
+    optional) entities against the blank the keeper set. None without a
+    blank, a bound pair, or a live reading — the index is never guessed."""
+    index_cfg = jar.get("index") if isinstance(jar.get("index"), dict) else {}
+    blank = index_cfg.get("baseline") if isinstance(index_cfg.get("baseline"), dict) else None
+    if not blank or not index_cfg.get("redEntity") or not index_cfg.get("greenEntity"):
+        return None
+    r = _entity_number(hass, index_cfg.get("redEntity"), 0.0, 1e9)
+    g = _entity_number(hass, index_cfg.get("greenEntity"), 0.0, 1e9)
+    b = _entity_number(hass, index_cfg.get("blueEntity"), 0.0, 1e9) if index_cfg.get("blueEntity") else 0.0
+    if r is None or g is None or b is None:
+        return None
+    return {"sample": {"r": r, "g": g, "b": b},
+            "reference": {"r": awc_engine._f(blank.get("r")), "g": awc_engine._f(blank.get("g")), "b": awc_engine._f(blank.get("b"))}}
+
+
+def _cultures_index_apply(config: dict[str, Any], cultures: dict[str, Any], jar_id: str, jar: dict[str, Any],
+                          sample: Any, reference: Any, source: str, now: datetime, *, look: bool = True,
+                          origin: str = "the Cultures tab") -> tuple[str, str] | None:
+    """One index reading (doc §6, Stage D): the culture patch and the white
+    card (or the sensor and its blank) → the optical density, on the journal
+    as an ``index`` row with the estimate a count would make of it. A phone
+    or camera reading against a white card IS the day's look — the look chore
+    logs done — but the tint stays the keeper's word; a sensor reading logs
+    no look. Never a clock, never a tint. Returns (code, message) on refusal."""
+    if cultures_engine.species_kind(jar.get("species")) != "phyto":
+        return "not_phyto", f"{jar.get('name')} is not a phyto vessel — the index reads a culture"
+    st = cultures_engine.culture_state(jar, now)
+    if st["status"] in ("none", "crashed"):
+        return "jar_idle", f"{jar.get('name')} is not running — seed it first"
+    source = source if source in cultures_engine.INDEX_SOURCES else "phone"
+    reading = cultures_engine.green_index(sample, reference)
+    if not reading.get("available"):
+        return "invalid_reading", reading.get("reason") or "The reading needs the culture patch and the white card"
+    if reading.get("brighter"):
+        return "brighter_than_card", ("the culture patch reads brighter than the white card — the card was not lit the same; "
+                                      "re-shoot with the card behind the vessel in the same light")
+    state = jar.setdefault("state", {})
+    est = cultures_engine.estimate_cells(reading["od"], state.get("calibration"))
+    _cultures_history(jar, "index", now, od=reading["od"], odR=reading["odR"], odG=reading["odG"],
+                      odB=reading["odB"], source=source, looksOff=True if reading.get("looksOff") else None,
+                      estCellsPerMl=est["cellsPerMl"] if est.get("available") else None)
+    state["lastIndexAt"] = now.isoformat()
+    state["lastIndexOd"] = reading["od"]
+    words = [f"index {reading['od']:g} (red {reading['odR']:g}, green {reading['odG']:g}) from the {source}"]
+    if est.get("available"):
+        words.append(est["note"])
+    if reading.get("looksOff"):
+        words.append("the patch reads yellow-brown, not green — look at it")
+    if look and source != "sensor":
+        state["lastLookedAt"] = now.isoformat()
+        _cultures_log_completion(config, jar_id, "look", now, f"Logged automatically — the index read from {origin}")
+    _append_activity(config, f"{jar.get('name') or jar_id}: " + " · ".join(words), "control")
+    return None
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_index",
+    vol.Required("jar_id"): str,
+    vol.Required("r"): vol.Any(int, float),
+    vol.Required("g"): vol.Any(int, float),
+    vol.Required("b"): vol.Any(int, float),
+    vol.Required("ref_r"): vol.Any(int, float),
+    vol.Required("ref_g"): vol.Any(int, float),
+    vol.Required("ref_b"): vol.Any(int, float),
+    vol.Optional("source"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_index(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """An index reading from the phone or the camera: the channel means of
+    the culture patch and of the white card (see ``_cultures_index_apply``)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    error = _cultures_index_apply(config, cultures, jar_id, jar,
+                                  {"r": msg.get("r"), "g": msg.get("g"), "b": msg.get("b")},
+                                  {"r": msg.get("ref_r"), "g": msg.get("ref_g"), "b": msg.get("ref_b")},
+                                  str(msg.get("source") or "phone"), datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
+        return
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_calibrate",
+    vol.Required("jar_id"): str,
+    vol.Required("cells_per_ml"): vol.Any(int, float),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_calibrate(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """The keeper's count (doc §6, §7): cells per ml counted from the sample
+    the last index read — within two days of it — becomes the calibration
+    that turns every later index into an estimate, and fills the home
+    bottle's density at the split so the drip's line stops reading unknown.
+    Zero clears it."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    if cultures_engine.species_kind(jar["species"]) != "phyto":
+        connection.send_error(msg["id"], "not_phyto", f"{jar['name']} is not a phyto vessel")
+        return
+    cells = msg.get("cells_per_ml")
+    if isinstance(cells, bool) or not 0 <= awc_engine._f(cells, -1) <= 1e12:
+        connection.send_error(msg["id"], "invalid_count", "Enter the count as cells per ml")
+        return
+    now = datetime.now(timezone.utc)
+    state = jar["state"]
+    if awc_engine._f(cells) <= 0:
+        state["calibration"] = None
+        _append_activity(config, f"{jar['name']}: the count was cleared — the index is a number again, not cells", "control")
+    else:
+        last_at = _parse_datetime(state.get("lastIndexAt"))
+        od = awc_engine._f(state.get("lastIndexOd"))
+        if last_at is None or od <= 0 or (now - last_at).total_seconds() > cultures_engine.INDEX_CALIBRATION_MAX_AGE_DAYS * 86400:
+            connection.send_error(msg["id"], "no_index", "Read the index first — photograph the vessel against the white card, then count that same sample within two days")
+            return
+        state["calibration"] = {"cellsPerMl": float(cells), "od": od, "at": now.isoformat()}
+        _append_activity(config, (f"{jar['name']}: counted {awc_engine._f(cells):,.0f} cells/ml at an index of {od:g} — "
+                                  "every later index is now an estimate of cells, and the bottle's density fills at the split"), "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_index_blank",
+    vol.Required("jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_index_blank(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Set the colour sensor's blank (Stage D): the channels read now, with
+    clean water (or the empty shroud) in front of it, become the reference
+    every later sensor reading is measured against."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    found = _cultures_jar_for_msg(connection, msg, cultures)
+    if found is None:
+        return
+    jar_id, jar = found
+    index_cfg = jar.get("index") if isinstance(jar.get("index"), dict) else {}
+    if not index_cfg.get("redEntity") or not index_cfg.get("greenEntity"):
+        connection.send_error(msg["id"], "no_sensor", "Bind the colour sensor's red and green entities in Culture settings first")
+        return
+    r = _entity_number(hass, index_cfg.get("redEntity"), 0.0, 1e9)
+    g = _entity_number(hass, index_cfg.get("greenEntity"), 0.0, 1e9)
+    b = _entity_number(hass, index_cfg.get("blueEntity"), 0.0, 1e9) if index_cfg.get("blueEntity") else 0.0
+    if r is None or g is None or b is None or r <= 0 or g <= 0:
+        connection.send_error(msg["id"], "unavailable", "The colour sensor is not reading — check the entities")
+        return
+    now = datetime.now(timezone.utc)
+    jar["index"]["baseline"] = {"r": r, "g": g, "b": b, "at": now.isoformat()}
+    _append_activity(config, f"{jar['name']}: the colour sensor's blank is set (R {r:g}, G {g:g}) — its readings are measured against it from now", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 def _cultures_sun_snapshot(hass: HomeAssistant) -> dict[str, Any]:
     """HA's sun entity as the engine reads it (doc §5.6): the state and its
     next rising / setting stamps. Empty when the integration is not loaded —
@@ -17988,6 +18247,17 @@ async def _async_cultures_light_tick(hass: HomeAssistant, entry: OpenReefConfigE
         plug = str(light.get("switchEntity") or "")
         name = str(jar.get("name") or jid)
         on_since = _parse_datetime(state.get("lightOnAt"))
+        index_cfg = jar.get("index") if isinstance(jar.get("index"), dict) else {}
+        # ---- the pH probe (Stage D): today's range, banked into the daily row
+        ph_now = _entity_number(hass, index_cfg.get("phEntity"), 0.0, 14.0) if running else None
+        if ph_now is not None and str(state.get("phDay") or "") == today and state.get("phMinToday") is not None:
+            # Today's range so far: a bound that moved by 0.05 is worth a save
+            # (a few a day); anything finer waits for the next one.
+            lo = min(_awc_num(state.get("phMinToday"), ph_now, 0, 14), ph_now)
+            hi = max(_awc_num(state.get("phMaxToday"), ph_now, 0, 14), ph_now)
+            if lo <= _awc_num(state.get("phMinToday"), ph_now, 0, 14) - 0.05 or hi >= _awc_num(state.get("phMaxToday"), ph_now, 0, 14) + 0.05:
+                state["phMinToday"], state["phMaxToday"] = round(lo, 2), round(hi, 2)
+                changed = True
         # ---- the day roll: yesterday's light into the journal, the counters reset
         if running and str(state.get("lightDay") or "") != today:
             if state.get("lightDay"):
@@ -17998,10 +18268,26 @@ async def _async_cultures_light_tick(hass: HomeAssistant, entry: OpenReefConfigE
                     on_since = midnight
                 lamp_h = round(min(24.0, minutes / 60.0), 1)
                 sun_h = round(awc_engine._f(day.get("daylightH")), 1) if day.get("available") and mode in ("sun", "sun+lamp") else None
+                ph_fields = ({"phMin": state.get("phMinToday"), "phMax": state.get("phMaxToday")}
+                             if str(state.get("phDay") or "") and state.get("phMaxToday") is not None
+                             and str(state.get("phDay")) == str(state.get("lightDay")) else {})
                 _cultures_history(jar, "light", midnight - timedelta(minutes=1), lampH=lamp_h,
-                                  daylightH=sun_h, lightH=round(min(24.0, lamp_h + (sun_h or 0.0)), 1))
+                                  daylightH=sun_h, lightH=round(min(24.0, lamp_h + (sun_h or 0.0)), 1), **ph_fields)
+                # The colour sensor's daily reading (Stage D): once a day at the
+                # roll, against the blank the keeper set — never without one.
+                reading = _cultures_sensor_reading(hass, jar)
+                if reading is not None:
+                    _cultures_index_apply(config, cultures, jid, jar, reading["sample"], reading["reference"], "sensor",
+                                          now_utc, look=False)
             state["lightMinutesToday"] = 0.0
             state["lightDay"] = today
+            if ph_now is not None:
+                state["phMinToday"] = state["phMaxToday"] = round(ph_now, 2)
+            state["phDay"] = today if ph_now is not None else state.get("phDay")
+            changed = True
+        elif ph_now is not None and str(state.get("phDay") or "") != today:
+            state["phDay"] = today
+            state["phMinToday"] = state["phMaxToday"] = round(ph_now, 2)
             changed = True
         # ---- the plug
         window = cultures_engine.light_window(light, st["cadence"].get("lightHours"), now_local, sun)
@@ -18411,6 +18697,14 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
                     and str(jar["state"].get("lastTint") or "") in ("pale", "green"):
                 feed_advice = {**feed_advice, "reason": feed_advice["reason"]
                                + (f" · your stick says ~{secchi['daysToDark']:g} d" if secchi["daysToDark"] > 0 else " · your stick already reads dark")}
+            # Stage D: "split now" advice off the curve — the index at the dark
+            # band, or the days it says are left; the tap stays the record.
+            idx = learned.get("index") if isinstance(learned.get("index"), dict) else {}
+            if idx.get("readsDark") and str(jar["state"].get("lastTint") or "") != "dark" and feed_advice.get("action") != "hold":
+                feed_advice = {**feed_advice, "action": "split_now",
+                               "reason": f"your index reads dark ({idx.get('lastOd'):g} ≥ {idx.get('darkOd'):g}) — look, then split"}
+            elif idx.get("daysToDark") and feed_advice.get("action") in ("wait", "check"):
+                feed_advice = {**feed_advice, "reason": feed_advice["reason"] + f" · your index says ~{idx['daysToDark']:g} d"}
             phyto_payload = _cultures_phyto_payload(config, jid, jar, st, cad, preset, mix_ppt, tank_l, channels, now,
                                                     light=light, learned=learned)
         else:
@@ -18470,7 +18764,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "feedAdvice": feed_advice,
             "temp": temp_advice,
             "learned": learned,
-            "risk": cultures_engine.risk_line(jar, st, temp_advice, now, light=light),
+            "risk": cultures_engine.risk_line(jar, st, temp_advice, now, light=light,
+                                              index=({**(learned.get("index") or {}), "ph": learned.get("ph")} if phyto else None)),
             "lastSign": jar["state"]["lastSign"],
             "harvestGuide": cultures_engine.harvest_guide(jar, mix_ppt),
             "restartGuide": fill_guide,
@@ -18723,9 +19018,26 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
         cones.append({"id": cid, "name": str(cone.get("name") or cid), "doseMl": cultures_engine.cone_dose_ml(cone.get("volumeL")),
                       "tint": str(cone["state"].get("lastTint") or ""), "stillGreen": str(cone["state"].get("lastTint") or "") == "green",
                       "feedDue": bool((cst.get("feed") or {}).get("due"))})
+    index_cfg = jar.get("index") if isinstance(jar.get("index"), dict) else {}
+    idx = learned.get("index") if isinstance(learned.get("index"), dict) else {}
+    cal = state.get("calibration") if isinstance(state.get("calibration"), dict) else None
+    est_now = cultures_engine.estimate_cells(state.get("lastIndexOd"), cal) if state.get("lastIndexAt") else {"available": False}
     return {
         "mode": st.get("mode", "batch"), "workingL": st.get("workingL"),
         "cones": cones,
+        # Stage D: the index as the tile says it, the count behind it, the
+        # sensors bound, today's pH banked so far.
+        "index": {
+            **idx,
+            "calibration": cal,
+            "estimate": est_now if est_now.get("available") else None,
+            "ph": learned.get("ph") or {"available": False, "trend": "unknown", "line": ""},
+            "phNow": {"min": state.get("phMinToday"), "max": state.get("phMaxToday"), "day": state.get("phDay")},
+            "sensor": {"bound": bool(index_cfg.get("redEntity") and index_cfg.get("greenEntity")),
+                       "baseline": index_cfg.get("baseline"), "phEntity": str(index_cfg.get("phEntity") or "")},
+            "note": ("Depth on the stick, density from the index — neither counts cells until your own count "
+                     "calibrates it; then every figure is an estimate and says so."),
+        },
         "secchi": learned.get("secchi") or {"available": False, "readings": 0, "bands": {}, "stick": None, "fit": {"available": False}, "line": ""},
         "light": light if isinstance(light, dict) else None,
         "backupOf": backup_of,
@@ -19377,6 +19689,15 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
                 accepted = _cultures_home_bottle_fill(bottle, share["ml"], now, config, name)
                 bottle_ml += accepted
                 words.append(f"{share['ml']:g} ml to the bottle" + (f" ({accepted:g} ml fitted)" if accepted < share["ml"] - 0.5 else ""))
+                # Stage D: with the keeper's count behind the index, the crop's
+                # density is an ESTIMATE the bottle can carry — the drip's line
+                # then reads it. Without a count the bottle stays uncounted.
+                est = _cultures_crop_estimate(jar, now)
+                if est is not None:
+                    bottle["cellsPerMl"] = est["cellsPerMl"]
+                    bottle["cellsPerMlSource"] = "index"
+                    bottle["cellsPerMlAt"] = now.isoformat()
+                    words.append(f"~{est['cellsPerMl']:,.0f} cells/ml estimated from your count")
             else:
                 words.append(f"{share['ml']:g} ml to the bottle (no room on the shelf — not counted)")
         elif share["to"] == "tank":
@@ -19504,6 +19825,20 @@ def _cultures_undo_apply(config: dict[str, Any], jar_id: str, stamp: str,
     if str(row.get("sign") or ""):
         state["lastSign"], state["lastSignAt"] = replay["lastSign"], replay["lastSignAt"]
         notes.append("sign withdrawn")
+    if row.get("event") == "index":
+        # Stage D: the last index re-reads the surviving rows; the look the
+        # reading logged goes with it (a sensor reading logged none).
+        last = next(((at, item) for at, item in reversed(cultures_engine._chronological(history))
+                     if item.get("event") == "index" and not item.get("undoneAt")), None)
+        state["lastIndexAt"] = last[0].isoformat() if last else ""
+        state["lastIndexOd"] = round(awc_engine._f(last[1].get("od")), 3) if last else 0.0
+        if str(row.get("source") or "") != "sensor":
+            looked = next((at.isoformat() for at, item in reversed(cultures_engine._chronological(history))
+                           if str(item.get("tint") or "") in cultures_engine.ALL_TINTS or item.get("secchiCm") is not None
+                           or (item.get("event") == "index" and str(item.get("source") or "") != "sensor")), "")
+            state["lastLookedAt"] = looked
+            _drop_completion(config, _cultures_task_id(jar_id, "look"), stamp)
+        notes.append("index reading taken back")
     if row.get("fed") is True or row.get("event") == "feed":
         # A journal cut short (600 rows) may have lost the seed row: the seed
         # fed the jar, so the start is the floor, never a blank clock.
@@ -26051,6 +26386,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cultures_split)
     websocket_api.async_register_command(hass, websocket_cultures_fresh_vessel)
     websocket_api.async_register_command(hass, websocket_cultures_refresh_backup)
+    websocket_api.async_register_command(hass, websocket_cultures_index)
+    websocket_api.async_register_command(hass, websocket_cultures_calibrate)
+    websocket_api.async_register_command(hass, websocket_cultures_index_blank)
     websocket_api.async_register_command(hass, websocket_consumable_mark_shaken)
     websocket_api.async_register_command(hass, websocket_cultures_crash)
     websocket_api.async_register_command(hass, websocket_cultures_bottle)

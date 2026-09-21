@@ -304,7 +304,10 @@ The original questions, for the record:
   second stepper YAML block or a phyto node, retract button, auto-bind suffixes, bench
   gates per the dosing-node doc.
 - **Stage D — the tint:** camera tint index, learned turnover, advisor suggest/apply;
-  Polyp Watch on the Dendro.
+  Polyp Watch on the Dendro. *The tint index shipped as the phyto CULTURE's Stage D (0.7.210,
+  docs/phyto-culture-brainstorm.md §13): the bottle's density, estimated from the vessel's
+  index through the keeper's count, flips this drip's line to density mode. Learned turnover
+  from the tank's own tint and Polyp Watch remain open.*
 
 ## 10. Stage A as built (2026-09-17) — the drip, no firmware
 

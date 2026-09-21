@@ -2058,6 +2058,14 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-apply-learned") this._culturesApplyLearned(id, target.dataset.field || "");
       if (action === "cultures-refresh-backup") this._culturesRefreshBackup(id);
       if (action === "cultures-print-secchi") this._culturesPrintSecchiStick(id);
+      if (action === "cultures-index-open") this._culturesIndexOpen(id, "phone");
+      if (action === "cultures-index-camera") this._culturesIndexOpen(id, "camera");
+      if (action === "cultures-index-close") { this._cultureIndexOpen = ""; this._cultureIndexDraft = null; this._render(); }
+      if (action === "cultures-index-reset") this._culturesIndexReset();
+      if (action === "cultures-index-tap") this._culturesIndexTap(target, event);
+      if (action === "cultures-index-log") this._culturesIndexLog();
+      if (action === "cultures-calibrate") this._culturesCalibrate(id);
+      if (action === "cultures-index-blank") this._culturesCall({ type: "openreef/cultures_index_blank", jar_id: id }, "Blank set — the sensor's readings are measured against it from now.");
       if (action === "cultures-enrich-done") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: true }, "Enriched rotifers bottled — the boost clock runs from now.");
       if (action === "cultures-enrich-plain") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: false }, "Bottled plain — still live food.");
       if (action === "nps-cysts-opened") this._npsCystsOpened(target.dataset.id || "");
@@ -2331,6 +2339,12 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.coralUpload != null) {
         const file = target.files && target.files[0];
         if (file) this._uploadCoralPhoto(target.dataset.coralUpload, file, target.dataset.checkin != null);
+        target.value = "";
+        return;
+      }
+      if (target.dataset.culturesIndexFile != null) {
+        const file = target.files && target.files[0];
+        if (file) this._culturesIndexLoadFile(file);
         target.value = "";
         return;
       }
@@ -2989,6 +3003,11 @@ class OpenReefPanel extends HTMLElement {
               jar.light = jar.light || { mode: "sun", switchEntity: "", onAt: "07:00", latestOff: "00:00", tempEntity: "" };
             }
           }
+        } else if (field.startsWith("index.")) {
+          // The index's sensors (doc §6, Stage D): optional pH probe and colour sensor entities.
+          jar.index = { phEntity: "", redEntity: "", greenEntity: "", blueEntity: "", ...(jar.index || {}) };
+          const key = field.slice(6);
+          if (["phEntity", "redEntity", "greenEntity", "blueEntity"].includes(key)) jar.index[key] = String(value || "").trim();
         } else if (field.startsWith("light.")) {
           // The light block (doc §5.6, Stage B): the mode, the lamp's plug,
           // the clock times, the vessel sensor — the hours are the cadence's.
@@ -8411,6 +8430,7 @@ class OpenReefPanel extends HTMLElement {
         ${this._coralDialogOpen ? this._coralDialog() : ""}
         ${this._coralDiaryOpen ? this._coralDiaryDialog() : ""}
         ${this._coralCheckinOpen ? this._coralCheckinDialog() : ""}
+        ${this._cultureIndexOpen ? this._cultureIndexDialog() : ""}
         ${this._coralFeedOpen ? this._coralFeedDialog() : ""}
         ${this._npsLibraryDialogOpen ? this._npsLibraryDialog() : ""}
         ${this._maintenanceTasksDialogOpen ? this._maintenanceTasksDialog() : ""}
@@ -13898,6 +13918,12 @@ const rigSteps = [
       secchi: { available: true, readings: 6, bands: { pale: 14, green: 8, dark: 4.5 }, counts: { pale: 2, green: 2, dark: 2 }, stick: { darkMaxCm: 6.3, greenMaxCm: 11 },
         fit: { available: true, points: 6, slopePerDay: -0.21, halvingDays: 3.3, r2: 0.8 }, daysToDark: 2.1, lastCm: 7,
         line: "Secchi: on your stick: dark ~4.5 cm, green ~8 cm, pale ~14 cm (6 readings) · the depth halves every ~3.3 d (6 readings, your fit) · today's 7 cm is ~2.1 d from dark" },
+      // Stage D: the index's bands and curve, no count yet, no sensors.
+      index: { available: true, readings: 7, bands: { pale: 0.2, green: 0.6, dark: 0.9 }, counts: { pale: 3, green: 2, dark: 2 }, darkOd: 0.9,
+        fit: { available: true, points: 7, ratePerDay: 0.255, doublingDays: 2.7, r2: 0.6 }, daysToDark: 1, readsDark: false, lastOd: 0.7, lastAt: iso(9), lastSource: "phone", looksOff: false,
+        line: "Index: your index: pale ~0.2, green ~0.6, dark ~0.9 (7 readings) · it doubles every ~2.7 d (7 readings, your fit) · today's 0.7 is ~1 d from dark",
+        calibration: null, estimate: null, ph: { available: false, trend: "unknown", line: "" }, phNow: { min: null, max: null, day: "" },
+        sensor: { bound: false, baseline: null, phEntity: "" }, note: "Depth on the stick, density from the index — neither counts cells until your own count calibrates it." },
       harvestGuide: { totalMl: 750, mixMl: 750, rodiMl: 0, targetPpt: 35 }, restartGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, fillGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 35 },
       history: [row("tint", 9, { tint: "green", tempC: 25.4 }), row("tint", 33, { tint: "green", tempC: 25.1 }), row("tint", 57, { tint: "pale", tempC: 24.8 }),
         row("harvest", 6 * 24, { ml: 750, tint: "dark", tempC: 25.0, dests: [{ to: "bottle", ml: 620 }, { to: "tank", ml: 130 }], freshMl: 750, nutrientMl: 1.1 }),
@@ -14156,6 +14182,208 @@ const rigSteps = [
     this._culturesCall({ type: "openreef/cultures_apply_learned", jar_id: jarId, field },
       field === "mode" ? "Daily mode — a small draw every day, sized to the culture; the split reminder now runs daily."
         : "Cadence set from the journal — the reminder follows it.");
+  }
+
+  // --- The index (doc §6, Stage D) ---------------------------------------------
+  // Two taps on a photo: the culture, then the white card behind it. The panel
+  // averages a small box of pixels around each tap and sends the channel
+  // means; the backend owns the maths (green_index) — the preview here is the
+  // same formula so the dialog can show the number before the tap lands.
+  _culturesIndexMaths(sample, ref) {
+    const od = (v, r) => {
+      if (!(r > 0)) return 0;
+      const t = Math.max(0.001, Math.min(1, v / r));
+      return Math.min(3, Math.max(0, -Math.log10(t)));
+    };
+    if (!sample || !ref) return null;
+    const odR = od(sample.r, ref.r), odG = od(sample.g, ref.g), odB = od(sample.b, ref.b);
+    const index = (odR + odG) / 2;
+    return { od: Math.round(index * 1000) / 1000, odR: Math.round(odR * 1000) / 1000, odG: Math.round(odG * 1000) / 1000, odB: Math.round(odB * 1000) / 1000,
+      brighter: sample.r > ref.r * 1.05 || sample.g > ref.g * 1.05, looksOff: odG > odR + 0.02 && index > 0.05 };
+  }
+
+  // The mean colour of a box (frac of the shorter side) around a point, read
+  // from any object with getImageData — a canvas context, or a test double.
+  _culturesIndexSample(ctx, w, h, x, y, frac = 0.04) {
+    const half = Math.max(2, Math.round(Math.min(w, h) * frac / 2));
+    const x0 = Math.max(0, Math.min(w - 1, Math.round(x) - half)), y0 = Math.max(0, Math.min(h - 1, Math.round(y) - half));
+    const bw = Math.min(w - x0, half * 2), bh = Math.min(h - y0, half * 2);
+    const data = ctx.getImageData(x0, y0, bw, bh).data;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < data.length; i += 4) { r += data[i]; g += data[i + 1]; b += data[i + 2]; n += 1; }
+    if (!n) return null;
+    return { r: Math.round(r / n * 10) / 10, g: Math.round(g / n * 10) / 10, b: Math.round(b / n * 10) / 10, box: { x: x0, y: y0, w: bw, h: bh } };
+  }
+
+  _culturesIndexOpen(jarId, source) {
+    this._cultureIndexOpen = jarId;
+    this._cultureIndexDraft = { source, imageUrl: "", width: 0, height: 0, culture: null, card: null, sample: null, ref: null, preview: null, error: "", loading: source === "camera" };
+    this._cultureIndexCanvas = null;
+    this._render();
+    if (source === "camera") this._culturesIndexGrabCamera();
+  }
+
+  _culturesIndexReset() {
+    const d = this._cultureIndexDraft;
+    if (!d) return;
+    Object.assign(d, { culture: null, card: null, sample: null, ref: null, preview: null, error: "" });
+    this._render();
+  }
+
+  async _culturesIndexLoadFile(file) {
+    const d = this._cultureIndexDraft;
+    if (!d) return;
+    try {
+      const bmp = await createImageBitmap(file);
+      this._culturesIndexUseSource(bmp, bmp.width, bmp.height);
+    } catch (err) {
+      d.error = err?.message || "That photo could not be read — try a JPEG";
+      this._render();
+    }
+  }
+
+  // The camera's live frame if the wall or the Cameras tab has one up, else
+  // HA's still image for the first configured camera — same taps either way.
+  async _culturesIndexGrabCamera() {
+    const d = this._cultureIndexDraft;
+    if (!d) return;
+    const root = this.shadowRoot;
+    const video = root && root.querySelector("video[data-camera-video]");
+    if (video && video.videoWidth && video.readyState >= 2) {
+      this._culturesIndexUseSource(video, video.videoWidth, video.videoHeight);
+      return;
+    }
+    const cam = Object.values(this._config?.cameras || {})[0];
+    const url = cam && this._cameraSnapshotUrl(cam.entity_id);
+    if (!url) {
+      d.loading = false;
+      d.error = "No camera frame to read — open the camera first, or use a photo";
+      this._render();
+      return;
+    }
+    const img = new Image();
+    img.onload = () => this._culturesIndexUseSource(img, img.naturalWidth, img.naturalHeight);
+    img.onerror = () => { d.loading = false; d.error = "The camera's still image could not be loaded — use a photo"; this._render(); };
+    img.src = url;
+  }
+
+  _culturesIndexUseSource(source, w, h) {
+    const d = this._cultureIndexDraft;
+    if (!d || !w || !h) return;
+    try {
+      const scale = Math.min(1, 1024 / Math.max(w, h));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+      this._cultureIndexCanvas = canvas;
+      Object.assign(d, { imageUrl: canvas.toDataURL("image/jpeg", 0.85), width: canvas.width, height: canvas.height,
+        culture: null, card: null, sample: null, ref: null, preview: null, error: "", loading: false });
+    } catch (err) {
+      Object.assign(d, { loading: false, error: err?.message || "The frame could not be read" });
+    }
+    this._render();
+  }
+
+  _culturesIndexTap(target, event) {
+    const d = this._cultureIndexDraft;
+    const canvas = this._cultureIndexCanvas;
+    if (!d || !canvas || !target?.getBoundingClientRect) return;
+    const rect = target.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const fx = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const fy = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+    this._culturesIndexPoint(fx, fy, canvas.getContext("2d"));
+  }
+
+  // The tap itself, in image fractions — the first is the culture, the second
+  // the card, a third starts over. Testable without a DOM.
+  _culturesIndexPoint(fx, fy, ctx) {
+    const d = this._cultureIndexDraft;
+    if (!d || !ctx) return;
+    const x = fx * d.width, y = fy * d.height;
+    const sample = this._culturesIndexSample(ctx, d.width, d.height, x, y);
+    if (!sample) return;
+    if (!d.culture || (d.culture && d.card)) {
+      Object.assign(d, { culture: { x: fx, y: fy }, card: null, sample, ref: null, preview: null });
+    } else {
+      Object.assign(d, { card: { x: fx, y: fy }, ref: sample });
+      d.preview = this._culturesIndexMaths(d.sample, d.ref);
+    }
+    this._render();
+  }
+
+  _culturesIndexLog() {
+    const d = this._cultureIndexDraft;
+    const jarId = this._cultureIndexOpen;
+    if (!d || !jarId || !d.sample || !d.ref) return;
+    const msg = { type: "openreef/cultures_index", jar_id: jarId, r: d.sample.r, g: d.sample.g, b: d.sample.b,
+      ref_r: d.ref.r, ref_g: d.ref.g, ref_b: d.ref.b, source: d.source === "camera" ? "camera" : "phone" };
+    this._cultureIndexOpen = "";
+    this._cultureIndexDraft = null;
+    this._cultureIndexCanvas = null;
+    this._culturesCall(msg, "Index logged — the look is done for today; the colour tap is still yours. Wrong shot? Take it back from the journal for a day.");
+  }
+
+  _culturesCalibrate(jarId) {
+    const box = this.shadowRoot?.querySelector(`[data-cultures-count="${jarId}"]`);
+    const cells = box && box.value !== "" ? Number(box.value) : NaN;
+    if (!Number.isFinite(cells) || cells < 0) {
+      this._cultures.message = "Enter the count as cells per ml (0 clears it).";
+      this._render();
+      return;
+    }
+    this._culturesCall({ type: "openreef/cultures_calibrate", jar_id: jarId, cells_per_ml: cells },
+      cells > 0 ? "Count saved — every later index is now an estimate of cells, and the bottle's density fills at the split." : "Count cleared — the index is a number again.");
+  }
+
+  _cultureIndexDialog() {
+    const jarId = this._cultureIndexOpen;
+    const d = this._cultureIndexDraft || {};
+    const jar = (this._cultures?.summary?.jars || []).find((j) => j.id === jarId) || { id: jarId, name: "phyto vessel", index: {} };
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const idx = jar.index || {};
+    const swatch = (rgb, label) => rgb ? `<span class="pill" style="display:inline-flex;align-items:center;gap:6px;"><span style="display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid rgba(255,255,255,0.3);background:rgb(${Math.round(rgb.r)},${Math.round(rgb.g)},${Math.round(rgb.b)})"></span>${esc(label)} R ${esc(Math.round(rgb.r))} G ${esc(Math.round(rgb.g))} B ${esc(Math.round(rgb.b))}</span>` : `<span class="pill muted">${esc(label)}: tap it</span>`;
+    const dot = (pt, glyph) => pt ? `<span style="position:absolute;left:${(pt.x * 100).toFixed(1)}%;top:${(pt.y * 100).toFixed(1)}%;transform:translate(-50%,-50%);font-size:20px;text-shadow:0 0 3px #000;pointer-events:none;">${glyph}</span>` : "";
+    const pv = d.preview;
+    const previewLine = pv
+      ? (pv.brighter ? `<small style="color:var(--warning-color,#f5a524)">The culture reads brighter than the card — the card was not lit the same. Re-shoot with the card right behind the vessel.</small>`
+        : `<small data-cultures-index-preview="${esc(pv.od)}">Index <strong>${esc(pv.od)}</strong> (red ${esc(pv.odR)}, green ${esc(pv.odG)}, blue ${esc(pv.odB)})${pv.looksOff ? ` · <span style="color:var(--warning-color,#f5a524)">reads yellow-brown, not green</span>` : ""}${idx.darkOd ? ` · your dark band is ~${esc(idx.darkOd)}` : ""}</small>`)
+      : d.culture ? `<small class="muted">Now tap the white card.</small>` : d.imageUrl ? `<small class="muted">Tap the culture first — a patch of the vessel with the card behind it.</small>` : "";
+    const canLog = !!(pv && !pv.brighter);
+    const calAge = idx.lastAt ? (Date.now() - Date.parse(idx.lastAt)) / 86400000 : null;
+    const calOk = calAge != null && calAge <= 2;
+    return `
+      <div class="modal">
+        <section class="wizard trend-dialog culture-index-dialog">
+          <button class="close" data-action="cultures-index-close" aria-label="Close">×</button>
+          <div class="live-trend-head">
+            <div>
+              <p class="eyebrow" style="margin:0;">The index · ${esc(jar.name)}</p>
+              <small class="muted">${d.source === "camera" ? "The camera's frame." : "A photo of the vessel with a white card behind it, in the same light."} Tap the culture, then the card. ${esc(idx.note || "")}</small>
+            </div>
+          </div>
+          ${d.source !== "camera" ? `<label class="secondary compact-button" style="display:inline-block;cursor:pointer;">📷 Take or choose a photo<input type="file" accept="image/*" capture="environment" data-cultures-index-file="${esc(jarId)}" hidden></label>` : ""}
+          ${d.loading ? `<p class="muted">Reading the camera…</p>` : ""}
+          ${d.error ? `<p style="color:var(--warning-color,#f5a524)">⚠ ${esc(d.error)}</p>` : ""}
+          ${d.imageUrl ? `
+          <div style="position:relative;display:inline-block;max-width:100%;">
+            <img src="${d.imageUrl}" alt="The vessel against the card" data-action="cultures-index-tap" data-cultures-index-image="${esc(jarId)}" style="max-width:100%;display:block;cursor:crosshair;border-radius:6px;">
+            ${dot(d.culture, "🟢")}${dot(d.card, "⚪")}
+          </div>
+          <div class="pill-row" style="margin-top:6px;">${swatch(d.sample, "culture")}${swatch(d.ref, "card")}</div>
+          ${previewLine}` : ""}
+          <div class="button-row" style="margin-top:8px;">
+            <button class="primary compact-button" data-action="cultures-index-log" ${canLog ? "" : "disabled"}>Log index</button>
+            <button class="secondary compact-button" data-action="cultures-index-reset" ${d.imageUrl ? "" : "disabled"}>Retap</button>
+            <button class="secondary compact-button" data-action="cultures-index-close">Close</button>
+          </div>
+          <div class="culture-form" style="margin-top:10px;">
+            <label class="culture-field" title="Counted this sample (a hemocytometer, a lab)? The count against the last index calibrates the curve: every later reading becomes an estimate of cells, and the home bottle's density fills at the split so the drip's line reads it. Only within two days of a reading. 0 clears it.">Count<span class="unit"><input type="number" min="0" step="100000" placeholder="${esc(idx.calibration?.cellsPerMl ? Number(idx.calibration.cellsPerMl).toLocaleString() : "cells per ml")}" data-cultures-count="${esc(jarId)}" ${calOk || idx.calibration ? "" : "disabled"}><small class="muted">cells/ml${calOk ? ` · against the index of ${esc(idx.lastOd)}` : idx.lastAt ? " · read the index first (within two days)" : " · read the index first"}</small></span></label>
+            <div class="culture-field"><span></span><button class="secondary compact-button" data-action="cultures-calibrate" data-id="${esc(jarId)}" ${calOk || idx.calibration ? "" : "disabled"}>Save count</button></div>
+          </div>
+        </section>
+      </div>`;
   }
 
   // The printable Secchi stick (doc §6, Stage C): true size — one SVG unit is
@@ -15466,6 +15694,18 @@ const rigSteps = [
     const secchi = j.secchi || {};
     const secchiLine = running && secchi.available && secchi.line ? `<small class="muted" data-culture-secchi="${esc(secchi.readings)}">${esc(secchi.line)}.</small>`
       : running ? `<small class="muted" data-culture-secchi="0">Secchi: no readings yet — print the stick, dip it until the disc vanishes, type the cm beside the colour; the tile learns your bands.</small>` : "";
+    // The index (doc §6, Stage D): the culture's optical density against the
+    // white card — a photo, the camera, a sensor — its bands and curve, the
+    // count behind it, the pH's slope. Numbers, never cells without a count.
+    const idx = j.index || {};
+    const indexLine = running && idx.available && idx.line
+      ? `<small ${idx.readsDark ? 'style="color:var(--warning-color,#f5a524)"' : 'class="muted"'} data-culture-index="${esc(idx.readings)}" title="${esc(idx.note || "")}">${esc(idx.line)}${idx.lastSource ? ` · last from the ${esc(idx.lastSource)}` : ""}.</small>`
+      : running ? `<small class="muted" data-culture-index="0">Index: no readings yet — photograph the vessel against a white card and tap the culture, then the card; the number follows the colour and, once you have counted a sample, becomes cells.</small>` : "";
+    const estimateLine = running && idx.estimate?.available ? `<small class="muted" data-culture-estimate>${esc(idx.estimate.note)}${idx.calibration?.at ? ` (counted ${esc(this._formatActivityTime(idx.calibration.at))})` : ""}.</small>`
+      : running && idx.calibration ? `<small class="muted" data-culture-estimate>Counted ${esc(Number(idx.calibration.cellsPerMl).toLocaleString())} cells/ml at an index of ${esc(idx.calibration.od)} — the next reading carries an estimate.</small>` : "";
+    const phLine = running && idx.ph?.available ? `<small ${idx.ph.trend === "falling" ? 'style="color:var(--warning-color,#f5a524)"' : 'class="muted"'} data-culture-ph="${esc(idx.ph.trend)}">${esc(idx.ph.line)}.</small>`
+      : running && idx.sensor?.phEntity && idx.phNow?.max != null ? `<small class="muted" data-culture-ph="today">pH today ${esc(idx.phNow.min)}–${esc(idx.phNow.max)} — the trend comes with a second day.</small>` : "";
+    const hasCamera = Object.keys(this._config?.cameras || {}).length > 0;
     const applyLines = running ? [
       learned.suggest?.splitIntervalDays != null && learned.daysToDark?.available
         ? `<small class="muted">Your vessel darkens in ~${esc(learned.daysToDark.days)} days (${esc(learned.daysToDark.samples)} cycles) — split every ${esc(learned.suggest.splitIntervalDays)}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${esc(j.id)}" data-field="splitIntervalDays">Apply</button></small>` : "",
@@ -15490,8 +15730,11 @@ const rigSteps = [
       running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${esc(j.id)}">Crashed</button>` : "",
       status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${esc(j.id)}" title="A picture of this vessel's story — the last 14 days of colour">Share card</button>` : "",
       `<button class="secondary compact-button" data-action="cultures-print-secchi" data-id="${esc(j.id)}" title="A printable Secchi stick at true size — cm marks, a disc, and your own colour bands once the readings accrue">Print Secchi stick</button>`,
+      running ? `<button class="secondary compact-button" data-action="cultures-index-open" data-id="${esc(j.id)}" title="Photograph the vessel against a white card, tap the culture, tap the card — the index is the culture's density against the card in the same light">Photo index</button>` : "",
+      running && hasCamera ? `<button class="secondary compact-button" data-action="cultures-index-camera" data-id="${esc(j.id)}" title="The same two taps on the camera's live frame">Camera index</button>` : "",
+      running && idx.sensor?.bound ? `<button class="secondary compact-button" data-action="cultures-index-blank" data-id="${esc(j.id)}" title="With clean water (or the empty shroud) in front of the colour sensor: its channels now become the blank every daily reading is measured against${idx.sensor.baseline?.at ? ` — last set ${esc(this._formatActivityTime(idx.sensor.baseline.at))}` : ""}">Set blank</button>` : "",
     ].filter(Boolean).join("");
-    const notes = [advice, risk, lightLine, jug, warn, sizing, seedLine, bottleLine, refreshLine, nutrient, starterLine, learnedLine, applyLines, secchiLine, lineageLine, tempLine].filter(Boolean).join("");
+    const notes = [advice, risk, lightLine, jug, warn, sizing, seedLine, bottleLine, refreshLine, nutrient, starterLine, learnedLine, applyLines, secchiLine, indexLine, estimateLine, phLine, lineageLine, tempLine].filter(Boolean).join("");
     return `
         <div class="culture-tile" data-culture="${esc(j.id)}" data-culture-kind="phyto">
           <div class="culture-jar">${this._culturesPhytoSvg(j)}</div>
@@ -15609,6 +15852,7 @@ const rigSteps = [
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const nutrient = jar?.nutrient || {};
     const light = jar?.light || {};
+    const index = jar?.index || {};
     return `
         <div class="stack" style="gap:6px;padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);" data-culture-settings-kind="phyto">
           <div class="mini-grid">
@@ -15645,6 +15889,12 @@ const rigSteps = [
             <label title="Lamp mode: on at this time for the light hours (07:00 + 16 h = 23:00). Sun + lamp falls back to it only when the sun cannot be read.">Lamp on at<input type="time" data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.onAt" value="${esc(light.onAt || "07:00")}"></label>
             <label title="Sun + lamp: the lamp never runs past this — a 16 h day always leaves the eight dark hours.">Latest off<input type="time" data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.latestOff" value="${esc(light.latestOff || "00:00")}"></label>
             <label title="Optional: a sensor in or on the vessel. A vessel in the sun runs over the room and over the rack sensor — without one the heat line is the rack's air, and says so.">Vessel sensor (optional)<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.tempEntity" value="${esc(light.tempEntity || "")}" placeholder="sensor.nanno_water"></label>
+          </div>
+          <div class="mini-grid" data-culture-index="${esc(jid)}">
+            <label title="Optional: a pH probe in the vessel — the cheapest 'is it alive' signal. pH climbs while the culture grows, flattens at stationary (split), falls on a crash. OpenReef banks the day's range and reads the trend from the daily maxima.">pH probe (optional)<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="index.phEntity" value="${esc(index.phEntity || "")}" placeholder="sensor.nanno_ph"></label>
+            <label title="Optional: a colour sensor in a shroud on the vessel (a TCS34725 on an ESPHome node reads a liquid at 3–10 mm with its own LED). Bind red and green, set the blank with clean water in front of it, and OpenReef reads the index once a day against that blank. The phone needs none of this.">Colour sensor · red (optional)<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="index.redEntity" value="${esc(index.redEntity || "")}" placeholder="sensor.nanno_red"></label>
+            <label title="The sensor's green channel.">Colour sensor · green<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="index.greenEntity" value="${esc(index.greenEntity || "")}" placeholder="sensor.nanno_green"></label>
+            <label title="The sensor's blue channel — reported, never used: blue carries nothing about chlorophyll.">Colour sensor · blue (optional)<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="index.blueEntity" value="${esc(index.blueEntity || "")}" placeholder="sensor.nanno_blue"></label>
           </div>
           <small class="awc-hint">The culture IS the colour: pale → green → dark under a 6000–6500 K lamp 10–15 cm away for 16 h, or the window while the days are long enough — the tile reads the sun and says when the days drop under 12 h; sun + lamp runs the plug from sunset so the day always adds up to the light hours with the eight dark hours kept. Direct sun cooks a vessel: yellowing and heat are the signs. <strong>Hygiene, said once:</strong> its own airline with a check valve, its own syringe and jug — never the rotifer kit. Tint and days do not count cells; the fridge bottle is uncounted (dose by tint) until something counts it.</small>
           <small class="awc-hint">Cadence — starting points. A dark look brings the split forward whatever the calendar says; the fresh vessel comes every few splits, or on a sign.</small>
