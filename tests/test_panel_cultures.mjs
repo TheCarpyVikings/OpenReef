@@ -727,7 +727,7 @@ test("the demo view stages a rack, refuses every tap, and hands the real rack ba
     panel._culturesToggleDemo();
     assert(panel._cultures.demo === true && panel._cultures.summary !== real, "the demo swaps the summary");
     const sum = panel._cultures.summary;
-    assert(sum.jars.length === 3 && sum.jars.map((j) => j.name).join(",") === "Rotifers A,Rotifers B,Pods", "two cones and the tub");
+    assert(sum.jars.length === 4 && sum.jars.map((j) => j.name).join(",") === "Rotifers A,Rotifers B,Pods,Nanno A", "two cones, the tub and the phyto vessel");
     assert(sum.enrichment.soak.status === "soaking" && sum.backup[1].guard.status === "warn" && sum.jars[0].learned.purge.available, "a soak, a warning, a journal that learned");
     const html = panel._culturesTab();
     assert(html.includes("Demo view — a staged rack") && html.includes("Exit demo"), "the banner and the exit button");
@@ -1086,6 +1086,269 @@ test("journal: a daily tap inside the day carries Undo, a ceremony and an old ro
     calls.length = 0;
     await panel._culturesUndo(jar.id, "");
     assert(calls.length === 0, "no stamp, no call");
+  } finally { restore(); }
+});
+
+
+// ---------------------------------------------------------------------------
+// 0.7.207 — the phyto vessel, Stage A (docs/phyto-culture-brainstorm.md §5.9)
+// ---------------------------------------------------------------------------
+function phytoJar(over = {}) {
+  return {
+    id: "n1", name: "Nanno A", species: "nanno", speciesName: "Nannochloropsis (phyto)", kind: "phyto",
+    latin: "Nannochloropsis oculata", volumeL: 4, salinityPpt: 35, vesselKind: "bottle", purgeMl: 0, sieveUm: 0, adultSieveUm: 0,
+    tintTarget: "dense, dark green", firstHarvestDays: 7, note: "The culture IS the colour.",
+    feed: { productId: "", productName: null, doseMl: 5 },
+    cadence: { feedIntervalH: 24, harvestIntervalDays: 8, harvestPct: 60, restartIntervalDays: 0, waterChangeIntervalDays: 0, waterChangePct: 0, splitPct: 60, splitIntervalDays: 8, restartCycles: 4, lightHours: 16 },
+    mode: "batch", workingL: 1.25, harvestTo: "bottle", hasBottle: false, hasHomeBottle: true, seededFrom: "", reseedFrom: [], reseedFromBottle: false, lastSign: "",
+    tints: ["pale", "green", "dark", "off"],
+    signs: [{ id: "yellow", label: "yellowing" }, { id: "brown", label: "browning" }, { id: "cloudy", label: "cloudy water" }, { id: "smell", label: "a smell" }],
+    state: { status: "producing", ageDays: 9, daysSinceRestart: 9, percent: 25, splitEligible: true, workingL: 1.25, mode: "batch",
+             cycle: { day: 8, ofDays: 8, percent: 100 }, daysSinceSplit: 8, darkDays: 1, peakHeld: false, cyclesSinceFresh: 1, restartCycles: 4, harvestBlocked: false,
+             feed: clock(false, 0, false), look: clock(true, 0), harvest: { ...clock(true, 0), reason: "dark" }, restart: clock(false, 3 * 8 * 24), waterChange: clock(false, 0, false),
+             nextChore: { key: "harvest", at: NOW, due: true, hoursUntil: 0 }, cadence: {} },
+    tint: "dark", due: ["look", "harvest"],
+    densityAdvice: { action: "split_now", reason: "dark — split now: the bottle, the tank, the drip" },
+    feedAdvice: { action: "split_now", reason: "dark — split now: the bottle, the tank, the drip" },
+    temp: { available: true, status: "ok", tempC: 23.5, minC: 20, maxC: 27, hardMaxC: 29, actC: 30, criticalC: 32, act: false },
+    guard: { available: false, status: "unknown", line: "" },
+    learned: { clearingH: { available: false }, firstHarvestDays: { available: false }, runLengthDays: { available: false }, yieldMlDay: null, suggest: {}, daysToDark: { available: true, days: 6, samples: 2 } },
+    risk: { level: "ok", reason: "no warning from the recorded observations" },
+    lineage: { generation: 1, fromName: "", line: "gen 1 · from the starter" },
+    tintStrip: ["", "", "", "", "", "pale", "pale", "green", "green", "green", "green", "dark", "dark", "dark"],
+    stagger: { available: false, days: null, idealDays: null, advice: "" },
+    splitGuide: { available: true, totalMl: 750, outMl: 750, freshMl: 750, refillMl: 750, mixMl: 750, rodiMl: 0, targetPpt: 35, mixPpt: 35, sg: 1.0264,
+                  nutrientMl: 1.1, nutrientMlPerL: 1.5, workingMlBefore: 1250, workingMlAfter: 1250, containerMl: 4000, scaleUp: false, removalPct: 60, seedPct: 40, warning: "", purgeMl: 0 },
+    seedGuides: { starter: { starterMl: 250, freshMl: 1000, workingL: 1.25, workingMl: 1250, nutrientMl: 1.5, mixMl: 1000, rodiMl: 0, targetPpt: 35, kitWorkingL: 3.5, ratio: 4 },
+                  kit: { starterMl: 250, freshMl: 3250, workingL: 3.5, workingMl: 3500, nutrientMl: 4.9, mixMl: 3250, rodiMl: 0, targetPpt: 35, kitWorkingL: 3.5, ratio: 13 } },
+    homeBottle: { productId: "home_phyto_n1", exists: true, name: "Home phyto (Nanno A)", remainingMl: 600, bottleMl: 1000, percent: 60, expiry: { status: "fresh", daysLeft: 15.2, ageDays: 5.8 },
+                  handDose: { planned: true, ml: 35, everyDays: 1, cadenceText: "every day", clock: clock(false, 6) }, shake: { applies: true, due: true, hoursSince: 50 }, daysUntilEmpty: 17, usageMlPerDay: 35 },
+    nutrient: { productId: "f2", productName: "Phytoplankton Nutrient (Guillard's f/2)", mlPerL: 1.5, remainingMl: 236.5, splitsLeft: 215, linked: true },
+    sizing: { available: true, yieldMlDay: 94, demandMlDay: 35, ratio: 2.7, idealL: 0.47, line: "the rack drinks ~35 ml a day (the tank's hand dose); this vessel makes ~94 at a 60 % split every 8 days — 3× more than it needs" },
+    starter: { available: true, status: "fresh", daysLeft: 19, ageDays: 9, openedAt: iso(9 * 24), arrivalTint: "green" },
+    drips: [{ id: "drip", name: "Phyto drip", linked: true }], hygiene: "Its own airline — never the rotifer kit.", nutrientNote: "f/2 with NEW water only.",
+    harvestGuide: { totalMl: 750, mixMl: 750, rodiMl: 0, targetPpt: 35 }, restartGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 },
+    fillGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 35 },
+    history: [{ event: "tint", at: iso(2), ml: 0, tint: "dark", from: "", sign: "", eggRatio: null, tempC: 23.4, secchiCm: 7 },
+              { event: "harvest", at: iso(8 * 24), ml: 750, tint: "dark", from: "", sign: "", eggRatio: null, tempC: 23.1, dests: [{ to: "bottle", ml: 600 }, { to: "tank", ml: 150 }], freshMl: 750, nutrientMl: 1.1 },
+              { event: "seeded", at: iso(17 * 24), ml: 1250, tint: "pale", from: "", sign: "", eggRatio: null, tempC: null, freshMl: 1000, nutrientMl: 1.5, arrivalTint: "green" }],
+    timeline: { days: 30, since: iso(30 * 24), tintBefore: "", marks: [], spans: [] },
+    ...over,
+  };
+}
+
+function phytoSummary(jar = phytoJar()) {
+  const base = summaryFixture([jar]);
+  return { ...base, backup: [{ species: "nanno", speciesName: "Nannochloropsis (phyto)", running: 1, backedUp: false, continuityDays: 9, guard: { available: false, status: "unknown", line: "" } }],
+    nextHarvest: { status: "none", hoursUntil: null, driver: null }, maxJars: 6,
+    rig: { stage: "split", caption: "SPLIT — Nanno A: 750 ml out → the bottle / the tank / the drip · 750 ml fresh @ 35 ppt + 1.1 ml f/2", cones: [], tub: null,
+           jug: { mode: "fill", harvestMl: 0, mixMl: 0, rodiMl: 0, ppt: 35, purgeMl: 0, sieveUm: 50 }, bottle: { ml: 0, pct: 0, status: "empty" },
+           phyto: [{ id: "n1", name: "Nanno A", kind: "bottle", status: "producing", tint: "dark", pct: 100, airOn: true, lightOn: true, splitHot: true, freshHot: false, lookHot: true,
+                     offColour: false, peakHeld: false, advice: "split_now", tempStatus: "ok", establishDays: null, firstHarvestDays: 7, cycleDay: 8, cycleOf: 8, workingL: 1.25, bottleMl: 600, bottleStatus: "fresh", scaleUp: false }],
+           phytoJug: { jarName: "Nanno A", outMl: 750, freshMl: 750, mixMl: 750, rodiMl: 0, ppt: 35, nutrientMl: 1.1, scaleUp: false, workingLAfter: 1.25, available: true, reason: "" } },
+    species: [...base.species, { id: "nanno", name: "Nannochloropsis (phyto)", kind: "phyto", vesselKind: "bottle", salinityPpt: 35, splitPct: 60, splitIntervalDays: 8, restartCycles: 4, lightHours: 16, nutrientMlPerL: 1.5, starterMl: 250, volumeL: 4, firstHarvestDays: 7 }],
+    phytoTints: ["pale", "green", "dark", "off"], phytoSigns: jar.signs };
+}
+
+function phytoConfig() {
+  return baseConfig({
+    nps: { enabled: false, cultures: { enabled: true, tempEntity: "", jars: {
+      n1: { name: "Nanno A", species: "nanno", vesselKind: "bottle", volumeL: 4, salinityPpt: 35, starterMl: 250, harvestTo: "bottle", mode: "batch",
+            nutrient: { productId: "f2", mlPerL: 1.5 }, bottleMl: 1000, feed: { productId: "", doseMl: 5 }, cadence: {},
+            state: { startedAt: iso(9 * 24), lastRestartAt: iso(9 * 24), lastHarvestAt: iso(8 * 24), lastLookedAt: iso(2), lastTint: "dark", workingL: 1.25, cyclesSinceFresh: 1 }, history: [] },
+    }, bottle: { volumeMl: 1000, remainingMl: 0, filledAt: "", doseMl: 20 } }, hatchery: { enabled: false, vessels: {}, reservoir: {} } },
+    consumables: { products: {
+      f2: { name: "Phytoplankton Nutrient (Guillard's f/2)", bottleMl: 250, remainingMl: 236.5, history: [] },
+      home_phyto_n1: { name: "Home phyto (Nanno A)", brand: "Home culture", category: "phyto", bottleMl: 1000, remainingMl: 600, refrigerated: true, stirDaily: true, shelfLifeDaysOpened: 21, openedAt: iso(6 * 24), history: [], doseMl: 35, doseEveryDays: 1 },
+    } },
+    dosing: { channels: { drip: { name: "Phyto drip", chemical: "food", enabled: true, schedule: { enabled: true, mlPerDay: 40, standing: { enabled: true } }, reservoir: { productId: "home_phyto_n1", productIsBottle: false, volumeMl: 500, remainingMl: 100 } } } },
+  });
+}
+
+test("the phyto tile: the lit vessel, the colour + Secchi row, the split form with its shares, the notes and the taps", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel(phytoConfig(), phytoSummary());
+    const html = panel._culturesTab();
+    noPlaceholders(html, "phyto tile");
+    assert(html.includes('data-culture-kind="phyto"') && html.includes('data-culture-phyto-svg="n1"'), "the tile and its lit vessel");
+    assert(html.includes("Phyto, on its own clock"), "a phyto-only rack changes the headline");
+    assert(html.includes("cycle day 8 of ~8") && html.includes("1.25 L working"), "the cycle ring and the working volume");
+    assert(html.includes("split due · it reads dark") && html.includes("look due"), `the chips speak phyto: ${html.match(/<span class="pill warning"[^>]*>[^<]*/g)}`);
+    assert(html.includes('data-cultures-tint="n1"') && html.includes('<option value="pale"') && html.includes('<option value="dark"'), "the colour select on the phyto scale");
+    assert(!html.includes('<option value="clearing"'), "the rotifer scale must not leak onto the vessel");
+    assert(html.includes('data-cultures-secchi="n1"'), "the Secchi box");
+    assert(html.includes('data-cultures-split-ml="n1"') && html.includes('value="750"'), "the split's out box defaults to the jug");
+    assert(html.includes('data-cultures-dest-bottle="n1"') && html.includes('data-cultures-dest-tank="n1"') && html.includes('data-cultures-dest-drip="n1"') && html.includes('data-cultures-dest-vessel="n1"'), "every destination");
+    assert(html.includes('data-cultures-dest-tank-ml="n1"') && html.includes('value="35"'), "the tank share defaults to the bottle's dose");
+    assert(html.includes('data-cultures-working-after="n1"') && html.includes('data-cultures-f2="n1"') && html.includes("1.1 ml off Phytoplankton Nutrient"), "the scale-up box and the f/2 tick");
+    assert(html.includes('data-culture-density="split_now"') && html.includes("dark — split now"), "the density advice");
+    assert(html.includes("jug: 750 ml out · 750 ml fresh @ 35 ppt + 1.1 ml f/2 · 40 % stays as seed"), "the jug line");
+    assert(html.includes("data-culture-sizing") && html.includes("this vessel makes ~94"), "the sizing line");
+    assert(html.includes("fridge bottle: 600 of 1000 ml · 15.2 d left · ~17 d at the tank's rate · <span") && html.includes("shake it") && html.includes("tank dose 35 ml every day — the shelf's Dosed tap"), "the home bottle line");
+    assert(html.includes("data-culture-nutrient") && html.includes("236.5 ml ≈ 215 splits"), "the f/2 budget");
+    assert(html.includes("starter bottle: 19 d of its four weeks left · arrived green"), "the starter's clock");
+    assert(html.includes("darkens in ~6 days (2 cycles)"), "the learned days-to-dark");
+    assert(html.includes('data-action="cultures-looked" data-id="n1"') && html.includes('data-action="cultures-split-phyto" data-id="n1"') && html.includes('data-action="cultures-fresh-vessel" data-id="n1"'), "Looked / Split / Fresh vessel");
+    assert(!html.includes('data-action="cultures-fed" data-id="n1"') && !html.includes('data-action="cultures-harvested" data-id="n1"') && !html.includes('data-action="cultures-restart" data-id="n1"'), "a vessel is never fed, harvested or restarted");
+    assert(html.includes('data-sign="yellow"') && !html.includes('data-sign="milky"'), "the phyto signs");
+    assert(html.includes("SPLIT — Nanno A") && html.includes('data-cultures-phyto="n1"'), "the rig draws the lit vessel and names the split");
+    assert(html.includes("split") && html.includes("→ 600 ml bottle + 150 ml tank · 750 ml fresh + 1.1 ml f/2") && html.includes("looked · Secchi 7 cm"), "the journal speaks phyto");
+    assert(!html.includes("Rotifer bottle"), "no rotifer bottle tile on a phyto-only rack");
+    assert(html.includes("1 chore") || html.includes("2 chores"), "the mission row counts the chores");
+  } finally { restore(); }
+});
+
+test("the seed card: the arrival check gates the tap, both recipes, the fridge-bottle reseed after a crash", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const empty = phytoJar({ tint: "", due: [], state: { ...phytoJar().state, status: "none", ageDays: null, workingL: 0, cycle: {}, harvest: clock(false, 0, false), look: clock(false, 0, false), restart: clock(false, 0, false) },
+      homeBottle: { productId: "home_phyto_n1", exists: false, remainingMl: 0, bottleMl: 1000, expiry: { status: "empty" }, handDose: {}, shake: { applies: false, due: false } }, densityAdvice: { action: "none", reason: "" }, risk: { level: "ok", reason: "" }, history: [] });
+    const panel = await culturesPanel(phytoConfig(), phytoSummary(empty));
+    const html = panel._culturesTab();
+    noPlaceholders(html, "phyto seed card");
+    assert(html.includes('data-cultures-arrival="n1"') && html.includes("off — grey, brown, cloudy, a smell"), "the arrival check");
+    assert(html.includes('data-cultures-starter-ml="n1"') && html.includes('data-cultures-working-l="n1"') && html.includes('data-cultures-starter-opened="n1"'), "the recipe's boxes");
+    assert(html.includes("recipe: 250 ml starter + 1000 ml of 35 ppt water + 1.5 ml f/2 → 1.25 L · the kit's 3.5 L wants 3250 ml + 4.9 ml f/2"), "the recipe line");
+    assert(html.includes('data-action="cultures-seed-phyto" data-id="n1"') && html.includes('data-recipe="kit"') && html.includes("Seed at 3.5 L"), "both recipes");
+    assert(html.includes("The day the parcel lands") && html.includes("Phyto into the vessel.") && html.includes("Hygiene, said once") && !html.includes("Rotifers into the cone"), "the walkthrough speaks to the vessel only");
+    assert(html.includes("the home fridge bottle joins the food shelf when you seed"), "the bottle is promised");
+    // The tap refuses without the arrival check; with it, the recipe rides the call.
+    const calls = [];
+    panel._callWS = async (call) => { calls.push(call); return {}; };
+    panel._culturesLoadSummary = async () => {};
+    panel.shadowRoot = { querySelector: (sel) => {
+      if (sel.includes("data-cultures-arrival")) return { value: panel._arrivalValue || "" };
+      if (sel.includes("data-cultures-starter-ml")) return { value: "250" };
+      if (sel.includes("data-cultures-working-l")) return { value: "1.25" };
+      if (sel.includes("data-cultures-starter-opened")) return { value: "2026-09-01" };
+      return null;
+    } };
+    panel._culturesPhytoSeed("n1");
+    assert(calls.length === 0 && /Look at the starter/.test(panel._cultures.message), "no arrival check, no call");
+    panel._arrivalValue = "green";
+    await panel._culturesPhytoSeed("n1");
+    assert(calls[0].type === "openreef/cultures_seed" && calls[0].arrival_tint === "green" && calls[0].starter_ml === 250 && calls[0].working_l === 1.25 && calls[0].starter_opened_at.startsWith("2026-09-01"), JSON.stringify(calls[0]));
+    calls.length = 0;
+    await panel._culturesPhytoSeed("n1", "kit");
+    assert(calls[0].working_l === 3.5, "the kit button seeds at 3.5 L");
+    // A crashed vessel with a young bottle offers the fridge reseed.
+    const crashed = phytoJar({ reseedFromBottle: true, tint: "", due: [], state: { ...phytoJar().state, status: "crashed" }, densityAdvice: { action: "none", reason: "" }, risk: { level: "ok", reason: "" } });
+    const html2 = (await culturesPanel(phytoConfig(), phytoSummary(crashed)))._culturesTab();
+    assert(html2.includes('data-action="cultures-seed-bottle" data-id="n1"') && html2.includes("Seed from the fridge bottle"), "the young bottle is a starter");
+  } finally { restore(); }
+});
+
+test("the split tap sends the shares, the scale-up and the f/2; the fresh vessel is the same form; a blocked vessel disables Split", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel(phytoConfig(), phytoSummary());
+    const calls = [];
+    panel._callWS = async (call) => { calls.push(call); return {}; };
+    panel._culturesLoadSummary = async () => {};
+    const values = { "data-cultures-split-ml": "750", "data-cultures-dest-bottle": true, "data-cultures-dest-bottle-ml": "", "data-cultures-dest-tank": true, "data-cultures-dest-tank-ml": "150",
+                     "data-cultures-dest-drip": false, "data-cultures-dest-vessel": false, "data-cultures-working-after": "1.25", "data-cultures-f2": true, "data-cultures-tint": "dark", "data-cultures-secchi": "7" };
+    panel.shadowRoot = { querySelector: (sel) => {
+      const key = Object.keys(values).find((k) => sel.includes(`[${k}=`));
+      if (!key) return null;
+      const v = values[key];
+      return typeof v === "boolean" ? { checked: v, value: "" } : { value: v, checked: false };
+    } };
+    await panel._culturesPhytoSplit("n1");
+    const call = calls[0];
+    assert(call.type === "openreef/cultures_split" && call.ml === 750 && call.nutrient === true && call.tint === "dark" && call.secchi_cm === 7, JSON.stringify(call));
+    assert(JSON.stringify(call.to) === JSON.stringify([{ to: "bottle", ml: 600 }, { to: "tank", ml: 150 }]), `a blank bottle share takes the rest: ${JSON.stringify(call.to)}`);
+    assert(!("fresh_ml" in call), "like for like — no fresh_ml");
+    // The scale-up: the working volume after moves, the fresh water follows.
+    values["data-cultures-working-after"] = "3.5";
+    values["data-cultures-dest-drip"] = true;
+    values["data-cultures-f2"] = false;
+    calls.length = 0;
+    await panel._culturesPhytoSplit("n1");
+    assert(calls[0].fresh_ml === 3000 && calls[0].nutrient === false, `750 out, 3.5 L after → 3000 ml fresh: ${JSON.stringify(calls[0])}`);
+    assert(calls[0].to.some((s) => s.to === "drip" && s.ml === 0), "the drip share rides without a number — the jar takes what fits");
+    calls.length = 0;
+    await panel._culturesPhytoSplit("n1", true);
+    assert(calls[0].type === "openreef/cultures_fresh_vessel" && calls[0].ml === 750, "the fresh vessel is the same form");
+    // Blocked: the Split button is disabled, the advice says hold, the rig says off-colour.
+    const blocked = phytoJar({ tint: "off", due: ["restart"], state: { ...phytoJar().state, harvestBlocked: true, splitEligible: false, restart: { ...clock(true, 0), reason: "sign" } },
+      densityAdvice: { action: "hold", reason: "off-colour — do not harvest into anything" }, lastSign: "brown", risk: { level: "act", reason: "off-colour — harvest into nothing" } });
+    const sum = phytoSummary(blocked);
+    sum.rig = { ...sum.rig, stage: "off_colour", caption: "OFF-COLOUR — Nanno A: harvest into nothing", phyto: [{ ...sum.rig.phyto[0], tint: "off", offColour: true, splitHot: false, freshHot: true }] };
+    const html = (await culturesPanel(phytoConfig(), sum))._culturesTab();
+    assert(/data-action="cultures-split-phyto" data-id="n1"[^>]*disabled/.test(html), "Split is disabled while blocked");
+    assert(html.includes('data-culture-density="hold"') && html.includes("fresh vessel due · a sign") && html.includes("OFF-COLOUR — Nanno A"), "the hold, the chip, the rig");
+    assert(!html.includes('data-cultures-split-ml="n1"'), "no split form while blocked");
+  } finally { restore(); }
+});
+
+test("settings: the phyto row, its cadences and the add button; reminders seed look / split / fresh vessel and no feed", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel(phytoConfig(), phytoSummary());
+    const html = panel._culturesSettings();
+    noPlaceholders(html, "phyto settings");
+    assert(html.includes('data-culture-settings-kind="phyto"'), "the phyto row");
+    assert(html.includes('data-field="harvestTo"') && html.includes('value="source"') && html.includes("the home fridge bottle (the default)"), "split goes to");
+    assert(html.includes('data-field="nutrientProductId"') && html.includes('data-field="nutrientMlPerL"') && html.includes('data-field="bottleMl"') && html.includes('data-field="mode"'), "the f/2 link, the bottle size, the mode");
+    assert(html.includes('data-field="splitPct"') && html.includes('data-field="splitIntervalDays"') && html.includes('data-field="restartCycles"') && html.includes('data-field="lightHours"'), "the four cadences");
+    assert(!html.includes('data-id="n1" data-field="feedIntervalH"') && !html.includes('data-id="n1" data-field="purgeMl"'), "no feed, no purge on a vessel");
+    assert(html.includes("Hygiene, said once") && html.includes('data-action="cultures-add-phyto"') && html.includes("up to 6"), "the hint, the add button, the cap");
+    assert(html.includes('<option value="nanno"'), "the species picker offers the vessel");
+    // Add a phyto vessel from the button: the defaults land in the config.
+    panel._culturesAddJar("nanno");
+    const added = Object.values(panel._config.nps.cultures.jars).find((j) => j.name === "Nanno 2" || (j.species === "nanno" && j.name !== "Nanno A"));
+    assert(added && added.vesselKind === "bottle" && added.volumeL === 4 && added.bottleMl === 1000 && added.mode === "batch", `the added vessel: ${JSON.stringify(added)}`);
+    delete panel._config.nps.cultures.jars[Object.keys(panel._config.nps.cultures.jars).find((k) => panel._config.nps.cultures.jars[k] === added)];
+    // Reminders for the vessel.
+    panel._culturesSeedReminders();
+    const tasks = panel._config.maintenance.tasks;
+    assert(tasks.culture_n1_look && tasks.culture_n1_look.cadenceDays === 1 && tasks.culture_n1_look.label === "Look at Nanno A", "the daily look");
+    assert(tasks.culture_n1_harvest && tasks.culture_n1_harvest.cadenceDays === 8 && tasks.culture_n1_harvest.label === "Split Nanno A", "the split on the split clock");
+    assert(tasks.culture_n1_restart && tasks.culture_n1_restart.cadenceDays === 32 && /Fresh vessel/.test(tasks.culture_n1_restart.label), "the fresh vessel every four splits");
+    assert(!tasks.culture_n1_feed && !tasks.culture_n1_water_change, "no feed, no water change");
+    const comps = panel._config.maintenance.completions;
+    assert(comps.culture_n1_look?.length === 1 && comps.culture_n1_harvest?.length === 1, "anchored on the look and the split stamps");
+    // The maintenance state reads the vessel's look clock through the summary.
+    panel._config.maintenance.enabled = true;
+    const state = panel._maintenanceDueState("culture_n1_look");
+    assert(state.status === "warning" && state.label === "due", `the look is due on the vessel's clock: ${JSON.stringify(state)}`);
+  } finally { restore(); }
+});
+
+test("the shelf: the home bottle's Shaken tap and chip; the drip's Loaded debits a home bottle; the hub names the vessel", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel(phytoConfig(), phytoSummary());
+    const product = panel._config.consumables.products.home_phyto_n1;
+    const state = { bottleMl: 1000, remainingMl: 600, percent: 60, usageMlPerDay: 35, daysUntilEmpty: 17, low: false, empty: false,
+      expiry: { status: "fresh", daysLeft: 15 }, stirDaily: true, refrigerated: true, categoryLabel: "Phytoplankton",
+      handDose: { planned: true, ml: 35, everyDays: 1, cadenceText: "every day", clock: clock(false, 6), guide: { available: false }, lastAt: "", note: "" },
+      shake: { applies: true, due: true, hoursSince: 50, lastAt: "" } };
+    const card = panel._npsProductCard("home_phyto_n1", product, state);
+    noPlaceholders(card, "home bottle card");
+    assert(card.includes('data-action="nps-product-shaken" data-id="home_phyto_n1"') && card.includes("Shake it") && card.includes("Dosed 35 ml"), "Shaken beside Dosed");
+    const dry = panel._npsProductCard("f2", panel._config.consumables.products.f2, { ...state, shake: { applies: false, due: false }, stirDaily: false, refrigerated: false });
+    assert(!dry.includes("nps-product-shaken"), "a still bottle has no Shaken");
+    assert(panel._doserLoadsFromHomeBottle("drip") === true, "the drip draws from the home bottle");
+    panel._config.dosing.channels.drip.reservoir.productId = "rj";
+    assert(panel._doserLoadsFromHomeBottle("drip") === false, "a shop bottle keeps the old Loaded");
+    const hub = panel._hubTab("feeding");
+    assert(hub.includes("Nanno A · day 8 · dark") && hub.includes("split now") && hub.includes("bottle 600 ml, 15 d left"), `the hub line: ${hub.match(/Nanno A[^<]*/)}`);
+  } finally { restore(); }
+});
+
+test("the demo rack carries the phyto vessel and renders without placeholders", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await culturesPanel();
+    const demo = panel._culturesDemoData().summary;
+    assert(demo.jars.some((j) => j.kind === "phyto") && demo.rig.phyto.length === 1 && demo.maxJars === 6, "the staged rack has a vessel");
+    panel._cultures.summary = demo;
+    panel._cultures.demo = true;
+    const html = panel._culturesTab();
+    noPlaceholders(html, "demo tab with the vessel");
+    assert(html.includes("Nanno A") && html.includes('data-culture-kind="phyto"') && html.includes('data-cultures-phyto="n"'), "the vessel on the demo rack and rig");
   } finally { restore(); }
 });
 

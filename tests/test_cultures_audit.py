@@ -288,6 +288,60 @@ def test_history_retention_supports_learning_and_a_week_of_frequent_feeds():
     assert len(normal['bottle']['history']) == 168 and len(normal['jars']['c1']['history']) == 168
 
 
+def test_split_guide_conserves_volume_and_f2_rides_the_fresh_water_only():
+    """0.7.207: what leaves plus what stays plus what comes in balance to the
+    working volume after; the f/2 is by the FRESH litres, never the vessel."""
+    for working in (0.5, 1.25, 3.5):
+        for pct in (30, 50, 60, 70, 90):
+            for fresh_extra in (0, 500, 2000):
+                jar = {"species": "nanno", "volumeL": 4, "salinityPpt": 35, "cadence": {"splitPct": pct},
+                       "nutrient": {"productId": "", "mlPerL": 1.5}, "state": {"workingL": working}}
+                out = working * 1000 * pct / 100
+                g = cultures.split_guide(jar, 35, None, out + fresh_extra)
+                assert g["outMl"] == round(out, 1)
+                assert g["freshMl"] == round(out + fresh_extra, 1)
+                assert g["mixMl"] + g["rodiMl"] == g["freshMl"] and g["rodiMl"] == 0
+                assert g["workingMlAfter"] == round(working * 1000 - g["outMl"] + g["freshMl"])
+                assert g["nutrientMl"] == round(g["freshMl"] / 1000 * 1.5, 1), "f/2 by the new water"
+                assert g["scaleUp"] == (fresh_extra > 0)
+                if g["workingMlAfter"] > 4000:
+                    assert g["available"] is False, "the container is a fact"
+                else:
+                    assert g.get("available", True)
+    jar = {"species": "nanno", "volumeL": 4, "salinityPpt": 35, "cadence": {}, "nutrient": {}, "state": {"workingL": 2}}
+    assert cultures.split_guide(jar, 35, 500, 0)["nutrientMl"] == 0, "nothing in, no f/2"
+    seed = cultures.seed_guide(jar, 35, 250, 2.0)
+    assert seed["starterMl"] + seed["freshMl"] == seed["workingMl"] and seed["nutrientMl"] == round(seed["freshMl"] / 1000 * 1.5, 1)
+
+
+def test_phyto_split_refusals_leave_no_ledger_behind():
+    """A refused split writes nothing: not the journal, not the bottle, not the
+    f/2, not the station — every check runs before the first write."""
+    jar = {"name": "Nanno A", "species": "nanno", "vesselKind": "bottle", "volumeL": 4, "salinityPpt": 35,
+           "starterMl": 250, "nutrient": {"productId": "f2", "mlPerL": 1.5}, "bottleMl": 1000,
+           "feed": {"productId": "", "doseMl": 5}, "cadence": {}, "history": [],
+           "state": {"startedAt": _iso(REAL - timedelta(days=9)), "lastRestartAt": _iso(REAL - timedelta(days=9)),
+                     "lastTint": "dark", "workingL": 1.25}}
+    products = {"f2": {"name": "f/2", "bottleMl": 250.0, "remainingMl": 250.0, "history": []}}
+    entry = _entry(jars={"c1": jar}, products=products)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    debits = []
+    real = integration._mixing_hatchery_debit
+    integration._mixing_hatchery_debit = lambda h, c, litres, note: debits.append(litres)
+    try:
+        for msg in ({"ml": 5000}, {"ml": 500, "to": [{"to": "bottle", "ml": 600}]}, {"ml": 500, "to": [{"to": "moon", "ml": 5}]},
+                    {"ml": 500, "to": [{"to": "drip", "ml": 500}]}, {"ml": 750, "fresh_ml": 9000}, {"ml": -1}):
+            run(integration.websocket_cultures_split(hass, conn, {"id": 1, "jar_id": "c1", **msg}))
+            assert conn.errors and conn.errors[-1].code in ("invalid_volume", "unknown_destination", "no_drip"), msg
+        cfg = _config(entry)
+        assert cfg["nps"]["cultures"]["jars"]["c1"]["history"] == [] and cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] == "dark"
+        assert cfg["consumables"]["products"]["f2"]["remainingMl"] == 250.0 and "home_phyto_c1" not in cfg["consumables"]["products"]
+        assert debits == []
+    finally:
+        integration._mixing_hatchery_debit = real
+
+
 if __name__ == '__main__':
     names = [k for k in sorted(globals()) if k.startswith('test_')]
     failures = 0

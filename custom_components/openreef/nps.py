@@ -27,7 +27,7 @@ from .awc import _f, _parse_iso
 from .dosing import compile_schedule, is_standing, standing_state
 # The jar's own harvest clock (0.7.158): the strip reads the same function the
 # Cultures card and the culture reminders read — never a re-derived copy.
-from .cultures import culture_state
+from .cultures import culture_state, species_kind
 
 RUNWAY_WINDOW_DAYS = 14        # usage averaging window for days-left forecasts
 LOW_PERCENT_DEFAULT = 10.0     # lowThresholdMl 0 = auto ⇒ this % of the bottle
@@ -170,6 +170,15 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "notes": "A mixed Tisbe / Tigriopus / Apocyclops pouch — pour in after lights-out, some "
               "into the refugium to seed it. A few days chilled at most; the supplier's "
               "directions win."},
+    # The phyto culture's shelf (docs/phyto-culture-brainstorm.md §2.1, §4.3):
+    # the nutrient the split debits by the FRESH litres. Not a food — never a
+    # tank dose; the Cultures tab's seed/split ceremonies are its only taps.
+    {"name": "Phytoplankton Nutrient (Guillard's f/2)", "brand": "Reefphyto", "category": "other",
+     "bottleMl": 250, "shelfLifeDaysOpened": 365, "refrigerated": True, "stirDaily": False,
+     "particleUmMin": 0, "particleUmMax": 0,
+     "notes": "Guillard's f/2 for the home phyto vessel: 1.5 ml per litre of NEW water at a seed, "
+              "a split or a fresh vessel — never re-dosed mid-cycle (the label wins). Link it to the "
+              "vessel in Culture settings and every split debits it. Not a tank dose."},
     {"name": "Live rotifers (fridge bottle)", "brand": "Home culture", "category": "zooLive",
      "bottleMl": 1000, "shelfLifeDaysOpened": 5, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 90, "particleUmMax": 360,
@@ -255,6 +264,12 @@ LIVE_BRINE_CONTAINER_ID = "live_brine_container"
 LIVE_BRINE_BOTTLE_ID = "live_brine_bottle"
 LIVE_ROTIFER_BOTTLE_ID = "live_rotifer_bottle"
 LIVE_ROTIFER_CONE_PREFIX = "live_rotifer_cone_"     # + the jar id (0.7.161)
+# The home phyto bottle (docs/phyto-culture-brainstorm.md §5.4): a REAL shelf
+# product the Cultures tab creates with a phyto vessel and fills at each split
+# — the tank's daily driver through the shelf's own hand-dose plan. Id = the
+# prefix + the jar id; the jar's ``bottleProductId`` may point elsewhere.
+HOME_PHYTO_PREFIX = "home_phyto_"
+SHAKE_EVERY_H = 48.0                                 # Reefphyto: shake the bottle every 1–2 days
 LIVE_USAGE_ROWS = 60                                 # a source's usage rows carried into the shelf
 LIVE_BRINE_VESSELS = {
     "container": {"id": LIVE_BRINE_CONTAINER_ID, "kind": "brine",
@@ -288,10 +303,38 @@ def live_brine_library() -> dict[str, Any]:
 
 
 def _harvest_went_to_tank(row: dict[str, Any], bottle_species: bool) -> bool:
-    """A harvest row that fed the tank: stamped ``to: tank`` (0.7.161), or an
+    """A harvest row that fed the tank: stamped ``to: tank`` (0.7.161), a
+    phyto split with a tank share among its destinations (``dests``), or an
     older row from a species that never had a bottle."""
     to = str(row.get("to") or "")
-    return to == "tank" or (not to and not bottle_species)
+    if to == "tank" or (not to and not bottle_species):
+        return True
+    dests = row.get("dests")
+    return any(isinstance(d, dict) and str(d.get("to") or "") == "tank" and _f(d.get("ml")) > 0
+               for d in (dests if isinstance(dests, list) else []))
+
+
+def shake_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """The Shaken tap's clock (doc §5.3): a refrigerated, settle-prone bottle
+    with something in it wants agitating every day or two. Counted from the
+    last Shaken stamp, else from the last fill/refill, else from the opened
+    stamp; nothing to count from = due (fail-closed, like every clock)."""
+    applies = bool(product.get("refrigerated")) and bool(product.get("stirDaily")) \
+        and _f(product.get("remainingMl")) > 0
+    if not applies:
+        return {"applies": False, "due": False, "hoursSince": None, "lastAt": ""}
+    stamps = [_parse_iso(product.get("lastShakenAt"))]
+    history = product.get("history") if isinstance(product.get("history"), list) else []
+    stamps += [_parse_iso(item.get("at")) for item in history
+               if isinstance(item, dict) and item.get("kind") == "refill"]
+    stamps.append(_parse_iso(product.get("openedAt")))
+    stamps = [s for s in stamps if s is not None and s <= now]
+    if not stamps:
+        return {"applies": True, "due": True, "hoursSince": None, "lastAt": ""}
+    last = max(stamps)
+    hours = (now - last).total_seconds() / 3600.0
+    return {"applies": True, "due": hours >= SHAKE_EVERY_H, "hoursSince": round(hours, 1),
+            "lastAt": str(product.get("lastShakenAt") or "")}
 
 
 def live_cone_product(jar_id: str, name: str, harvest_clock: dict[str, Any], harvest_ml: Any,
@@ -749,6 +792,8 @@ def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
         "refrigerated": bool(product.get("refrigerated")),
         "categoryLabel": category_label(product.get("category")),
         "handDose": hand_dose_state(product, now, tank_l, tz),
+        # The Shaken tap (doc §5.3): any refrigerated bottle that settles.
+        "shake": shake_state(product, now) if not live else {"applies": False, "due": False, "hoursSince": None, "lastAt": ""},
         **({"live": dict(live)} if live else {}),
     }
 
@@ -2474,13 +2519,18 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             continue
         species = str(jar.get("species") or "")
         bottled = species in bottle_species
+        phyto = species_kind(species) == "phyto"
         # A bottle species feeds straight when the jar's default says so
         # (0.7.161); a one-off straight harvest still lands as a done mark.
-        straight = not bottled or str(jar.get("harvestTo") or "") == "tank"
+        # A phyto vessel is a straight feeder only as a shelf SOURCE (its
+        # split goes to the tank by tint); a bottle-first vessel plans
+        # nothing here — the home bottle's own hand-dose plan is the tank's.
+        straight = (str(jar.get("harvestTo") or "") in ("tank", "source")) if phyto \
+            else (not bottled or str(jar.get("harvestTo") or "") == "tank")
         state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
         if not state.get("startedAt"):
             continue
-        name = f"{jar.get('name') or jid} harvest"
+        name = f"Phyto from {jar.get('name') or jid}" if phyto else f"{jar.get('name') or jid} harvest"
         source = f"culture:{jid}"
         done = []
         for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
@@ -2500,7 +2550,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         planned = []
         if straight and clock.get("due") and cultures.get("enabled", True):
             planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None, status="due",
-                              note=("through the net straight into the tank — the cone's own clock" if bottled
+                              note=("a dark vessel, straight into the flow at dusk — by tint" if phyto
+                                    else "through the net straight into the tank — the cone's own clock" if bottled
                                     else "check population density before harvesting pods — the jar's own clock")))
         extras = _timed_plan(planned, done, now_min)
         for i, extra in enumerate(extras):
@@ -2911,13 +2962,18 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
         if not isinstance(jar, dict):
             continue
         bottled = str(jar.get("species") or "") in bottle_species
-        name = (f"Rotifers from the cone ({jar.get('name') or jid})" if bottled
+        phyto = species_kind(jar.get("species")) == "phyto"
+        name = (f"Phyto from {jar.get('name') or jid}" if phyto
+                else f"Rotifers from the cone ({jar.get('name') or jid})" if bottled
                 else f"{jar.get('name') or jid} harvest")
         for item in (jar.get("history") if isinstance(jar.get("history"), list) else []):
-            if isinstance(item, dict) and item.get("event") == "harvest" and _harvest_went_to_tank(item, bottled):
+            if isinstance(item, dict) and item.get("event") in ("harvest", "restart") and _harvest_went_to_tank(item, bottled):
+                if item.get("event") == "restart" and not phyto:
+                    continue
                 add(item.get("at"), how="hand", source=f"culture:{jid}", name=name,
                     ml=round(_f(item.get("tankMl")), 1) or None,
-                    note=("sieved harvest straight into the tank; culture water discarded" if bottled
+                    note=("a split straight from the vessel into the flow" if phyto
+                          else "sieved harvest straight into the tank; culture water discarded" if bottled
                           else "sieved harvest into the display; culture water discarded"))
     bottle = cultures.get("bottle") if isinstance(cultures.get("bottle"), dict) else {}
     for item in (bottle.get("history") if isinstance(bottle.get("history"), list) else []):

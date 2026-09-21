@@ -9,7 +9,8 @@ population measured in days: a rotifer jar uses daily partial harvest and
 replacement water; a copepod jar needs slower, density-led harvesting.
 Calendar presets are reminders, not measurements of population or water quality.
 Species presets carry the numbers from the 2026-09 research sweep
-(docs/live-cultures-brainstorm.md §1–§2); the keeper can override any
+(docs/live-cultures-brainstorm.md §1–§2; the phyto vessel from
+docs/phyto-culture-brainstorm.md §3–§5); the keeper can override any
 cadence per jar and the engine reads the merged view.
 
 Honesty rules (the AWC tradition): a clock with no stamp is "unknown", never
@@ -27,17 +28,49 @@ from typing import Any
 from .awc import _f, _parse_iso as _awc_parse_iso
 from .mixing import sg_from_ppt
 
-CULTURE_JARS_MAX = 4
+CULTURE_JARS_MAX = 6
+# The rotifer / pod scale: the FOOD in the water (green = fed, clear = hungry).
 TINTS: tuple[str, ...] = ("green", "clearing", "clear")
-VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar")
+# The phyto scale (docs/phyto-culture-brainstorm.md §5.1) reads the other way:
+# the CULTURE is the colour. pale → green → dark is growth, dark is the
+# harvest colour; off (grey, yellow, brown) is a sign in itself — never
+# harvest an off-colour vessel into anything. Every reader asks tints_for().
+PHYTO_TINTS: tuple[str, ...] = ("pale", "green", "dark", "off")
+ALL_TINTS: tuple[str, ...] = TINTS + PHYTO_TINTS
+# bottle = a lit carboy / the Reefphyto 4 L container; reactor = a purpose-
+# built lit tube with a drain tap (drawn differently, same clocks).
+VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar", "bottle", "reactor")
 # Where a harvest goes (0.7.161): the fridge bottle, straight into the tank,
 # or the enrichment soak first. A species without a bottle only knows "tank".
 HARVEST_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "soak")
+# Where a phyto SPLIT goes — several in one tap (doc §5.3): the home fridge
+# bottle, straight into the tank, the drip's jar, or a second vessel (B).
+# The rotifer cone joins in Stage C.
+SPLIT_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "drip", "vessel")
 # Crash signs the keeper can tap (doc §8.5): each one is a restart (rotifers)
 # or a water change (pods) due NOW, whatever the calendar says.
 SIGNS: tuple[str, ...] = ("foam", "milky", "smell", "surface")
+# A phyto vessel's signs (§5.3): each brings the fresh vessel forward and
+# blocks the split until a tint tap says green or dark again.
+PHYTO_SIGNS: tuple[str, ...] = ("yellow", "brown", "cloudy", "clumping", "foam", "smell", "settling")
+ALL_SIGNS: tuple[str, ...] = SIGNS + tuple(s for s in PHYTO_SIGNS if s not in SIGNS)
 SIGN_WORDS = {"foam": "foam on the surface", "milky": "milky water", "smell": "a smell",
-              "surface": "clustering at the surface"}
+              "surface": "clustering at the surface",
+              "yellow": "yellowing", "brown": "browning", "cloudy": "cloudy water",
+              "clumping": "clumping", "settling": "settling out"}
+PHYTO_MODES: tuple[str, ...] = ("batch", "daily")
+PHYTO_LOOK_H = 24.0            # the daily tint tap — the one readout the method has
+PHYTO_PEAK_HELD_DAYS = 3.0     # dark this long without a split = "a culture held at peak turns"
+PHYTO_SPLIT_WARN_PCT = 70.0    # above this the seed left behind is thin (the 30 % seed rule)
+PHYTO_SEED_RATIO = 4.0         # the starter page's 1:4 — 250 ml into 1 L of new water
+PHYTO_RECOVER_DAYS = 2.0       # an off-colour vessel that has not recovered in two days is a crash
+BOTTLE_RESEED_DAYS = 7.0       # a fridge bottle under a week old is a legitimate starter
+SHAKE_EVERY_H = 48.0           # Reefphyto: shake the bottle every one to two days
+# §4.1: what a faint tint in the display costs, as an ESTIMATE — one tint of
+# ~10,000 cells/ml from a dark home culture of ~1.5×10⁷ cells/ml. The culture
+# is uncounted; nothing here is ever shown as the bottle's cells/ml.
+TINT_CELLS_PER_ML = 10_000.0
+HOME_CULTURE_CELLS_PER_ML_ESTIMATE = 1.5e7
 LEARN_SAMPLES = 3          # rolling window, the hatch clock's contract
 SLOW_FACTOR = 1.5          # two slower clearing observations prompt inspection
 # Supplier-specific soak default; storage/boost windows are scheduling estimates,
@@ -129,15 +162,58 @@ SPECIES: tuple[dict[str, Any], ...] = (
              "a bottom-dwelling population harvested. Test water quality weekly and use RODI for evaporation. "
              "Detected ammonia/nitrite calls for matched water changes. Heat thresholds are precautionary: "
              "heat can directly stress the animals and worsen oxygen and ammonia problems."},
+    # The phyto vessel (docs/phyto-culture-brainstorm.md §5.1, Reefphyto's
+    # starter page + the 2026-09 papers). Not an animal: the CULTURE is the
+    # colour, there is no feed, the harvest is a SPLIT that puts new water and
+    # f/2 in, and the restart is a fresh, sterilised vessel every few splits.
+    # harvest* mirrors split* so the chore clocks stay one machine
+    # (cadence_for maps them); feedIntervalH is the daily look. Heat tiers are
+    # precautionary — papers: an abrupt decline near 30 °C — never measured limits.
+    {"id": "nanno", "name": "Nannochloropsis (phyto)", "kind": "phyto",
+     "latin": "Nannochloropsis oculata",
+     "vesselKind": "bottle",
+     "tempMinC": 20.0, "tempMaxC": 27.0, "tempHardMaxC": 29.0,
+     "tempActC": 30.0, "tempCriticalC": 32.0,
+     "salinityPpt": 35.0,
+     "feedIntervalH": 24.0,
+     "harvestIntervalDays": 8.0, "harvestPct": 60.0,
+     "restartIntervalDays": 0.0,
+     "waterChangeIntervalDays": 0.0, "waterChangePct": 0.0,
+     "firstHarvestDays": 7.0, "splitMinAgeDays": 7.0,
+     "sieveUm": 0, "adultSieveUm": 0, "bottleShelfDays": 21.0,
+     "purgeMl": 0.0,
+     "splitPct": 60.0, "splitIntervalDays": 8.0, "restartCycles": 4.0, "lightHours": 16.0,
+     "recoverDays": 4.0, "nutrientMlPerL": 1.5, "nutrientProduct": "Phytoplankton Nutrient (f/2)",
+     "starterShelfDays": 28.0, "starterMl": 250.0, "volumeL": 4.0,
+     "seedWorkingL": 1.25, "kitWorkingL": 3.5,
+     "lightKelvin": "6000–6500 K", "lightCm": "10–15",
+     "tintTarget": "dense, dark green — the harvest colour; grey, yellow or cloudy is a sign",
+     "feedProduct": "",
+     "enrichSoakH": 0.0, "enrichDrops": "", "boostWarmH": 0.0, "boostColdH": 0.0,
+     "note": "A lit vessel, not an animal: the culture IS the colour. 35 ppt (the tank's water), "
+             "20–27 °C and sensitive near 30, gentle air, a 6000–6500 K lamp 10–15 cm away for 16 h "
+             "and 8 h dark — or the sun, while the days are long enough. Seed the starter 1:4 into new "
+             "water with 1.5 ml of f/2 per litre of the NEW water; never re-dose f/2 mid-cycle. Look "
+             "daily against a white card: pale → green → dark in about a week. Dark = split: 50–70 % "
+             "out (the fridge bottle, the tank, the drip) and the same in as fresh water + f/2, "
+             "leaving at least 30 % as seed. A culture held dark for days turns — split or dose more. "
+             "Yellow, brown, cloudy, clumping or a smell means do not harvest into anything; two "
+             "days without recovery is a crash — reseed from B. A fresh, sterilised vessel every "
+             "3–4 splits. Its own airline, syringe and jug — never the rotifer kit. The bottle keeps "
+             "2–3 weeks in the fridge, shaken every day or two; the starter itself is best used "
+             "within four weeks. Tint and days do not count cells."},
 )
 _SPECIES_BY_ID = {s["id"]: s for s in SPECIES}
 CADENCE_FIELDS: tuple[str, ...] = (
     "feedIntervalH", "harvestIntervalDays", "harvestPct", "restartIntervalDays",
     "waterChangeIntervalDays", "waterChangePct",
+    # The phyto vessel's own (only a phyto preset carries them).
+    "splitPct", "splitIntervalDays", "restartCycles", "lightHours",
 )
 CADENCE_CAPS = {
     "feedIntervalH": (1, 168), "harvestIntervalDays": (0.5, 30), "harvestPct": (5, 60),
     "restartIntervalDays": (0, 90), "waterChangeIntervalDays": (0, 90), "waterChangePct": (0, 100),
+    "splitPct": (10, 90), "splitIntervalDays": (1, 30), "restartCycles": (0, 20), "lightHours": (0, 24),
 }
 
 
@@ -155,6 +231,26 @@ def species_preset(species_id: Any) -> dict[str, Any]:
     return dict(_SPECIES_BY_ID.get(str(species_id or ""), _SPECIES_BY_ID["rotifer_L"]))
 
 
+def species_kind(species_id: Any) -> str:
+    return str(species_preset(species_id).get("kind") or "rotifer")
+
+
+def tints_for(species_id: Any) -> tuple[str, ...]:
+    """The tint scale a species is read on: the food in the water for the
+    animals, the culture's own colour for phyto (§5.1) — every reader asks."""
+    return PHYTO_TINTS if species_kind(species_id) == "phyto" else TINTS
+
+
+def signs_for(species_id: Any) -> tuple[str, ...]:
+    return PHYTO_SIGNS if species_kind(species_id) == "phyto" else SIGNS
+
+
+def phyto_seed_tint(species_id: Any) -> str:
+    """The water's colour the moment a ceremony ends: an animal's jar is fed
+    (green); a freshly seeded or split phyto vessel is diluted (pale)."""
+    return "pale" if species_kind(species_id) == "phyto" else "green"
+
+
 def cadence_for(species_id: Any, overrides: Any) -> dict[str, float]:
     """The preset cadence with the keeper's per-jar overrides applied. An
     override <= 0 on an interval means "never" only where the preset also
@@ -163,6 +259,8 @@ def cadence_for(species_id: Any, overrides: Any) -> dict[str, float]:
     over = overrides if isinstance(overrides, dict) else {}
     merged: dict[str, float] = {}
     for key in CADENCE_FIELDS:
+        if key not in preset:               # the phyto fields live only on a phyto preset
+            continue
         base = _f(preset.get(key))
         val = over.get(key)
         if not isinstance(val, bool) and math.isfinite(_f(val, math.nan)):
@@ -175,7 +273,18 @@ def cadence_for(species_id: Any, overrides: Any) -> dict[str, float]:
         merged["harvestIntervalDays"] = _f(preset["harvestIntervalDays"])
     merged["harvestPct"] = merged["harvestPct"] or _f(preset["harvestPct"])
     for key, (lo, hi) in CADENCE_CAPS.items():
-        merged[key] = min(hi, max(lo, merged[key]))
+        if key in merged:
+            merged[key] = min(hi, max(lo, merged[key]))
+    if preset.get("kind") == "phyto":
+        # The split IS the harvest: the keeper edits split*, the chore clocks
+        # read harvest* — mapped here, once, after the clamps (a 70 % split
+        # is a legitimate phyto number the rotifer cap would refuse).
+        if merged.get("splitPct", 0) <= 0:
+            merged["splitPct"] = _f(preset["splitPct"])
+        if merged.get("splitIntervalDays", 0) <= 0:
+            merged["splitIntervalDays"] = _f(preset["splitIntervalDays"])
+        merged["harvestPct"] = merged["splitPct"]
+        merged["harvestIntervalDays"] = merged["splitIntervalDays"]
     return merged
 
 
@@ -228,6 +337,8 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     since_restart = max(0.0, (now - restart_anchor).total_seconds() / 86400.0)
     out["ageDays"] = round(age_days, 1)
     out["daysSinceRestart"] = round(since_restart, 1)
+    if species["kind"] == "phyto":
+        return _phyto_state(jar, state, species, cad, started, restart_anchor, now, out)
     establishing = age_days < _f(species["firstHarvestDays"])
     out["status"] = "establishing" if establishing else "producing"
 
@@ -302,6 +413,308 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
         out["nextChore"] = {"key": key, "at": at, "due": out[key]["due"],
                             "hoursUntil": out[key]["hoursUntil"]}
     return out
+
+
+def _dark_run_days(history: Any, since: datetime, now: datetime) -> float:
+    """Days the vessel has read DARK without a break since ``since`` (the last
+    split): the peak-held clock. Any other tint tap ends the run."""
+    run_start: datetime | None = None
+    for at, row in _chronological(history):
+        if at < since or at > now:
+            continue
+        tint = str(row.get("tint") or "")
+        if row.get("event") in ("harvest", "restart", "seeded", "crashed"):
+            run_start = None
+            continue
+        if tint == "dark":
+            run_start = run_start or at
+        elif tint in PHYTO_TINTS:
+            run_start = None
+    if run_start is None:
+        return 0.0
+    return round(max(0.0, (now - run_start).total_seconds() / 86400.0), 1)
+
+
+def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, Any],
+                 cad: dict[str, float], started: datetime, fresh_anchor: datetime,
+                 now: datetime, out: dict[str, Any]) -> dict[str, Any]:
+    """The phyto vessel's clocks (doc §5.2) — light, not food. ``establishing``
+    is the first cycle (seeded, not yet dark or a week old); ``producing`` from
+    the first split, or the moment a tap says DARK (ready on a sign — the
+    restart-on-a-sign shape inverted). Clocks: ``look`` (daily tint tap),
+    ``harvest`` (= the SPLIT: the interval since the last split, brought
+    forward by a dark tap), ``restart`` (= the FRESH VESSEL: ``restartCycles``
+    splits since the last one, or a sign). No feed, no water change."""
+    history = jar.get("history")
+    age_days = max(0.0, (now - started).total_seconds() / 86400.0)
+    tint = str(state.get("lastTint") or "")
+    last_split = _parse_iso(state.get("lastHarvestAt"))
+    if last_split is not None and last_split < started:
+        last_split = None
+    split_anchor = last_split or started
+    days_since_split = max(0.0, (now - split_anchor).total_seconds() / 86400.0)
+    first_days = _f(species["firstHarvestDays"])
+    establishing = last_split is None and age_days < first_days and tint != "dark"
+    out["status"] = "establishing" if establishing else "producing"
+    interval = max(0.5, _f(cad.get("harvestIntervalDays"), 8.0))
+    if last_split is not None:
+        out["harvest"] = _due(last_split.isoformat(), None, timedelta(days=interval), now)
+    else:
+        out["harvest"] = _due(started.isoformat(), None, timedelta(days=first_days), now)
+    out["harvest"]["reason"] = "cap" if out["harvest"]["due"] else None
+    if tint == "dark" and not establishing:
+        out["harvest"].update({"available": True, "due": True, "hoursUntil": 0.0,
+                               "at": now.isoformat() if not out["harvest"].get("due") else out["harvest"]["at"],
+                               "reason": "dark"})
+    # A sign since the last fresh vessel brings it forward and blocks the
+    # split until a tint tap after the sign says green or dark (doc §5.3).
+    sign_at = _parse_iso(state.get("lastSignAt"))
+    signed = sign_at is not None and fresh_anchor <= sign_at <= now
+    ok_after_sign = False
+    if signed:
+        for at, row in _chronological(history):
+            if at > sign_at and str(row.get("tint") or "") in ("green", "dark"):
+                ok_after_sign = True
+                break
+    out["harvestBlocked"] = (signed and not ok_after_sign) or tint == "off"
+    cycles = int(max(0.0, _f(state.get("cyclesSinceFresh"))))
+    restart_cycles = _f(cad.get("restartCycles"))
+    if restart_cycles > 0:
+        due = cycles >= restart_cycles
+        left = max(0.0, restart_cycles - cycles)
+        at = now if due else split_anchor + timedelta(days=interval * max(1.0, left))
+        delta_h = (at - now).total_seconds() / 3600.0
+        out["restart"] = {"available": True, "due": due, "at": at.isoformat(),
+                          "hoursUntil": round(max(0.0, delta_h), 1), "hoursOverdue": 0.0,
+                          "reason": "cycles" if due else None}
+        out["percent"] = round(min(100.0, 100.0 * cycles / restart_cycles))
+    if signed:
+        out["restart"].update({"available": True, "due": True, "hoursUntil": 0.0, "at": sign_at.isoformat(),
+                               "hoursOverdue": round((now - sign_at).total_seconds() / 3600, 1),
+                               "reason": "sign"})
+    out["look"] = _due(state.get("lastLookedAt"), state.get("startedAt"), timedelta(hours=PHYTO_LOOK_H), now)
+    out["feed"]["skipped"] = False
+    out["clearingSlow"] = False
+    out["waterChangeOnDemand"] = False
+    dark_days = _dark_run_days(history, split_anchor, now)
+    out["cycle"] = {"day": round(days_since_split, 1), "ofDays": round(interval, 1),
+                    "percent": round(min(100.0, 100.0 * days_since_split / interval))}
+    out["daysSinceSplit"] = round(days_since_split, 1)
+    out["darkDays"] = dark_days
+    out["peakHeld"] = dark_days >= PHYTO_PEAK_HELD_DAYS and not establishing
+    out["cyclesSinceFresh"] = cycles
+    out["restartCycles"] = restart_cycles
+    out["workingL"] = round(_f(state.get("workingL")) or _f(jar.get("volumeL")), 2)
+    out["mode"] = str(jar.get("mode") or "batch") if str(jar.get("mode") or "") in PHYTO_MODES else "batch"
+    out["splitEligible"] = (not establishing and tint in ("green", "dark") and not out["harvestBlocked"])
+    chores = []
+    for key in ("look", "harvest", "restart"):
+        clock = out[key]
+        if clock.get("available") and clock.get("at"):
+            chores.append((0 if clock["due"] else 1, clock["at"], key))
+    if chores:
+        chores.sort()
+        _rank, at, key = chores[0]
+        out["nextChore"] = {"key": key, "at": at, "due": out[key]["due"], "hoursUntil": out[key]["hoursUntil"]}
+    return out
+
+
+def density_advice(tint: Any, st: dict[str, Any], days_to_dark: Any = None) -> dict[str, Any]:
+    """The phyto vessel's ``feed_advice`` sibling (doc §5.2): what the colour
+    asks for. ``split_now`` on dark (and louder when held at peak), ``hold``
+    on off-colour or a blocking sign, ``wait`` while it greens. Tint and
+    elapsed days do not count cells — the copy says so, once, in the tile."""
+    tint = str(tint or "")
+    status = str(st.get("status") or "")
+    if status not in ("establishing", "producing"):
+        return {"action": "none", "reason": ""}
+    days_since = _f(st.get("daysSinceSplit"))
+    interval = _f((st.get("cycle") or {}).get("ofDays"), 8.0)
+    expect = _f(days_to_dark) if _f(days_to_dark) > 0 else interval
+    remaining = max(0.0, expect - days_since)
+    if st.get("harvestBlocked") or tint == "off":
+        return {"action": "hold",
+                "reason": ("off-colour — do not harvest into anything; check the smell, the light and the "
+                           "temperature. Not recovered in two days? mark it crashed and reseed from B")}
+    if tint == "dark":
+        if st.get("peakHeld"):
+            return {"action": "split_now",
+                    "reason": (f"dark for {_f(st.get('darkDays')):g} days without a split — a culture held at "
+                               "peak turns; split now, or dose more of it")}
+        return {"action": "split_now", "reason": "dark — split now: the bottle, the tank, the drip"}
+    if tint == "green":
+        return {"action": "wait", "reason": f"growing — dark in ~{remaining:.0f} d" + (" (your own record)" if _f(days_to_dark) > 0 else "")}
+    if tint == "pale":
+        if days_since < 3:
+            return {"action": "wait", "reason": "pale — recovering after the split; light and air, nothing else"}
+        if days_since >= expect:
+            return {"action": "check", "reason": f"still pale at day {days_since:.0f} — check the light, the air and whether f/2 went in"}
+        return {"action": "wait", "reason": f"pale — greening; dark in ~{remaining:.0f} d if the light holds"}
+    return {"action": "check", "reason": "no colour logged yet — look at it against a white card"}
+
+
+def darkening_samples(history: Any) -> list[float]:
+    """Days from a seed or a split to the first DARK tap after it — how fast
+    the vessel darkens under its light. A split, a fresh vessel or a crash
+    before it darkened voids that sample. Newest first, capped at a month."""
+    samples: list[float] = []
+    anchor: datetime | None = None
+    for at, row in _chronological(history):
+        event = row.get("event")
+        if event in ("seeded", "harvest", "restart"):
+            anchor = at
+            continue
+        if event == "crashed":
+            anchor = None
+            continue
+        if anchor is not None and str(row.get("tint") or "") == "dark":
+            days = (at - anchor).total_seconds() / 86400.0
+            if 0 < days <= 30:
+                samples.append(round(days, 1))
+            anchor = None
+    samples.reverse()
+    return samples
+
+
+def split_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, ml: Any = None,
+                fresh_ml: Any = None) -> dict[str, Any]:
+    """The split jug (doc §4.2, §5.3): what comes out (default the split
+    percentage of the WORKING volume), what goes in as fresh water at the
+    vessel's salinity (default like-for-like; more = a SCALE-UP, the working
+    volume moves), and the f/2 that rides the fresh water only — never the
+    whole vessel, never mid-cycle. Refused above the working volume and when
+    the container would overflow; warned when the seed left behind is thin."""
+    cad = cadence_for(jar.get("species"), jar.get("cadence"))
+    preset = species_preset(jar.get("species"))
+    state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
+    working_ml = max(0.0, (_f(state.get("workingL")) or _f(jar.get("volumeL"))) * 1000.0)
+    container_ml = max(working_ml, _f(jar.get("volumeL")) * 1000.0)
+    out_ml = round(_f(ml, working_ml * cad["harvestPct"] / 100.0), 1)
+    fresh = round(_f(fresh_ml, out_ml), 1)
+    after = working_ml - out_ml + fresh
+    removal_pct = out_ml / working_ml * 100.0 if working_ml > 0 else 0.0
+    refill = refill_guide(fresh / 1000.0, 100, jar.get("salinityPpt"), mix_ppt)
+    nutrient = jar.get("nutrient") if isinstance(jar.get("nutrient"), dict) else {}
+    per_l = _f(nutrient.get("mlPerL"))
+    if per_l <= 0:
+        per_l = _f(preset.get("nutrientMlPerL"), 1.5)
+    nutrient_ml = round(fresh / 1000.0 * per_l, 1)
+    warning = ""
+    if working_ml > 0 and removal_pct > PHYTO_SPLIT_WARN_PCT:
+        warning = (f"a {removal_pct:.0f} % split leaves a thin seed — 50–70 % is the rule; "
+                   "expect a slower return to dark")
+    out: dict[str, Any] = {
+        **refill, "totalMl": out_ml, "outMl": out_ml, "freshMl": fresh, "refillMl": fresh,
+        "nutrientMl": nutrient_ml, "nutrientMlPerL": per_l,
+        "workingMlBefore": round(working_ml), "workingMlAfter": round(after),
+        "containerMl": round(container_ml), "scaleUp": fresh > out_ml + 0.5,
+        "removalPct": round(removal_pct, 1), "seedPct": round(max(0.0, 100.0 - removal_pct), 1),
+        "warning": warning, "purgeMl": 0.0,
+    }
+    if working_ml <= 0:
+        out.update({"available": False, "reason": "Set the vessel's working volume first."})
+    elif out_ml < 0 or (out_ml <= 0 and fresh <= 0):
+        out.update({"available": False, "reason": "Enter a positive split volume, or fresh water for a scale-up."})
+    elif out_ml > working_ml + 0.5:
+        out.update({"available": False, "reason": f"The vessel only holds {working_ml / 1000:g} L of culture."})
+    elif after > container_ml + 0.5:
+        out.update({"available": False, "reason": f"The container holds {container_ml / 1000:g} L — {after / 1000:.2f} L would overflow."})
+    return out
+
+
+def seed_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, starter_ml: Any = None,
+               working_l: Any = None) -> dict[str, Any]:
+    """The day the starter lands (doc §5.3, §5.11): the starter into new water
+    at the vessel's salinity with f/2 by the NEW water. Default = the starter
+    page's 1:4 (250 ml into 1 L, 1.25 L working); ``working_l`` overrides it —
+    the kit's 3.5 L is the same card's alternative. Refused past the container."""
+    preset = species_preset(jar.get("species"))
+    state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
+    starter = _f(starter_ml)
+    if starter <= 0:
+        starter = _f(jar.get("starterMl")) or _f(preset.get("starterMl"), 250.0)
+    container_ml = _f(jar.get("volumeL")) * 1000.0
+    working = _f(working_l)
+    if working <= 0:
+        # The recipe's default; a small container (a windowsill B) caps it —
+        # the ratio is a recipe, the container is a fact.
+        working = round(starter * (1.0 + PHYTO_SEED_RATIO) / 1000.0, 2)
+        if container_ml > 0 and working * 1000.0 > container_ml:
+            working = round(container_ml / 1000.0, 2)
+    working_ml = working * 1000.0
+    fresh = max(0.0, working_ml - starter)
+    refill = refill_guide(fresh / 1000.0, 100, jar.get("salinityPpt"), mix_ppt)
+    nutrient = jar.get("nutrient") if isinstance(jar.get("nutrient"), dict) else {}
+    per_l = _f(nutrient.get("mlPerL"))
+    if per_l <= 0:
+        per_l = _f(preset.get("nutrientMlPerL"), 1.5)
+    out: dict[str, Any] = {
+        **refill, "starterMl": round(starter), "freshMl": round(fresh), "workingMl": round(working_ml),
+        "workingL": round(working, 2), "containerMl": round(container_ml),
+        "nutrientMl": round(fresh / 1000.0 * per_l, 1), "nutrientMlPerL": per_l,
+        "ratio": round(fresh / starter, 1) if starter > 0 else None,
+        "kitWorkingL": _f(preset.get("kitWorkingL"), 3.5),
+    }
+    if container_ml > 0 and working_ml > container_ml + 0.5:
+        out.update({"available": False, "reason": f"The container holds {container_ml / 1000:g} L — set a smaller working volume."})
+    del state
+    return out
+
+
+def home_dose_ml(tank_l: Any) -> float:
+    """The home bottle's first hand dose (§4.1): one faint tint of the display
+    from a dark home culture — an ESTIMATE the keeper raises or lowers against
+    the glass. 52 L → ~35 ml."""
+    litres = max(0.0, _f(tank_l))
+    if litres <= 0:
+        return 0.0
+    return float(max(1.0, round(litres * 1000.0 * TINT_CELLS_PER_ML / HOME_CULTURE_CELLS_PER_ML_ESTIMATE)))
+
+
+def sizing_line(working_l: Any, split_pct: Any, interval_days: Any, demand_ml_day: Any,
+                customers: str = "") -> dict[str, Any]:
+    """§4.1 / §5.11 — the line that bites first: what this vessel makes a day
+    on its split cadence against what the rack drinks (the bottle's hand
+    dose, the drip, later the cone). Advice, never a number pretending to be
+    a count: a 3.5 L vessel out-produces a hand-dosed 52 L tank 5–10×."""
+    working = max(0.0, _f(working_l))
+    pct = max(0.0, _f(split_pct))
+    interval = max(0.5, _f(interval_days, 8.0))
+    per_day = working * 1000.0 * pct / 100.0 / interval
+    demand = max(0.0, _f(demand_ml_day))
+    if working <= 0 or pct <= 0:
+        return {"available": False, "yieldMlDay": None, "demandMlDay": demand or None, "ratio": None, "idealL": None, "line": ""}
+    cadence = f"at a {pct:g} % split every {interval:g} days"
+    if demand <= 0:
+        return {"available": True, "yieldMlDay": round(per_day), "demandMlDay": None, "ratio": None, "idealL": None,
+                "line": (f"this vessel makes ~{per_day:.0f} ml a day {cadence} — set the home bottle's hand "
+                         "dose and this line says what the rack drinks")}
+    ratio = per_day / demand
+    ideal = max(0.5, demand / (pct / 100.0 / interval) / 1000.0)
+    who = f" ({customers})" if customers else ""
+    if ratio > 1.5:
+        verdict = (f"{ratio:.0f}× more than it needs — run it at ~{ideal:.1f} L, or scale up when the drip "
+                   "or the cone drinks it; the bottle absorbs the difference for three weeks")
+    elif ratio < 0.7:
+        verdict = f"less than it needs — scale up at the next split (~{ideal:.1f} L would cover it)"
+    else:
+        verdict = "about right"
+    return {"available": True, "yieldMlDay": round(per_day), "demandMlDay": round(demand), "ratio": round(ratio, 1),
+            "idealL": round(ideal, 2),
+            "line": f"the rack drinks ~{demand:.0f} ml a day{who}; this vessel makes ~{per_day:.0f} {cadence} — {verdict}"}
+
+
+def starter_state(opened_iso: Any, shelf_days: Any, now: datetime) -> dict[str, Any]:
+    """The starter bottle's own four-week clock (Reefphyto: use within four
+    weeks) — advisory, the same shape as every other freshness clock."""
+    opened = _parse_iso(opened_iso)
+    shelf = max(0.0, _f(shelf_days))
+    if opened is None or opened > now or shelf <= 0:
+        return {"available": False, "status": "unknown", "daysLeft": None, "ageDays": None}
+    age = (now - opened).total_seconds() / 86400.0
+    left = shelf - age
+    status = "stale" if left <= 0 else "aging" if left <= shelf * 0.25 else "fresh"
+    return {"available": True, "status": status, "daysLeft": round(max(0.0, left), 1), "ageDays": round(age, 1)}
 
 
 def feed_advice(tint: Any, feed_clock: dict[str, Any], harvest_clock: Any = None,
@@ -473,7 +886,45 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
             "firstHarvestDays": round(first),
         }
 
+    # The lit vessels (doc §5.9): a phyto carboy is drawn right of the cones,
+    # before the tub — its own list, its own captions, its own jug.
+    phyto: list[dict[str, Any]] = []
     for j in jars:
+        if str(j.get("kind") or "") != "phyto":
+            continue
+        st = j.get("state") if isinstance(j.get("state"), dict) else {}
+        status = str(st.get("status") or "none")
+        running = status in ("establishing", "producing")
+        due = set(j.get("due") or [])
+        cycle = st.get("cycle") if isinstance(st.get("cycle"), dict) else {}
+        first = max(1.0, _f(j.get("firstHarvestDays"), 7.0))
+        pct = _f(cycle.get("percent")) if cycle else (min(100.0, 100.0 * _f(st.get("ageDays")) / first) if running else 0.0)
+        advice = j.get("densityAdvice") if isinstance(j.get("densityAdvice"), dict) else {}
+        temp = j.get("temp") if isinstance(j.get("temp"), dict) else {}
+        bottle = j.get("homeBottle") if isinstance(j.get("homeBottle"), dict) else {}
+        guide = j.get("splitGuide") if isinstance(j.get("splitGuide"), dict) else {}
+        tint = str(j.get("tint") or "") if running else ""
+        phyto.append({
+            "id": str(j.get("id") or ""), "name": str(j.get("name") or ""),
+            "kind": str(j.get("vesselKind") or "bottle"), "status": status, "tint": tint,
+            "pct": round(pct), "airOn": running, "lightOn": running,
+            "splitHot": "harvest" in due and not st.get("harvestBlocked"),
+            "freshHot": "restart" in due, "lookHot": "look" in due,
+            "offColour": bool(st.get("harvestBlocked")) or tint == "off",
+            "peakHeld": bool(st.get("peakHeld")), "advice": str(advice.get("action") or ""),
+            "tempStatus": str(temp.get("status") or "unknown"),
+            "establishDays": round(_f(st.get("ageDays"))) if status == "establishing" else None,
+            "firstHarvestDays": round(first),
+            "cycleDay": round(_f(cycle.get("day"))) if cycle else None,
+            "cycleOf": round(_f(cycle.get("ofDays"))) if cycle else None,
+            "workingL": _f(st.get("workingL")) or _f(j.get("volumeL")),
+            "bottleMl": round(_f(bottle.get("remainingMl"))),
+            "bottleStatus": str(((bottle.get("expiry") or {}) if isinstance(bottle.get("expiry"), dict) else {}).get("status") or ("empty" if _f(bottle.get("remainingMl")) <= 0 else "")),
+            "scaleUp": bool(guide.get("scaleUp")),
+        })
+    for j in jars:
+        if str(j.get("kind") or "") == "phyto":
+            continue
         v = _vessel(j)
         if v["kind"] == "tub":
             if tub is None:
@@ -493,7 +944,7 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
             "firstHarvestDays": cones[0]["firstHarvestDays"],
             "note": "comes with the first restart",
         })
-    cone_jars = [j for j in jars if str(j.get("vesselKind") or "jar") != "tub"]
+    cone_jars = [j for j in jars if str(j.get("vesselKind") or "jar") != "tub" and str(j.get("kind") or "") != "phyto"]
     first_cone = next((j for j in cone_jars if "restart" in (j.get("due") or [])), None)
     first_cone = first_cone or next((j for j in cone_jars if "harvest" in (j.get("due") or [])), None)
     first_cone = first_cone or next(iter(cone_jars), None)
@@ -519,11 +970,27 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
     bottle_out = {"ml": round(remaining), "pct": round(min(100.0, 100.0 * remaining / volume)),
                   "status": str(bottle.get("status") or "empty")}
 
+    # The split jug (doc §5.9): the first phyto vessel with a split due, else
+    # the first running one — out, fresh in, the f/2, a scale-up named.
+    lead_phyto = next((j for j in jars if str(j.get("kind") or "") == "phyto"
+                       and "harvest" in (j.get("due") or [])), None)
+    lead_phyto = lead_phyto or next((j for j in jars if str(j.get("kind") or "") == "phyto"
+                                     and str((j.get("state") or {}).get("status") or "") in ("establishing", "producing")), None)
+    lead_phyto = lead_phyto or next((j for j in jars if str(j.get("kind") or "") == "phyto"), None)
+    pg = (lead_phyto.get("splitGuide") if lead_phyto and isinstance(lead_phyto.get("splitGuide"), dict) else {}) or {}
+    phyto_jug = {
+        "jarName": str((lead_phyto or {}).get("name") or ""),
+        "outMl": round(_f(pg.get("outMl"))), "freshMl": round(_f(pg.get("freshMl"))),
+        "mixMl": round(_f(pg.get("mixMl"))), "rodiMl": round(_f(pg.get("rodiMl"))),
+        "ppt": _f(pg.get("targetPpt"), 35.0), "nutrientMl": _f(pg.get("nutrientMl")),
+        "scaleUp": bool(pg.get("scaleUp")), "workingLAfter": round(_f(pg.get("workingMlAfter")) / 1000.0, 2),
+        "available": pg.get("available", True), "reason": pg.get("reason", ""),
+    } if lead_phyto else None
     vessels = cones + ([tub] if tub else [])
-    caption = "IDLE — seed the cone and the rig comes alive"
+    caption = "IDLE — seed the cone and the rig comes alive" if not phyto or cones or tub else "IDLE — seed the vessel and the rig comes alive"
     stage = "idle"
     by_temp = {"critical": 3, "hot": 2}
-    hot = sorted((v for v in vessels if v["tempStatus"] in by_temp and v["status"] in ("establishing", "producing")),
+    hot = sorted((v for v in vessels + phyto if v["tempStatus"] in by_temp and v["status"] in ("establishing", "producing")),
                  key=lambda v: -by_temp[v["tempStatus"]])
     if hot:
         v = hot[0]
@@ -549,6 +1016,24 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
     elif tub and tub["harvestHot"]:
         stage, caption = "tub_harvest", ("POD HARVEST — 25 % through 300 µm for adults, 50 µm "
                                          "for nauplii · replace the removed water with matched saltwater; check population recovery")
+    elif any(p["offColour"] and p["status"] in ("establishing", "producing") for p in phyto):
+        p = next(p for p in phyto if p["offColour"] and p["status"] in ("establishing", "producing"))
+        stage, caption = "off_colour", (f"OFF-COLOUR — {p['name']}: harvest into nothing · smell, light, heat? "
+                                        "two days without recovery is a crash — reseed from B")
+    elif any(p["freshHot"] for p in phyto):
+        p = next(p for p in phyto if p["freshHot"])
+        stage, caption = "fresh_vessel", (f"FRESH VESSEL — {p['name']}: split as usual, the seed into a "
+                                          "sterilised container of new water + f/2 · bleach, rinse, dry the old one")
+    elif any(p["splitHot"] for p in phyto) and phyto_jug:
+        p = next(p for p in phyto if p["splitHot"])
+        fresh = (f"{phyto_jug['mixMl']} ml mix + {phyto_jug['rodiMl']} ml RODI" if phyto_jug["rodiMl"]
+                 else f"{phyto_jug['freshMl']} ml fresh")
+        if phyto_jug["scaleUp"]:
+            stage, caption = "scale_up", (f"SCALE UP — {p['name']}: {phyto_jug['outMl']} ml out, {fresh} in "
+                                          f"@ {phyto_jug['ppt']:g} ppt + {phyto_jug['nutrientMl']:g} ml f/2 → {phyto_jug['workingLAfter']:g} L working")
+        else:
+            stage, caption = "split", (f"SPLIT — {p['name']}{' held at peak' if p['peakHeld'] else ''}: {phyto_jug['outMl']} ml out → "
+                                       f"the bottle / the tank / the drip · {fresh} @ {phyto_jug['ppt']:g} ppt + {phyto_jug['nutrientMl']:g} ml f/2")
     elif any(v["feedHot"] for v in vessels):
         v = next(v for v in vessels if v["feedHot"])
         target = next((j.get("tintTarget") for j in jars if j.get("id") == v["id"]), "") or "a light green"
@@ -557,12 +1042,16 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         v = next(v for v in vessels if v["status"] == "establishing")
         stage, caption = "establishing", (f"ESTABLISHING — {v['name']} day {v['establishDays']} of "
                                           f"{v['firstHarvestDays']} · feed by the tint, no harvest yet")
-    elif any(v["status"] == "producing" for v in vessels):
+    elif any(p["status"] == "establishing" for p in phyto):
+        p = next(p for p in phyto if p["status"] == "establishing")
+        stage, caption = "greening", (f"GREENING — {p['name']} day {p['establishDays']} of ~{p['firstHarvestDays']} · "
+                                      "light on, air on, nothing to do but look")
+    elif any(v["status"] == "producing" for v in vessels + phyto):
         stage, caption = "steady", "STEADY — nothing due · look at the water"
-    elif any(v["status"] == "crashed" for v in vessels):
+    elif any(v["status"] == "crashed" for v in vessels + phyto):
         stage, caption = "crashed", "CRASHED — reseed from the other jar, or from a fresh starter"
     return {"stage": stage, "caption": caption, "cones": cones, "tub": tub, "jug": jug,
-            "bottle": bottle_out}
+            "bottle": bottle_out, "phyto": phyto, "phytoJug": phyto_jug}
 
 
 # --------------------------------------------------------------------------- #
@@ -607,15 +1096,15 @@ def clearing_samples(history: Any) -> list[float]:
     return samples
 
 
-def replay_state(history: Any) -> dict[str, Any]:
+def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
     """The jar's tap stamps re-read from the surviving journal (0.7.191) —
     what ``state`` would say had the taken-back row never happened. Only
     the fields a daily tap writes: the last tint (a seed or restart puts the
     water back to green, the way the ceremonies do), the last feed, the last
     skip, the last sign (cleared by a seed or restart, as the ceremonies do).
     A crash stops the walk — nothing after it is a running jar's word."""
-    out: dict[str, Any] = {"lastTint": "green", "lastFedAt": "", "lastFeedSkippedAt": "",
-                           "lastSignAt": "", "lastSign": ""}
+    out: dict[str, Any] = {"lastTint": phyto_seed_tint(species_id) if species_id else "green",
+                           "lastFedAt": "", "lastFeedSkippedAt": "", "lastSignAt": "", "lastSign": ""}
     tint_done = sign_done = False
     for at, row in reversed(_chronological(history)):
         event = row.get("event")
@@ -626,10 +1115,10 @@ def replay_state(history: Any) -> dict[str, Any]:
             out["lastFedAt"] = stamp
         if not out["lastFeedSkippedAt"] and row.get("skipped"):
             out["lastFeedSkippedAt"] = stamp
-        if not tint_done and str(row.get("tint") or "") in TINTS:
+        if not tint_done and str(row.get("tint") or "") in ALL_TINTS:
             out["lastTint"] = str(row["tint"])
             tint_done = True
-        if not sign_done and str(row.get("sign") or "") in SIGNS:
+        if not sign_done and str(row.get("sign") or "") in ALL_SIGNS:
             out["lastSign"], out["lastSignAt"] = str(row["sign"]), stamp
             sign_done = True
         if event in ("seeded", "restart"):
@@ -786,9 +1275,20 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
         days = max(3.0, round(failures["days"] - 1))
         if days < cad["restartIntervalDays"]:
             suggest["restartIntervalDays"] = days
-    return {"clearingH": clearing, "firstHarvestDays": first, "runLengthDays": run, "failureDays": failures,
-            "yieldMlDay": yield_ml_per_day(history, now), "suggest": suggest,
-            "purge": purge_note(run_length_runs(history))}
+    out = {"clearingH": clearing, "firstHarvestDays": first, "runLengthDays": run, "failureDays": failures,
+           "yieldMlDay": yield_ml_per_day(history, now), "suggest": suggest,
+           "purge": purge_note(run_length_runs(history))}
+    if species_kind(jar.get("species")) == "phyto":
+        # Days-to-dark (doc §5.10): split → the first dark tap; rolling three,
+        # two before it speaks. The Apply on splitIntervalDays is Stage B.
+        dark = _rolling(darkening_samples(history), "days")
+        out["daysToDark"] = dark
+        suggest["splitIntervalDays"] = None
+        if dark["available"]:
+            days = max(2.0, min(21.0, round(dark["days"])))
+            if abs(days - cad["harvestIntervalDays"]) >= 1:
+                suggest["splitIntervalDays"] = days
+    return out
 
 
 def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -802,6 +1302,29 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
     act: list[str] = []
     watch: list[str] = []
     t_status = str((temp or {}).get("status") or "")
+    if species_kind(jar.get("species")) == "phyto":
+        # The vessel's own line (doc §5.10, the Stage A half): heat, an
+        # off-colour tap, a blocking sign, peak-held, a split long overdue.
+        if t_status == "critical" or (t_status == "hot" and (temp or {}).get("act")):
+            act.append(f"{temp.get('tempC')} °C at the rack — the alga declines abruptly near 30; shade it, move it off the sunlit shelf, a cooler room")
+        elif t_status == "hot":
+            watch.append(f"{temp.get('tempC')} °C at the rack — over the warning line; shade it")
+        tint = str(state.get("lastTint") or "")
+        sign = str(state.get("lastSign") or "")
+        if tint == "off":
+            act.append("off-colour — harvest into nothing; check the smell, the light and the temperature")
+        elif st.get("harvestBlocked") and sign:
+            act.append(f"{SIGN_WORDS.get(sign, sign)} since the last fresh vessel — the split waits for a green or dark look")
+        if st.get("peakHeld"):
+            watch.append(f"held dark for {_f(st.get('darkDays')):g} days without a split — a culture held at peak turns")
+        harvest = st.get("harvest") or {}
+        if harvest.get("reason") == "cap" and _f(harvest.get("hoursOverdue")) >= 72 and tint not in ("dark", "off"):
+            watch.append(f"not dark at day {_f(st.get('daysSinceSplit')):g} — light, heat, or f/2 skipped at the last split?")
+        if act:
+            return {"level": "act", "reason": "; ".join(act)}
+        if watch:
+            return {"level": "watch", "reason": "; ".join(watch)}
+        return {"level": "ok", "reason": "no warning from the recorded observations"}
     if t_status == "critical" or (t_status == "hot" and (temp or {}).get("act")):
         act.append(f"room {temp.get('tempC')} °C — over the precautionary act line; check culture temperature, aeration and water quality")
     elif t_status == "hot":
@@ -1018,7 +1541,7 @@ def tint_strip(history: Any, now: datetime, days: int = TINT_STRIP_DAYS) -> list
     by_day: dict[str, str] = {}
     for at, row in _chronological(history):
         tint = str(row.get("tint") or "")
-        if tint not in TINTS or at > now:
+        if tint not in ALL_TINTS or at > now:
             continue
         by_day[at.astimezone(now.tzinfo).date().isoformat()] = tint
     out = []
@@ -1045,7 +1568,7 @@ def feed_timeline(history: Any, now: datetime, days: int = TIMELINE_DAYS) -> dic
     tint_before = ""
     for at, row in rows:
         if at < since:
-            if str(row.get("tint") or "") in TINTS:
+            if str(row.get("tint") or "") in ALL_TINTS:
                 tint_before = str(row["tint"])
             elif row.get("event") in ("seeded", "restart", "crashed"):
                 tint_before = ""
@@ -1054,11 +1577,12 @@ def feed_timeline(history: Any, now: datetime, days: int = TIMELINE_DAYS) -> dic
         marks.append({
             "at": at.isoformat(),
             "event": str(row.get("event") or ""),
-            "tint": tint if tint in TINTS else "",
+            "tint": tint if tint in ALL_TINTS else "",
             "fed": bool(row.get("fed")) or row.get("event") == "feed",
             "skipped": bool(row.get("skipped")),
             "ml": round(_f(row.get("ml")), 1) if _f(row.get("ml")) > 0 else 0,
-            "sign": str(row.get("sign") or "") if str(row.get("sign") or "") in SIGNS else "",
+            "sign": str(row.get("sign") or "") if str(row.get("sign") or "") in ALL_SIGNS else "",
+            **({"secchiCm": row.get("secchiCm")} if isinstance(row.get("secchiCm"), (int, float)) and not isinstance(row.get("secchiCm"), bool) else {}),
             "tempC": row.get("tempC") if isinstance(row.get("tempC"), (int, float)) and not isinstance(row.get("tempC"), bool) else None,
         })
     marks = marks[-TIMELINE_ROWS_MAX:]
