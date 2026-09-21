@@ -560,7 +560,7 @@ def test_rig_state_reads_the_stage_heat_first():
     bottle = {"remainingMl": 250, "volumeMl": 1000, "status": "fresh"}
     quiet = cultures.rig_state([jar()], bottle)
     assert quiet["stage"] == "steady" and quiet["cones"][0]["pct"] == 40 and quiet["tub"] is None
-    assert quiet["jug"] == {"mode": "harvest", "harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "mixPpt": 35.0, "purgeMl": 50, "sieveUm": 50, "jarName": "Rotifers A", "available": True, "reason": ""}
+    assert quiet["jug"] == {"mode": "harvest", "harvestMl": 625, "mixMl": 480, "rodiMl": 145, "ppt": 27, "mixPpt": 35.0, "purgeMl": 50, "sieveUm": 50, "jarName": "Rotifers A", "available": True, "reason": "", "vesselKind": "cone"}
     assert quiet["bottle"] == {"ml": 250, "pct": 25, "status": "fresh"}
     harvest = cultures.rig_state([jar(due=["harvest"])], bottle)
     assert harvest["stage"] == "harvest" and harvest["cones"][0]["harvestHot"] and harvest["cones"][0]["purgeHot"]
@@ -3123,6 +3123,49 @@ def test_light_tick_banks_the_ph_and_reads_the_colour_sensor_against_its_blank()
     j = conn.results[-1].payload["jars"][0]
     assert j["index"]["sensor"]["bound"] is False and j["index"]["sensor"]["phEntity"] == "sensor.nanno_ph" and j["index"]["phNow"]["max"] == 9.0
     assert j["index"]["ph"]["available"] is False, "one day of pH is not a trend"
+
+# --------------------------------------------------------------------------- #
+# 0.7.211 — a column reactor (the Clear Tides P360) for the rotifers and the pods
+# --------------------------------------------------------------------------- #
+def test_a_column_reactor_bleeds_off_its_tap_like_the_cone_bleeds_its_tip():
+    cone = {"species": "rotifer_L", "volumeL": 5, "salinityPpt": 27, "vesselKind": "cone", "purgeMl": 50, "cadence": {}}
+    column = {**cone, "vesselKind": "reactor"}
+    tub = {**cone, "vesselKind": "tub"}
+    assert cultures.harvest_guide(cone, 35)["purgeMl"] == 50 and cultures.harvest_guide(column, 35)["purgeMl"] == 50
+    assert cultures.harvest_guide(tub, 35)["purgeMl"] == 0, "a tub has nowhere to bleed from"
+    assert cultures.harvest_guide(column, 35)["refillMl"] == 1300, "a 25 % harvest of 5 L plus the 50 ml drained, replaced"
+    assert cultures.PURGE_VESSELS == ("cone", "reactor")
+    # The rig: the column's captions say the tap; the cone keeps its tip.
+    def payload(kind, due):
+        return {"id": "c1", "name": "Rotifers A", "kind": "rotifer", "vesselKind": kind, "volumeL": 5, "purgeMl": 50, "sieveUm": 50, "firstHarvestDays": 6,
+                "state": {"status": "producing", "percent": 40, "ageDays": 12, "harvest": {"due": "harvest" in due}, "restart": {"due": "restart" in due}},
+                "due": due, "tint": "clearing", "feedAdvice": {"action": "wait"}, "temp": {"status": "ok"},
+                "harvestGuide": cultures.harvest_guide({"species": "rotifer_L", "volumeL": 5, "salinityPpt": 27, "vesselKind": kind, "purgeMl": 50, "cadence": {}}, 35),
+                "fillGuide": cultures.refill_guide(5, 100, 27, 35)}
+    bottle = {"remainingMl": 0, "volumeMl": 1000, "status": "empty", "percent": 0}
+    rig = cultures.rig_state([payload("reactor", ["harvest"])], bottle)
+    assert rig["stage"] == "harvest" and "drain ~50 ml of settled detritus off the tap" in rig["caption"] and rig["jug"]["vesselKind"] == "reactor"
+    assert "bleed" not in rig["caption"]
+    rig = cultures.rig_state([payload("cone", ["harvest"])], bottle)
+    assert "bleed ~50 ml off the tip" in rig["caption"] and rig["jug"]["vesselKind"] == "cone"
+    rig = cultures.rig_state([payload("reactor", ["restart"])], bottle)
+    assert rig["stage"] == "restart" and "drain the tap, the whole column" in rig["caption"]
+    # The ceremony stamps the purge on a reactor's harvest row; the shelf's live source names the vessel.
+    jar = _jar(started_ago_days=12)
+    jar.update({"vesselKind": "reactor", "volumeL": 5, "purgeMl": 50, "harvestTo": "tank"})
+    entry = _entry(jars={"c1": jar})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True}))
+    assert not conn.errors, conn.errors
+    row = _cultures(entry)["jars"]["c1"]["history"][0]
+    assert row["event"] == "harvest" and row["purgeMl"] == 50 and row["ml"] == 1250
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    live = conn.results[-1].payload["shelf"]["live"]
+    source = next(v for k, v in live.items() if k.startswith(nps_engine.LIVE_ROTIFER_CONE_PREFIX))
+    assert source["name"] == "Live rotifers (Rotifers A, straight from the reactor)" and source["live"]["where"] == "the reactor (Rotifers A)"
+    assert nps_engine.live_cone_product("c1", "R", {}, 100, "", [])["name"].endswith("straight from the cone)"), "the default word is still the cone"
+
 
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":

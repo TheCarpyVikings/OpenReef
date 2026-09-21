@@ -40,6 +40,10 @@ ALL_TINTS: tuple[str, ...] = TINTS + PHYTO_TINTS
 # bottle = a lit carboy / the Reefphyto 4 L container; reactor = a purpose-
 # built lit tube with a drain tap (drawn differently, same clocks).
 VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar", "bottle", "reactor")
+# Vessels with a bottom draw-off (0.7.211): the hatchery cone's tip and a
+# column reactor's drain tap (the Clear Tides P360) — the settled detritus
+# is bled off before the harvest; a tub or a jar has nowhere to bleed from.
+PURGE_VESSELS: tuple[str, ...] = ("cone", "reactor")
 # Where a harvest goes (0.7.161): the fridge bottle, straight into the tank,
 # or the enrichment soak first. A species without a bottle only knows "tank".
 HARVEST_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "soak")
@@ -1425,7 +1429,7 @@ def harvest_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, ml: Any = None,
     Stage C: ``phyto_ml`` at ``phyto_ppt`` rides the refill (the three-way jug)."""
     cad = cadence_for(jar.get("species"), jar.get("cadence"))
     harvest = round(_f(ml, _f(jar.get("volumeL")) * cad["harvestPct"] * 10), 1)
-    purge = max(0.0, _f(jar.get("purgeMl"))) if jar.get("vesselKind") == "cone" else 0.0
+    purge = max(0.0, _f(jar.get("purgeMl"))) if jar.get("vesselKind") in PURGE_VESSELS else 0.0
     refill = refill_guide((harvest + purge) / 1000, 100, jar.get("salinityPpt"), mix_ppt, phyto_ml, phyto_ppt)
     removal_pct = (harvest + purge) / max(1.0, _f(jar.get("volumeL")) * 1000) * 100
     warning = (f"Harvest plus purge removes {removal_pct:.1f}% of the working volume; "
@@ -1593,6 +1597,8 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         "jarName": str((first_cone or {}).get("name") or ""),
         "available": guide.get("available", True), "reason": guide.get("reason", ""),
         "sieveUm": int(_f(first_cone.get("sieveUm"), 50)) if first_cone else 50,
+        # 0.7.211: a column reactor bleeds off its tap, the cone off its tip.
+        "vesselKind": str((first_cone or {}).get("vesselKind") or "cone"),
     }
     remaining = max(0.0, _f(bottle.get("remainingMl")))
     volume = max(1.0, _f(bottle.get("volumeMl"), 1000.0))
@@ -1634,13 +1640,18 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
     elif guide.get("available") is False:
         stage, caption = "mixing", str(guide.get("reason"))
     elif any(v["restartHot"] for v in cones):
-        stage, caption = "restart", ("RESTART DUE — air off, settle, bleed the tip, the whole cone "
-                                     "through the net into a clean one")
+        hot = next(v for v in cones if v["restartHot"])
+        stage, caption = "restart", (("RESTART DUE — air off, settle, drain the tap, the whole column "
+                                      "through the net into a clean one") if hot["kind"] == "reactor" else
+                                     ("RESTART DUE — air off, settle, bleed the tip, the whole cone "
+                                      "through the net into a clean one"))
     elif any(v["harvestHot"] for v in cones):
         stage = "harvest"
         refill = (f"{jug['mixMl']} ml mix + {jug['rodiMl']} ml RODI" if jug["rodiMl"]
                   else f"{jug['mixMl']} ml fresh")
-        caption = (f"HARVEST — {jug['jarName']}: air off briefly, watch settling, bleed ~{jug['purgeMl']} ml off the tip, then "
+        bleed = (f"drain ~{jug['purgeMl']} ml of settled detritus off the tap" if jug.get("vesselKind") == "reactor"
+                 else f"bleed ~{jug['purgeMl']} ml off the tip") if jug["purgeMl"] else "let it settle"
+        caption = (f"HARVEST — {jug['jarName']}: air off briefly, watch settling, {bleed}, then "
                    f"{jug['harvestMl']} ml through the {jug['sieveUm']} µm net · refill {refill}")
     elif tub and tub["harvestHot"]:
         stage, caption = "tub_harvest", ("POD HARVEST — 25 % through 300 µm for adults, 50 µm "

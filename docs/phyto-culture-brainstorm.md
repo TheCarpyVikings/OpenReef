@@ -830,3 +830,21 @@ Code only; nothing here has run on Reece's HA yet.
 - **The arc's software track is complete.** Left: the hardware track (§5.7 — the reactor as the
   drip's reservoir with the pump pausing on a crashed source culture, the phyto node with the OD
   shroud, the continuous reactor) — to lock when the hardware exists.
+
+## 14. Follow-up — the Clear Tides vessels (0.7.211, 2026-09-21)
+
+Reece ordered three Clear Tides vessels (due around early October 2026): a **Phytoplankton Light
+Box 5** (5 L opaque white box, its own LED unit, two valves = a drain tap) for the nanno, a
+**P360/5** (5 L clear column, central 18" tube, drain tap at the base, two air inlets) for the
+rotifers and a **P360/3** (3 L) for the pods. The nanno's box is a `reactor` at 5 L with
+`light.mode: lamp` (an enclosed box — the window is irrelevant; the LED unit on the plug); the
+index and the stick read a drained sample in a clear glass against the card. The columns exposed
+one gap, closed here: an ANIMAL jar can now be a **reactor** — the settings row offers *Reactor —
+a column with a drain tap (P360)*; the purge (`PURGE_VESSELS = cone | reactor`) becomes *drain
+~N ml of settled detritus off the tap* in the harvest guide, the journal row, the tile's jug line
+and the rig's captions; the pods hint has a column variant (they cluster on the walls and the
+surface — adults from the top through 300 µm, nauplii off the tap through 50 µm, an uneven draw);
+the rotifer hint says the column's routine (air off, settle, drain the tap, harvest from the same
+tap, floss in the breather holes, the phyto kept above); the shelf's live source names the
+vessel. Clear Tides' own notes match the clocks: use the phyto at six to nine days, light 16–24 h,
+ripe culture takes a ten-fold dilution, bleach the reactor after a crash.

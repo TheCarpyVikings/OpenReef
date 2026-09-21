@@ -15977,7 +15977,8 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
         guide = cultures_engine.harvest_guide(jar, mix_ppt)
         products[f"{nps_engine.LIVE_ROTIFER_CONE_PREFIX}{jid}"] = nps_engine.live_cone_product(
             jid, str(jar.get("name") or jid), st["harvest"], guide.get("harvestMl", guide.get("totalMl")),
-            str((jar.get("state") or {}).get("lastHarvestAt") or ""), jar.get("history") or [])
+            str((jar.get("state") or {}).get("lastHarvestAt") or ""), jar.get("history") or [],
+            vessel_word={"reactor": "reactor", "tub": "tub", "jar": "jar"}.get(str(jar.get("vesselKind") or ""), "cone"))
         cone_sources += 1
     rot_note = ""
     enrich = cultures["enrichment"]
@@ -19392,7 +19393,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
             notes.append(f"{phyto['ml']:g} ml of phyto from {phyto['name']} in the refill"
                          + (f" ({refill['mixMl']} ml mix + {refill['rodiMl']} ml RODI → {refill['targetPpt']:g} ppt)" if refill.get("rodiMl") else ""))
     event = ("harvest" if harvested else "feed" if fed else "sign" if sign else "tint" if tint in cultures_engine.TINTS else "skip" if skip_feed else "tint")
-    purge = round(jar["purgeMl"]) if harvested and jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None
+    purge = round(jar["purgeMl"]) if harvested and jar["vesselKind"] in cultures_engine.PURGE_VESSELS and jar["purgeMl"] > 0 else None
     _cultures_history(jar, event, now,
                       ml=round(harvest_ml, 1) if harvested else 0,
                       tint=state["lastTint"] if tint in cultures_engine.TINTS else None,
@@ -19967,7 +19968,7 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
         _consumable_debit(phyto["product"], phyto["ml"], "dose", at=now, to="jar", jar_id=jar_id)
     _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000),
                       tempC=_cultures_temp_c(hass, config, cultures),
-                      purgeMl=round(jar["purgeMl"]) if jar["vesselKind"] == "cone" and jar["purgeMl"] > 0 else None,
+                      purgeMl=round(jar["purgeMl"]) if jar["vesselKind"] in cultures_engine.PURGE_VESSELS and jar["purgeMl"] > 0 else None,
                       fed=True if phyto is not None else None,
                       phytoMl=round(phyto["ml"], 1) if phyto is not None else None,
                       phytoFrom=phyto["ref"] if phyto is not None else None)

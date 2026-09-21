@@ -1657,5 +1657,38 @@ test("Stage D dialog: two taps on the photo, the preview maths, the log payload 
   } finally { restore(); }
 });
 
+// --- 0.7.211 — a column reactor for the rotifers and the pods ---
+test("a column reactor on an animal jar: the settings kind, the drain-off-the-tap purge, the hints and the tile's words", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const config = baseConfig();
+    config.nps.cultures.jars.c1.vesselKind = "reactor";
+    config.nps.cultures.jars.c1.purgeMl = 50;
+    config.nps.cultures.jars.c2.vesselKind = "reactor";
+    const summary = summaryFixture();
+    const rot = summary.jars[0];
+    rot.vesselKind = "reactor"; rot.purgeMl = 50;
+    rot.harvestGuide = { totalMl: 625, refillMl: 675, mixMl: 521, rodiMl: 154, targetPpt: 27, mixPpt: 35, purgeMl: 50 };
+    const panel = await culturesPanel(config, summary);
+    const settings = panel._culturesSettings();
+    noPlaceholders(settings, "reactor settings");
+    assert(settings.includes('<option value="reactor" selected>Reactor — a column with a drain tap (P360)</option>'), "the reactor kind on the rotifer row");
+    assert(settings.includes("Drain off the tap before harvest (ml)") && settings.includes('data-field="purgeMl" value="50"'), "the column's purge field");
+    assert(settings.includes("A column reactor: air off, settle, drain the detritus off the tap"), "the rotifer hint's column routine");
+    assert(settings.includes("in a column they cluster on the walls and the surface") && settings.includes("nauplii off the tap through 50 µm"), "the pods hint's column variant");
+    assert(!settings.includes("a flat tub, never a cone"), "the tub sentence gives way on a column");
+    const html = panel._culturesTab();
+    noPlaceholders(html, "reactor tile");
+    assert(html.includes("drain 50 ml off the tap · harvest 625 ml"), `the tile's jug line: ${html.match(/drain[^<]*/)}`);
+    assert(panel._culturesVesselWord({ vesselKind: "reactor" }) === "reactor" && panel._culturesVesselWord({ vesselKind: "cone" }) === "cone" && panel._culturesVesselWord({}) === "jar", "the vessel's word");
+    // The cone keeps its own words.
+    config.nps.cultures.jars.c1.vesselKind = "cone"; config.nps.cultures.jars.c2.vesselKind = "tub";
+    rot.vesselKind = "cone";
+    const cone = await culturesPanel(config, summary);
+    assert(cone._culturesSettings().includes("Purge before harvest (ml)") && cone._culturesSettings().includes("a flat tub, never a cone"), "the cone's purge and the tub's sentence");
+    assert(cone._culturesTab().includes("purge 50 ml · harvest 625 ml"), "the cone's jug line");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

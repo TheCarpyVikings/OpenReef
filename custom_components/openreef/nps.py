@@ -338,7 +338,7 @@ def shake_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
 
 
 def live_cone_product(jar_id: str, name: str, harvest_clock: dict[str, Any], harvest_ml: Any,
-                      last_harvest_iso: Any, history: Any) -> dict[str, Any]:
+                      last_harvest_iso: Any, history: Any, vessel_word: str = "cone") -> dict[str, Any]:
     """A producing rotifer cone whose harvests go straight into the tank, as a
     shelf entry (0.7.161). A SOURCE, not a bottle: no capacity, no fill, no
     shelf life — feeding does not empty a culture. Its clock is the cone's
@@ -351,7 +351,7 @@ def live_cone_product(jar_id: str, name: str, harvest_clock: dict[str, Any], har
              and str(row.get("to") or "") == "tank" and _f(row.get("tankMl")) > 0]
     clock = harvest_clock if isinstance(harvest_clock, dict) else {}
     return {
-        "name": f"Live rotifers ({name}, straight from the cone)", "brand": "Home culture",
+        "name": f"Live rotifers ({name}, straight from the {vessel_word})", "brand": "Home culture",
         "category": "zooLive", "bottleMl": 0, "remainingMl": 0, "lowThresholdMl": 0,
         "openedAt": "", "shelfLifeDaysOpened": 0, "refrigerated": False, "stirDaily": False,
         "particleUmMin": lib.get("particleUmMin", 90), "particleUmMax": lib.get("particleUmMax", 360),
@@ -361,7 +361,7 @@ def live_cone_product(jar_id: str, name: str, harvest_clock: dict[str, Any], har
         "live": {
             "kind": "rotifers", "vessel": "cone", "source": True,
             "jarId": str(jar_id), "jarName": str(name),
-            "where": f"the cone ({name})", "stockedBy": "the Cultures tab",
+            "where": f"the {vessel_word} ({name})", "stockedBy": "the Cultures tab",
             "harvestDue": bool(clock.get("due")), "harvestAt": clock.get("at"),
             "harvestHoursUntil": clock.get("hoursUntil"), "harvestMl": round(_f(harvest_ml)) or None,
             "lastHarvestAt": str(last_harvest_iso or ""),

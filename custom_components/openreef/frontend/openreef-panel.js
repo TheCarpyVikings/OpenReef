@@ -15138,6 +15138,12 @@ const rigSteps = [
   // The chore's word on a tile, a card or a push (0.7.207): an animal's jar
   // is fed and harvested; a phyto vessel is looked at, split and given a
   // fresh vessel — the backend's keys stay one machine, the words do not.
+  // The vessel's own word (0.7.211): the hatchery's cone, a column reactor
+  // with a drain tap (the Clear Tides P360), a tub, a jar.
+  _culturesVesselWord(jar) {
+    return ({ cone: "cone", reactor: "reactor", tub: "tub", bottle: "vessel" })[jar?.vesselKind] || "jar";
+  }
+
   _culturesChoreWord(jar, key) {
     if (jar && jar.kind === "phyto") return ({ look: "look", harvest: "split", restart: "fresh vessel", refresh: "refresh the backup" })[key] || key;
     return ({ feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look" })[key] || key;
@@ -15311,7 +15317,7 @@ const rigSteps = [
       const learned = j.learned || {};
       const learnedLines = running ? [
         learned.suggest?.feedIntervalH != null && learned.clearingH?.available
-          ? `<small class="muted">Your ${j.vesselKind === "cone" ? "cone" : "jar"} clears in ~${this._escape(String(learned.clearingH.hours))} h (${this._escape(String(learned.clearingH.samples))} feeds) — feed every ${this._escape(String(learned.suggest.feedIntervalH))} h? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="feedIntervalH">Apply</button></small>` : "",
+          ? `<small class="muted">Your ${this._culturesVesselWord(j)} clears in ~${this._escape(String(learned.clearingH.hours))} h (${this._escape(String(learned.clearingH.samples))} feeds) — feed every ${this._escape(String(learned.suggest.feedIntervalH))} h? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="feedIntervalH">Apply</button></small>` : "",
         learned.suggest?.restartIntervalDays != null && learned.runLengthDays?.available
           ? `<small class="muted">Recorded crashes averaged ~${this._escape(String(learned.failureDays?.days ?? learned.runLengthDays.days))} days (${this._escape(String(learned.failureDays?.samples ?? learned.runLengthDays.samples))} failures) — restart at ${this._escape(String(learned.suggest.restartIntervalDays))}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${this._escape(j.id)}" data-field="restartIntervalDays">Apply</button></small>` : "",
         learned.purge?.available
@@ -15322,7 +15328,7 @@ const rigSteps = [
           ? `<small class="muted">~${this._escape(String(learned.yieldMlDay))} ml a day harvested lately.</small>` : "",
       ].filter(Boolean).join("") : "";
       const guide = j.harvestGuide?.available === false ? `<small class="muted">${this._escape(j.harvestGuide.reason)}</small>` : running && status === "producing"
-        ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">${j.vesselKind === "cone" && Number(j.purgeMl) > 0 ? `purge ${this._escape(String(Math.round(j.purgeMl)))} ml · ` : ""}harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.mixPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""} → ${this._escape(String(j.harvestGuide?.targetPpt || j.salinityPpt))} ppt (harvest + purge replaced)</small>`
+        ? `<small class="muted" title="The measured jug: what comes out through the ${this._escape(String(j.sieveUm))} µm mesh goes to waste, the same volume of fresh saltwater goes back">${["cone", "reactor"].includes(j.vesselKind) && Number(j.purgeMl) > 0 ? `${j.vesselKind === "reactor" ? "drain" : "purge"} ${this._escape(String(Math.round(j.purgeMl)))} ml${j.vesselKind === "reactor" ? " off the tap" : ""} · ` : ""}harvest ${this._escape(String(j.harvestGuide?.totalMl || 0))} ml · refill ${this._escape(String(j.harvestGuide?.mixMl || 0))} ml @ ${this._escape(String(j.harvestGuide?.mixPpt || 35))} ppt${j.harvestGuide?.rodiMl ? ` + ${this._escape(String(j.harvestGuide.rodiMl))} ml RODI` : ""} → ${this._escape(String(j.harvestGuide?.targetPpt || j.salinityPpt))} ppt (harvest + purge replaced)</small>`
         : "";
       const tempLine = j.temp?.available && j.temp.status !== "ok"
         ? `<small style="color:${j.temp.status === "hot" || j.temp.status === "critical" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}">🌡️ ${this._escape(String(j.temp.tempC))} °C — ${
@@ -15773,13 +15779,13 @@ const rigSteps = [
               ${speciesList.map((s) => `<option value="${this._escape(s.id)}" ${(jar?.species || "rotifer_L") === s.id ? "selected" : ""}>${this._escape(s.name)}</option>`).join("")}
             </select></label>
             <label>Vessel<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="vesselKind">
-              ${[["cone", "Cone — the hatchery's inverted bottle"], ["tub", "Tub — flat and wide (pods)"], ["jar", "Jar"]].map(([v, l]) => `<option value="${v}" ${(jar?.vesselKind || preset.vesselKind || "jar") === v ? "selected" : ""}>${l}</option>`).join("")}
+              ${[["cone", "Cone — the hatchery's inverted bottle"], ["reactor", "Reactor — a column with a drain tap (P360)"], ["tub", "Tub — flat and wide (pods)"], ["jar", "Jar"]].map(([v, l]) => `<option value="${v}" ${(jar?.vesselKind || preset.vesselKind || "jar") === v ? "selected" : ""}>${l}</option>`).join("")}
             </select></label>
             <label title="Final working volume after sieving the starter into matched water. Harvests are percentages of this volume.">Working culture volume (L)<input type="number" min="0.2" max="50" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="volumeL" value="${this._escape(String(jar?.volumeL ?? 2.5))}"></label>
             <label>Salinity (ppt)<input type="number" min="5" max="45" step="1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="salinityPpt" value="${this._escape(String(jar?.salinityPpt ?? preset.salinityPpt ?? 35))}"></label>
             <label>Measured starter salinity (ppt)<input type="number" min="0" max="60" step="0.1" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="starterPpt" value="${this._escape(String(jar?.starterPpt ?? ""))}" placeholder="Measure first"></label>
             <label>Measured starter volume (ml)<input type="number" min="50" max="20000" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="starterMl" value="${this._escape(String(jar?.starterMl ?? 500))}"></label>
-            ${(jar?.vesselKind || preset.vesselKind) === "cone" ? `<label>Purge before harvest (ml)<input type="number" min="0" max="500" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="purgeMl" value="${this._escape(String(jar?.purgeMl ?? preset.purgeMl ?? 50))}"></label>` : ""}
+            ${["cone", "reactor"].includes(jar?.vesselKind || preset.vesselKind) ? `<label title="${(jar?.vesselKind || preset.vesselKind) === "reactor" ? "Air off, let the detritus settle, drain this much off the tap before the harvest — the column's version of bleeding the cone's tip." : "Air off, settle, bleed this much off the tip before the harvest."}">${(jar?.vesselKind || preset.vesselKind) === "reactor" ? "Drain off the tap before harvest (ml)" : "Purge before harvest (ml)"}<input type="number" min="0" max="500" step="10" data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="purgeMl" value="${this._escape(String(jar?.purgeMl ?? preset.purgeMl ?? 50))}"></label>` : ""}
             ${preset.kind !== "copepod" ? `<label title="Where a harvest goes by default. Straight feeders skip the bottle: the harvest is the tank's feed, the strip plans it on the cone's clock, and the shelf shows the cone as a live source.">Harvest goes to<select data-scope="nps-culture-jar" data-id="${this._escape(jid)}" data-field="harvestTo">
               <option value="bottle" ${(jar?.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle (5-day clock, DHA step)</option>
               <option value="tank" ${jar?.harvestTo === "tank" ? "selected" : ""}>straight into the tank (no bottle)</option>
@@ -15791,8 +15797,10 @@ const rigSteps = [
             <label title="A concentrate: a few ml. A home phyto bottle from the rack: one tint of the jar — ~170 ml for a 2.5 L cone as an estimate (linked automatically when a vessel stands; raise or lower it by eye).">Recorded feed dose (ml)<input type="number" min="0.5" max="1000" step="0.5" data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="doseMl" value="${this._escape(String(jar?.feed?.doseMl ?? 5))}"></label>
           </div>
           <small class="awc-hint">${preset.kind === "copepod"
-            ? "Pods crawl — a flat tub, never a cone. 35 ppt is this setup’s target. Replace evaporation with RODI; replace harvested water with matched saltwater. Test water quality weekly."
-            : "Salinity — Reefphyto cultures rotifers at SG 1.019–1.021 (about 27 ppt). Productivity varies with strain, temperature, food and density; there is no fixed yield multiplier. The Cultures tab shows this vessel's exact split — mixing-station water + RODI — for the fill and for every harvest. The cone is the hatchery's: settle, bleed the tip, harvest from the valve."}</small>
+            ? ((jar?.vesselKind || preset.vesselKind) === "reactor"
+              ? "Pods crawl — in a column they cluster on the walls and the surface rather than spreading out: harvest adults from the top through 300 µm, nauplii off the tap through 50 µm, and expect an uneven draw. 35 ppt is this setup’s target. Replace evaporation with RODI; replace harvested water with matched saltwater. Test water quality weekly."
+              : "Pods crawl — a flat tub, never a cone. 35 ppt is this setup’s target. Replace evaporation with RODI; replace harvested water with matched saltwater. Test water quality weekly.")
+            : "Salinity — Reefphyto cultures rotifers at SG 1.019–1.021 (about 27 ppt). Productivity varies with strain, temperature, food and density; there is no fixed yield multiplier. The Cultures tab shows this vessel's exact split — mixing-station water + RODI — for the fill and for every harvest. " + ((jar?.vesselKind || preset.vesselKind) === "reactor" ? "A column reactor: air off, settle, drain the detritus off the tap, then harvest from the same tap into the jug; two air inlets, floss in the breather holes, the phyto kept above it." : "The cone is the hatchery's: settle, bleed the tip, harvest from the valve.")}</small>
           <small class="awc-hint">Cadence — these are starting points. Check population density, feeding and water quality before harvesting.</small>
           <div class="mini-grid">
             ${numberField(jid, "feedIntervalH", "Look / feed every (h)", cad.feedIntervalH, 1, 168, 1, "Inspect rotifers twice a day and pods daily; feed according to activity, tint and product guidance")}
