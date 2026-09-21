@@ -33,7 +33,7 @@ import openreef as integration  # noqa: E402
 from openreef import cultures  # noqa: E402
 from openreef import nps as nps_engine  # noqa: E402
 
-from _fake_ha import FakeConnection, FakeEntry, FakeHass, run  # noqa: E402
+from _fake_ha import FakeConnection, FakeEntry, FakeHass, FakeState, run  # noqa: E402
 
 CONF_SETTINGS = integration.CONF_SETTINGS
 NOW = datetime(2026, 9, 3, 12, 0, 0, tzinfo=timezone.utc)
@@ -2153,6 +2153,498 @@ def test_home_bottle_is_made_on_save_and_survives_a_stale_client():
     run(integration.websocket_cultures_seed(hass, conn, {"id": 5, "jar_id": "c1", "from_bottle": True}))
     assert conn.errors[-1].code == "bottle_too_old"
 
+
+# --------------------------------------------------------------------------- #
+# 0.7.208 — the phyto vessel, Stage B: light, heat, backup, learning (doc §5.6,
+# §5.8, §5.10, §11)
+# --------------------------------------------------------------------------- #
+def _sun(now_local, sunrise_h=6.75, sunset_h=19.15, day=None):
+    """A sun entity snapshot around ``now_local`` (a local, aware datetime):
+    the two FUTURE stamps HA carries. ``day`` forces the branch."""
+    is_day = (sunrise_h <= now_local.hour + now_local.minute / 60 < sunset_h) if day is None else day
+    base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if is_day:
+        setting = base + timedelta(hours=sunset_h)
+        rising = base + timedelta(days=1, hours=sunrise_h)
+    elif now_local.hour + now_local.minute / 60 >= sunset_h:
+        setting = base + timedelta(days=1, hours=sunset_h)
+        rising = base + timedelta(days=1, hours=sunrise_h)
+    else:
+        setting = base + timedelta(hours=sunset_h)
+        rising = base + timedelta(hours=sunrise_h)
+    return {"state": "above_horizon" if is_day else "below_horizon",
+            "next_rising": rising.isoformat(), "next_setting": setting.isoformat()}
+
+
+_TZ1 = timezone(timedelta(hours=1))
+
+
+def _local(h, m=0, day=21):
+    return datetime(2026, 9, day, h, m, tzinfo=_TZ1)
+
+
+def test_sun_day_reads_the_two_future_stamps_by_day_and_by_night():
+    day = cultures.sun_day(_sun(_local(14)), _local(14))
+    assert day["available"] and day["isDay"] and day["daylightH"] == 12.4
+    assert day["sunsetAt"] == _local(19, 9).isoformat(), "by day the window hangs off the COMING sunset"
+    night = cultures.sun_day(_sun(_local(21)), _local(21))
+    assert not night["isDay"] and night["daylightH"] == 12.4
+    assert night["sunsetAt"] == _local(19, 9).isoformat(), "at night the window hangs off the LAST sunset"
+    early = cultures.sun_day(_sun(_local(4)), _local(4))
+    assert early["sunsetAt"] == _local(19, 9, day=20).isoformat(), "before dawn the last sunset was yesterday's"
+    assert cultures.sun_day({}, _local(4))["available"] is False and cultures.sun_day(None, _local(4))["daylightH"] is None
+
+
+def test_light_window_the_three_modes_the_sunset_rule_and_the_latest_off_cap():
+    light = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00"}
+    # 16 h target − 12.4 h of sun = 3.6 h of lamp from sunset 19:09 → 22:45.
+    w = cultures.light_window(light, 16, _local(14), _sun(_local(14)))
+    assert w["rule"] == "sunset" and w["plannedLampH"] == 3.6 and not w["active"] and w["onAt"] == _local(19, 9).isoformat()
+    w = cultures.light_window(light, 16, _local(21), _sun(_local(21)))
+    assert w["active"] and not w["over"] and w["offAt"] == _local(22, 45).isoformat()
+    w = cultures.light_window(light, 16, _local(23, 30), _sun(_local(23, 30)))
+    assert not w["active"] and w["over"], "past the window it is over, not active"
+    # latestOff caps the window; a cap before sunset means the next day's — no cap.
+    w = cultures.light_window({**light, "latestOff": "21:30"}, 16, _local(21), _sun(_local(21)))
+    assert w["rule"] == "latest_off" and w["offAt"] == _local(21, 30).isoformat() and w["plannedLampH"] == 2.35
+    w = cultures.light_window({**light, "latestOff": "18:00"}, 16, _local(21), _sun(_local(21)))
+    assert w["rule"] == "sunset" and w["plannedLampH"] == 3.6
+    # Midsummer: 17 h of sun reaches a 16 h target — the lamp stays off.
+    w = cultures.light_window(light, 16, _local(21), _sun(_local(21), sunrise_h=4.0, sunset_h=21.5, day=False))
+    assert w["rule"] == "sun_enough" and w["plannedLampH"] == 0 and not w["active"]
+    # No sun to read: sun+lamp falls back to the lamp rule and says so.
+    w = cultures.light_window(light, 16, _local(9), None)
+    assert w["rule"] == "on_at_fallback" and w["active"] and w["onAt"] == _local(7).isoformat() and w["sunAvailable"] is False
+    # Lamp: on-at + the target, across midnight when it must.
+    w = cultures.light_window({"mode": "lamp", "onAt": "10:00"}, 16, _local(1, 30), None)
+    assert w["active"] and w["onAt"] == _local(10, day=20).isoformat() and w["offAt"] == _local(2, day=21).isoformat()
+    # Sun: never a window.
+    w = cultures.light_window({"mode": "sun"}, 16, _local(21), _sun(_local(21)))
+    assert w["rule"] == "none" and not w["active"] and w["onAt"] is None
+    assert cultures.light_window({"mode": "junk"}, 16, _local(21), _sun(_local(21)))["mode"] == "sun"
+
+
+def test_light_state_the_readout_the_short_day_nudge_the_lamp_off_watch_and_the_lost_day():
+    cad = cultures.cadence_for("nanno", {})
+    light = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00"}
+    jar = {"species": "nanno", "light": light, "state": {"lightDay": "2026-09-21", "lightMinutesToday": 27,
+                                                          "lightOnAt": _local(20).isoformat()}}
+    at = _local(21, 3)
+    on = cultures.light_state(jar, cad, at, _sun(at), "on")
+    assert on["status"] == "ok" and on["lit"] and on["plugOn"] and on["lampH"] == 1.5 and on["deliveredH"] == 13.9
+    assert on["line"].startswith("daylight 12.4 h (astronomical — the window gives less) · lamp 3.6 h from sunset 19:09 → 22:45 · 1.5 h lamp so far"), on["line"]
+    assert on["window"]["active"] and on["window"]["hoursIn"] == 1.9
+    off = cultures.light_state(jar, cad, at, _sun(at), "off")
+    assert off["status"] == "watch" and off["line"].endswith("— lamp off 1.9 h into its window") and not off["lit"]
+    gone = cultures.light_state(jar, cad, at, _sun(at), "unavailable")
+    assert gone["status"] == "watch" and "lamp unavailable" in gone["line"]
+    # A short winter day with the lamp dead: 8 h of sun + nothing = a lost day.
+    winter = {"species": "nanno", "light": {**light, "latestOff": "22:00"}, "state": {"lightDay": "2026-12-21", "lightMinutesToday": 0}}
+    dec = datetime(2026, 12, 21, 23, 55, tzinfo=timezone.utc)
+    lost = cultures.light_state(winter, cad, dec, _sun(dec, sunrise_h=8.0, sunset_h=15.9), "off")
+    assert lost["status"] == "act" and lost["deliveredH"] == 7.9 and "lost a day of light" in lost["line"]
+    # No plug bound in a lamp mode is a watch; a sun mode never minds the plug.
+    assert cultures.light_state({"species": "nanno", "light": {"mode": "lamp"}, "state": {}}, cad, _local(9), None, None)["status"] == "watch"
+    sun = cultures.light_state({"species": "nanno", "light": {"mode": "sun"}, "state": {}}, cad, _local(21), _sun(_local(21)), None)
+    assert sun["status"] == "watch" and "under the 16 h target" in sun["line"] and sun["nudge"] == "" and sun["deliveredH"] == 12.4
+    short = cultures.light_state({"species": "nanno", "light": {"mode": "sun"}, "state": {}}, cad, _local(21),
+                                 _sun(_local(21), sunrise_h=7.3, sunset_h=18.2), None)
+    assert short["shortDay"] and short["nudge"] == "the days are under 12 h — put the LED on the plug" and short["status"] == "watch"
+    unknown = cultures.light_state({"species": "nanno", "light": {"mode": "sun"}, "state": {}}, cad, _local(21), None, None)
+    assert unknown["status"] == "unknown" and unknown["daylightH"] is None and unknown["deliveredH"] is None
+    # sun+lamp with no sun: the fallback is named, and it is a watch.
+    fb = cultures.light_state(jar, cad, _local(9), None, "on")
+    assert fb["status"] == "watch" and "no sun entity — the lamp runs on its on-at time instead" in fb["line"]
+    assert "Air is never switched" in fb["aerationNote"]
+
+
+def test_backup_refresh_clock_and_the_calendar_never_asks_b_for_a_split():
+    b = _phyto_jar(started_ago_days=33, now=NOW, backupOf="c1", lastTint="green", workingL=1.0)
+    b["volumeL"] = 1.0
+    st = cultures.culture_state(b, NOW)
+    assert st["backupOf"] == "c1" and st["refresh"]["available"] and st["refresh"]["due"] and st["refresh"]["reason"] == "backup"
+    assert st["refresh"]["everyDays"] == 32, "restartCycles × splitIntervalDays = 4 × 8"
+    assert not st["harvest"]["due"] and st["harvest"]["reason"] is None, "B is never asked for a calendar split"
+    young = _phyto_jar(started_ago_days=10, now=NOW, backupOf="c1", lastTint="green", workingL=1.0)
+    st = cultures.culture_state(young, NOW)
+    assert not st["refresh"]["due"] and st["refresh"]["hoursUntil"] == 22 * 24
+    young["state"]["lastTint"] = "dark"
+    young["history"] = [{"event": "tint", "at": _iso(NOW - timedelta(hours=1)), "tint": "dark"}]
+    assert cultures.culture_state(young, NOW)["harvest"]["reason"] == "dark", "a dark B is still a crop"
+    main = _phyto_jar(started_ago_days=33, now=NOW, lastTint="green")
+    st = cultures.culture_state(main, NOW)
+    assert st["refresh"]["available"] is False and st["backupOf"] == ""
+    # A tighter cadence keeps the week floor.
+    b["cadence"] = {"splitIntervalDays": 1, "restartCycles": 3}
+    assert cultures.culture_state(b, NOW)["refresh"]["everyDays"] == 7
+
+
+def test_learned_daily_offer_recovery_by_depth_and_the_light_line():
+    now = NOW
+    rows = []
+    # Two cycles: seeded → dark in 6 d; a 60 % split → dark in 6 d.
+    rows.append({"event": "seeded", "at": _iso(now - timedelta(days=20)), "ml": 1250, "tint": "pale", "freshMl": 1000, "nutrientMl": 1.5, "workingMl": 1250})
+    rows.append({"event": "tint", "at": _iso(now - timedelta(days=14)), "tint": "dark"})
+    rows.append({"event": "harvest", "at": _iso(now - timedelta(days=13)), "ml": 750, "tint": "dark", "freshMl": 750, "nutrientMl": 1.1, "workingMl": 1250})
+    rows.append({"event": "tint", "at": _iso(now - timedelta(days=7)), "tint": "dark"})
+    jar = _phyto_jar(started_ago_days=20, now=now, lastHarvestAt=_iso(now - timedelta(days=13)), lastTint="green")
+    jar["history"] = list(reversed(rows))
+    learned = cultures.learned_cadences(jar, [jar["history"]], now)
+    assert learned["daysToDark"] == {"available": True, "days": 6.0, "samples": 2}
+    assert learned["suggest"]["splitIntervalDays"] == 6 and learned["suggest"]["mode"] == "daily"
+    assert learned["dailyOffer"] == {"available": True, "pct": 20.0}, "60 % over 6 d ≈ 14 % a day, held to the guide's 20"
+    assert cultures.daily_draw_pct(70, 3) == 30 and cultures.daily_draw_pct(60, 8) == 20
+    jar["mode"] = "daily"
+    daily = cultures.learned_cadences(jar, [jar["history"]], now)
+    assert daily["suggest"]["mode"] is None and daily["dailyOffer"]["available"] is False, "in daily mode there is nothing to offer"
+    # Recovery by depth: two 70 % splits at ~5 d, two 50 % at ~3 d.
+    deep = []
+    t = now - timedelta(days=40)
+    for pct, days in ((70, 5), (50, 3), (70, 5), (50, 3)):
+        out = 1250 * pct / 100
+        deep.append({"event": "harvest", "at": _iso(t), "ml": out, "freshMl": out, "workingMl": 1250, "nutrientMl": 1.0, "tint": "dark"})
+        deep.append({"event": "tint", "at": _iso(t + timedelta(days=days)), "tint": "dark"})
+        t += timedelta(days=days + 1)
+    depth = cultures.darkening_by_depth(list(reversed(deep)))
+    assert depth["available"] and depth["line"] == "> 65 % splits took ~5 d to darken, ≤ 50 % splits took ~3 d to darken — this does not establish the cause"
+    assert cultures.darkening_by_depth(deep[:4])["available"] is False, "two at each depth before it speaks"
+    # The light line: a week under 14 h beside a cycle slower than the record.
+    dim = [{"event": "light", "at": _iso(now - timedelta(days=d)), "lightH": 11.0, "lampH": 0.0, "daylightH": 11.0} for d in range(1, 8)]
+    slow_rows = rows + [{"event": "harvest", "at": _iso(now - timedelta(days=6)), "ml": 750, "tint": "dark", "freshMl": 750, "nutrientMl": 1.1, "workingMl": 1250}]
+    jar["mode"] = "batch"
+    jar["history"] = list(reversed(slow_rows + dim))
+    assert cultures.light_samples(jar["history"]) == [11.0] * 7
+    learned = cultures.learned_cadences(jar, [jar["history"]], now)
+    assert learned["light"]["weekH"] == 11.0 and learned["light"]["line"] == "", "no slow cycle yet — nothing to pin on the light"
+    jar["history"].insert(0, {"event": "tint", "at": _iso(now - timedelta(hours=1)), "tint": "dark"})   # dark after 5.96 d — not slow
+    assert cultures.learned_cadences(jar, [jar["history"]], now)["light"]["line"] == ""
+    # A split at −9 d with no dark tap before it voids that cycle; the next
+    # dark comes 9 days after: slow against the 6-day record.
+    jar["history"] = list(reversed(rows[:3] + [{"event": "harvest", "at": _iso(now - timedelta(days=9)), "ml": 750, "tint": "green", "freshMl": 750, "nutrientMl": 1.1, "workingMl": 1250},
+                                              {"event": "tint", "at": _iso(now - timedelta(hours=1)), "tint": "dark"}] + dim))
+    assert cultures.darkening_samples(jar["history"])[0] > 8.9
+    line = cultures.learned_cadences(jar, [jar["history"]], now)["light"]["line"]
+    assert line.startswith("a week under 14 h of light (~11 h a day) beside a slow cycle") and "nothing here proves it" in line
+
+
+def test_risk_line_carries_the_light_the_f2_the_cycles_the_backup_and_the_starter():
+    ok_temp = {"available": True, "status": "ok", "tempC": 23.0}
+    jar = _phyto_jar(started_ago_days=12, now=NOW, lastTint="green", lastHarvestAt=_iso(NOW - timedelta(days=2)))
+    jar["history"] = [{"event": "harvest", "at": _iso(NOW - timedelta(days=2)), "ml": 750, "freshMl": 750, "nutrientMl": 0, "workingMl": 1250}]
+    st = cultures.culture_state(jar, NOW)
+    risk = cultures.risk_line(jar, st, ok_temp, NOW)
+    assert risk["level"] == "watch" and "no f/2 logged at the last split" in risk["reason"]
+    jar["history"][0]["nutrientMl"] = 1.1
+    assert cultures.risk_line(jar, st, ok_temp, NOW)["level"] == "ok"
+    light_watch = {"status": "watch", "line": "daylight 11.6 h … · lamp 4.4 h … — lamp off 2 h into its window", "nudge": ""}
+    assert cultures.risk_line(jar, st, ok_temp, NOW, light=light_watch)["reason"] == "lamp off 2 h into its window"
+    nudge = {"status": "watch", "line": "daylight 11.6 h (astronomical — the window gives less)", "nudge": "the days are under 12 h — put the LED on the plug"}
+    assert cultures.risk_line(jar, st, ok_temp, NOW, light=nudge)["reason"] == "the days are under 12 h — put the LED on the plug"
+    lost = {"status": "act", "line": "7.9 h of light today — the culture lost a day of light; expect the split to slip", "nudge": ""}
+    risk = cultures.risk_line(jar, st, ok_temp, NOW, light=lost)
+    assert risk["level"] == "act" and risk["reason"] == "the culture lost a day of light; expect the split to slip"
+    # Four splits since a fresh vessel: sterilise the spare.
+    jar["state"]["cyclesSinceFresh"] = 4
+    st = cultures.culture_state(jar, NOW)
+    assert "4 splits since a fresh vessel — sterilise the spare" in cultures.risk_line(jar, st, ok_temp, NOW)["reason"]
+    # The backup's refresh, and the starter's month while establishing.
+    b = _phyto_jar(started_ago_days=33, now=NOW, backupOf="c1", lastTint="green", workingL=1.0)
+    st = cultures.culture_state(b, NOW)
+    assert "the backup is 33 days old — refresh it from the main vessel" in cultures.risk_line(b, st, ok_temp, NOW)["reason"]
+    fresh = _phyto_jar(started_ago_days=2, now=NOW, lastTint="pale", starterOpenedAt=_iso(NOW - timedelta(days=30)))
+    st = cultures.culture_state(fresh, NOW)
+    assert "starter bottle is past its four weeks" in cultures.risk_line(fresh, st, ok_temp, NOW)["reason"]
+    # The heat guard speaks the alga's copy; an animal's jar keeps its own.
+    proj = [{"at": _iso(NOW + timedelta(hours=3)), "roomC": 29.5}]
+    assert "shade it, move it off the sunlit shelf" in cultures.heat_guard(proj, "nanno", NOW)["line"]
+    assert "a 50 % change ready" in cultures.heat_guard(proj, "tigriopus", NOW)["line"]
+    # The rig's lamp follows the light.
+    rig = cultures.rig_state([{"id": "c1", "name": "Nanno A", "kind": "phyto", "vesselKind": "bottle", "volumeL": 4,
+                               "state": {"status": "producing", "workingL": 1.25, "cycle": {"day": 3, "ofDays": 8, "percent": 40}},
+                               "due": ["refresh"], "tint": "green", "backupOf": "c0",
+                               "light": {"mode": "sun+lamp", "sunAvailable": True, "switchEntity": "switch.l", "lit": False, "status": "watch"}}],
+                             {"remainingMl": 0, "volumeMl": 1000, "status": "empty", "percent": 0})
+    p = rig["phyto"][0]
+    assert p["lightOn"] is False and p["lightWatch"] and p["backup"] and p["refreshHot"]
+
+
+def test_light_tick_runs_the_plug_from_sunset_banks_the_hours_and_writes_the_day_row():
+    now = datetime.now(timezone.utc)
+    now_local = integration.dt_util.as_local(now)
+    # Sunset an hour ago, 14 h of sun today → 2 h of lamp: the window is open now.
+    sun = {"state": "below_horizon", "next_rising": _iso(now + timedelta(hours=9)), "next_setting": _iso(now + timedelta(hours=23))}
+    jar = _phyto_jar(started_ago_days=5, lastTint="green")
+    jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": ""}
+    entry = _phyto_entry(jars={"c1": jar})
+    hass = FakeHass(states={"switch.lamp": "off", "sun.sun": FakeState("below_horizon", {"next_rising": sun["next_rising"], "next_setting": sun["next_setting"]})},
+                    entries=[entry])
+    run(integration._async_cultures_light_tick(hass, entry, now))
+    assert hass.states.get("switch.lamp").state == "on"
+    state = _cultures(entry)["jars"]["c1"]["state"]
+    assert state["lightOnAt"] and state["lightDay"] == now_local.date().isoformat() and state["lightMinutesToday"] == 0
+    assert any("lamp on at sunset" in a["message"] and "2.0 h to the 16 h day" in a["message"] for a in _config(entry)["activity"]), _config(entry)["activity"][:3]
+    calls = len(hass.services.calls)
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=1)))
+    assert len(hass.services.calls) == calls, "mid-window with the plug on: nothing to do, nothing saved"
+    # The window ends: the plug goes off, the minutes are banked, the day's light said.
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(hours=1, minutes=5)))
+    assert hass.states.get("switch.lamp").state == "off"
+    state = _cultures(entry)["jars"]["c1"]["state"]
+    assert state["lightOnAt"] == "" and state["lightOffAt"] and 64 <= state["lightMinutesToday"] <= 66
+    assert any("lamp off — 1.1 h on the plug today — 15.1 h with the sun" in a["message"] for a in _config(entry)["activity"])
+    # The plug drops mid-window after we lit it: one warning per window, no fight.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"].update({"lightOnAt": _iso(now), "lightWatchAt": ""})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass.states.set("switch.lamp", "off")
+    switch_calls = lambda: [c for c in hass.services.calls if c.domain == "switch"]   # noqa: E731 — the save pipeline dismisses notifications too
+    calls = len(switch_calls())
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=30)))
+    assert len(switch_calls()) == calls and hass.states.get("switch.lamp").state == "off", "we do not re-assert over the keeper"
+    assert any("lamp off 1.5 h into its window — check the plug" in a["message"] for a in _config(entry)["activity"])
+    assert _cultures(entry)["jars"]["c1"]["state"]["lightWatchAt"]
+    # A failed call: no stamp, retried next tick.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"].update({"lightOnAt": "", "lightWatchAt": ""})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass.services.fail_on.add(("switch", "turn_on"))
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=2)))
+    assert _cultures(entry)["jars"]["c1"]["state"]["lightOnAt"] == "" and hass.states.get("switch.lamp").state == "off"
+    hass.services.fail_on.clear()
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=3)))
+    assert _cultures(entry)["jars"]["c1"]["state"]["lightOnAt"] and hass.states.get("switch.lamp").state == "on"
+    # Unbound mid-burst: the stamps clear, nothing is switched.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["light"]["switchEntity"] = ""
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    calls = len(switch_calls())
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=4)))
+    assert _cultures(entry)["jars"]["c1"]["state"]["lightOnAt"] == "" and len(switch_calls()) == calls
+    # The day roll: yesterday's lamp minutes + the sun go into the journal as a light row.
+    cfg = _config(entry)
+    yesterday = (now_local - timedelta(days=1)).date().isoformat()
+    cfg["nps"]["cultures"]["jars"]["c1"]["light"].update({"switchEntity": "switch.lamp"})
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"].update({"lightDay": yesterday, "lightMinutesToday": 200, "lightOnAt": ""})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=5)))
+    jar_after = _cultures(entry)["jars"]["c1"]
+    row = next(r for r in jar_after["history"] if r["event"] == "light")
+    assert row["lampH"] == 3.3 and row["daylightH"] == 14.0 and row["lightH"] == 17.3
+    assert jar_after["state"]["lightDay"] == now_local.date().isoformat() and jar_after["state"]["lightMinutesToday"] == 0
+    assert cultures.light_samples(jar_after["history"]) == [17.3]
+    # Sun mode never touches a plug — even one left bound.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["light"]["mode"] = "sun"
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lightOnAt"] = ""
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass.states.set("switch.lamp", "off")
+    calls = len(switch_calls())
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=6)))
+    assert len(switch_calls()) == calls and hass.states.get("switch.lamp").state == "off"
+    # The tick is armed only for a rack with a phyto vessel.
+    assert integration.CULTURES_TICK_SECONDS == 60
+
+
+def test_ws_refresh_backup_reseeds_b_from_a_and_a_vessel_share_refreshes_a_running_b():
+    a = _phyto_jar(started_ago_days=40, lastTint="dark", lastHarvestAt=_iso(REAL - timedelta(days=6)), cyclesSinceFresh=2, generation=1)
+    a["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=2)), "tint": "dark"}]
+    b = _phyto_jar(started_ago_days=33, lastTint="green", workingL=1.0, backupOf="c1", generation=2, seededFrom="c1")
+    b["name"], b["volumeL"] = "Nanno B", 1.0
+    entry = _phyto_entry(jars={"c1": a, "c2": b},
+                         maintenance={"tasks": {"culture_c2_refresh": {"label": "Refresh Nanno B from Nanno A", "enabled": True, "cadenceDays": 32}},
+                                      "completions": {}, "reminders": {"enabled": True}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    jars = {j["id"]: j for j in conn.results[-1].payload["jars"]}
+    assert jars["c2"]["backupOf"] == "c1" and "refresh" in jars["c2"]["due"] and jars["c2"]["refresh"]["available"]
+    assert jars["c2"]["refresh"]["fromName"] == "Nanno A" and jars["c2"]["refresh"]["starterMl"] == 250 and jars["c2"]["refresh"]["freshMl"] == 750
+    assert jars["c1"]["refresh"]["backupId"] == "c2" and jars["c1"]["refresh"]["backupName"] == "Nanno B" and not jars["c1"]["refresh"]["isBackup"]
+    assert "harvest" not in jars["c2"]["due"], "the calendar never asks B for a split"
+    assert jars["c2"]["risk"]["level"] == "watch" and "the backup is 33 days old" in jars["c2"]["risk"]["reason"]
+    assert conn.results[-1].payload["sun"]["available"] is False, "no sun entity on this fake — never a guess"
+    plan = integration._cultures_push_plan(conn.results[-1].payload)
+    b_push = next(p for p in plan if p["jarId"] == "c2")
+    assert b_push["title"] == "OpenReef: Nanno B — refresh?" and b_push["actions"][0] == {"action": "OPENREEF_CULTURE_REFRESH:c2", "title": "Refresh from Nanno A"}
+    assert b_push["message"] == "The backup is 33 days old — a fresh litre from Nanno A"
+    f2_before = _config(entry)["consumables"]["products"]["f2"]["remainingMl"]
+    run(integration.websocket_cultures_refresh_backup(hass, conn, {"id": 2, "jar_id": "c2"}))
+    assert not conn.errors, conn.errors
+    cfg = _config(entry)
+    b_after, a_after = cfg["nps"]["cultures"]["jars"]["c2"], cfg["nps"]["cultures"]["jars"]["c1"]
+    assert b_after["history"][0]["event"] == "seeded" and b_after["history"][0]["from"] == "c1" and b_after["history"][0]["freshMl"] == 750
+    assert b_after["history"][1]["event"] == "restart" and b_after["history"][1]["from"] == "c1" and b_after["history"][1]["dests"] == [{"to": "waste", "ml": 1000}]
+    assert b_after["state"]["backupOf"] == "c1" and b_after["state"]["generation"] == 2 and b_after["state"]["workingL"] == 1.0, "gen = A's + 1: a refresh is a new seed, not a lineage step"
+    assert (REAL - integration._parse_datetime(b_after["state"]["startedAt"])).total_seconds() < 60, "B's clock restarts — the refresh clock with it"
+    assert cfg["maintenance"]["completions"]["culture_c2_refresh"][0]["notes"] == "Logged automatically — Nanno B refreshed from Nanno A"
+    row = next(r for r in a_after["history"] if r["event"] == "harvest")
+    assert row["ml"] == 250 and row["freshMl"] == 250 and a_after["state"]["workingL"] == 1.25, "A gives 250 ml and takes 250 ml back — like for like"
+    assert a_after["history"][0] == {**a_after["history"][0], "event": "split", "from": "c2", "ml": 250}
+    assert round(f2_before - cfg["consumables"]["products"]["f2"]["remainingMl"], 2) == round(0.375 + 1.125, 2), "f/2 by the fresh litres: A's 250 ml and B's 750 ml"
+    assert any("Nanno B refreshed from Nanno A" in x["message"] for x in cfg["activity"])
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    jars = {j["id"]: j for j in conn.results[-1].payload["jars"]}
+    assert "refresh" not in jars["c2"]["due"] and jars["c2"]["state"]["refresh"]["hoursUntil"] > 31 * 24
+    # A's own split with a vessel share now REFRESHES B rather than making a third jar.
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] = "dark"
+    cfg["nps"]["cultures"]["jars"]["c1"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "dark"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_split(hass, conn, {"id": 4, "jar_id": "c1", "ml": 750, "to": [{"to": "bottle", "ml": 500}, {"to": "vessel", "ml": 250}]}))
+    assert not conn.errors, conn.errors
+    cfg = _config(entry)
+    assert set(cfg["nps"]["cultures"]["jars"]) == {"c1", "c2"}
+    b_rows = cfg["nps"]["cultures"]["jars"]["c2"]["history"]
+    assert b_rows[0]["event"] == "seeded" and b_rows[1]["event"] == "restart" and sum(1 for r in b_rows if r["event"] == "restart") == 2
+    # Refusals: not a backup, the parent idle, the parent not ready — nothing written.
+    run(integration.websocket_cultures_refresh_backup(hass, conn, {"id": 5, "jar_id": "c1"}))
+    assert conn.errors[-1].code == "not_a_backup"
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] = "pale"
+    cfg["nps"]["cultures"]["jars"]["c1"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "pale"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    before = len(_cultures(entry)["jars"]["c2"]["history"])
+    run(integration.websocket_cultures_refresh_backup(hass, conn, {"id": 6, "jar_id": "c2"}))
+    assert conn.errors[-1].code == "not_ready_to_split" and len(_cultures(entry)["jars"]["c2"]["history"]) == before
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"]["crashedAt"] = _iso(REAL + timedelta(seconds=1))
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_refresh_backup(hass, conn, {"id": 7, "jar_id": "c2"}))
+    assert conn.errors[-1].code == "parent_idle"
+    # The phone's Refresh button is the same ceremony.
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"].update({"crashedAt": "", "lastTint": "dark"})
+    cfg["nps"]["cultures"]["jars"]["c1"]["history"].insert(0, {"event": "tint", "at": _iso(REAL + timedelta(seconds=1)), "tint": "dark"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    event = type("Ev", (), {"data": {"action": "OPENREEF_CULTURE_REFRESH:c2"}})()
+    run(integration._async_notification_action(hass, event))
+    assert _cultures(entry)["jars"]["c2"]["history"][0]["event"] == "seeded"
+
+
+def test_ws_apply_learned_moves_the_split_interval_and_switches_to_daily():
+    now = REAL
+    rows = [{"event": "seeded", "at": _iso(now - timedelta(days=20)), "ml": 1250, "tint": "pale", "freshMl": 1000, "nutrientMl": 1.5, "workingMl": 1250},
+            {"event": "tint", "at": _iso(now - timedelta(days=14)), "tint": "dark"},
+            {"event": "harvest", "at": _iso(now - timedelta(days=13)), "ml": 750, "tint": "dark", "freshMl": 750, "nutrientMl": 1.1, "workingMl": 1250},
+            {"event": "tint", "at": _iso(now - timedelta(days=7)), "tint": "dark"}]
+    jar = _phyto_jar(started_ago_days=20, lastHarvestAt=_iso(now - timedelta(days=13)), lastTint="green")
+    jar["history"] = list(reversed(rows))
+    entry = _phyto_entry(jars={"c1": jar}, maintenance={"tasks": {"culture_c1_harvest": {"label": "Split Nanno A", "enabled": True, "cadenceDays": 8, "criticalAfterDays": 11}},
+                                                           "completions": {}, "reminders": {"enabled": True}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["learned"]["suggest"]["splitIntervalDays"] == 6 and j["dailyOffer"] == {"available": True, "pct": 20.0}
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 2, "jar_id": "c1", "field": "splitIntervalDays"}))
+    assert not conn.errors, conn.errors
+    cfg = _config(entry)
+    assert cfg["nps"]["cultures"]["jars"]["c1"]["cadence"]["splitIntervalDays"] == 6
+    task = cfg["maintenance"]["tasks"]["culture_c1_harvest"]
+    assert task["cadenceDays"] == 6 and task["criticalAfterDays"] == 9 and task["cadenceHours"] == 144
+    assert any("split cadence set from the journal — 6 days" in x["message"] for x in cfg["activity"])
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 3}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["state"]["cycle"]["ofDays"] == 6 and j["cadence"]["harvestIntervalDays"] == 6, "the chore clock follows"
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 4, "jar_id": "c1", "field": "mode"}))
+    assert not conn.errors, conn.errors
+    cfg = _config(entry)
+    jar_after = cfg["nps"]["cultures"]["jars"]["c1"]
+    assert jar_after["mode"] == "daily" and jar_after["cadence"]["splitIntervalDays"] == 1 and jar_after["cadence"]["splitPct"] == 20
+    assert cfg["maintenance"]["tasks"]["culture_c1_harvest"]["cadenceDays"] == 1
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 5}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["mode"] == "daily" and j["dailyOffer"]["available"] is False and j["learned"]["suggest"]["mode"] is None
+    assert j["splitGuide"]["outMl"] == 250 and j["splitGuide"]["removalPct"] == 20, "the daily draw is sized to the culture"
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 6, "jar_id": "c1", "field": "mode"}))
+    assert conn.errors[-1].code == "not_learned"
+    run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 7, "jar_id": "c1", "field": "lightHours"}))
+    assert conn.errors[-1].code == "unknown_field"
+
+
+def test_ws_summary_reads_the_vessel_sensor_the_sun_and_the_lamp_and_the_guard_speaks_phyto():
+    now = datetime.now(timezone.utc)
+    jar = _phyto_jar(started_ago_days=12, lastTint="green")
+    jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": "sensor.nanno_water"}
+    entry = _phyto_entry(jars={"c1": jar}, maintenance={"tasks": {}, "completions": {}, "reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}})
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["tempEntity"] = "sensor.rack"
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass = FakeHass(states={"sensor.rack": FakeState("24.0", {"unit_of_measurement": "°C"}),
+                            "sensor.nanno_water": FakeState("29.6", {"unit_of_measurement": "°C"}),
+                            "switch.lamp": "on",
+                            "sun.sun": FakeState("below_horizon", {"next_rising": _iso(now + timedelta(hours=9)), "next_setting": _iso(now + timedelta(hours=23)), "elevation": -8.2})},
+                    entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    payload = conn.results[-1].payload
+    j = payload["jars"][0]
+    assert payload["tempC"] == 24.0, "the rack's air is still the rack's"
+    assert j["temp"]["tempC"] == 29.6 and j["temp"]["source"] == "vessel" and j["temp"]["status"] == "hot"
+    assert j["risk"]["level"] == "watch" and "29.6 °C at the rack" in j["risk"]["reason"]
+    assert payload["sun"]["available"] and payload["sun"]["daylightH"] == 14.0 and payload["sun"]["isDay"] is False
+    light = j["light"]
+    assert light["mode"] == "sun+lamp" and light["plugOn"] and light["lit"] and light["window"]["active"] and light["plannedLampH"] == 2.0
+    assert light["status"] == "ok" and light["lampH"] == 0, "own stamps only — a plug on that we did not light counts nothing yet"
+    assert payload["rig"]["phyto"][0]["lightOn"] is True
+    # Without the vessel sensor the rack stands in, and says so.
+    cfg["nps"]["cultures"]["jars"]["c1"]["light"]["tempEntity"] = ""
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 2}))
+    j = conn.results[-1].payload["jars"][0]
+    assert j["temp"]["tempC"] == 24.0 and j["temp"]["source"] == "rack"
+    # The heat guard's push for the alga carries the alga's sentence.
+    hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": [
+        {"at": _iso(now + timedelta(hours=4)), "roomC": 29.4}]}}}
+    config = _config(entry)
+    assert run(integration._async_cultures_heat_guard_push(hass, config, "mobile_app_phone")) == 1
+    call = hass.services.calls[-1]
+    assert call.data["title"] == "OpenReef: heat ahead for the Nannochloropsis (phyto)"
+    assert "shade it, move it off the sunlit shelf" in call.data["message"] and "The alga declines abruptly near 30 °C" in call.data["message"]
+    assert "ammonia" not in call.data["message"]
+
+
+def test_shelf_nudge_says_what_the_vessel_is_doing_about_an_empty_bottle():
+    jar = _phyto_jar(started_ago_days=12, lastTint="dark")
+    jar["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=1)), "tint": "dark"}]
+    products = {**_phyto_products(), "home_phyto_c1": {"name": "Home phyto (Nanno A)", "category": "phyto", "bottleMl": 1000, "remainingMl": 0,
+                                                       "refrigerated": True, "stirDaily": True, "shelfLifeDaysOpened": 21, "openedAt": "", "history": [],
+                                                       "doseMl": 35, "doseEveryDays": 1}}
+    entry = _phyto_entry(jars={"c1": jar}, products=products)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
+    state = conn.results[-1].payload["shelf"]["products"]["home_phyto_c1"]
+    assert state["splitNudge"] == "empty — Nanno A reads dark: split into this bottle"
+    assert "splitNudge" not in conn.results[-1].payload["shelf"]["products"]["f2"]
+    # Greening: the next split's clock; a full bottle: no nudge at all.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["state"].update({"lastTint": "green", "lastHarvestAt": _iso(REAL - timedelta(days=5))})
+    cfg["nps"]["cultures"]["jars"]["c1"]["history"] = []
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
+    assert conn.results[-1].payload["shelf"]["products"]["home_phyto_c1"]["splitNudge"] == "empty — Nanno A's next split is due in ~3 d"
+    cfg["consumables"]["products"]["home_phyto_c1"].update({"remainingMl": 800, "openedAt": _iso(REAL - timedelta(days=1))})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
+    assert conn.results[-1].payload["shelf"]["products"]["home_phyto_c1"]["splitNudge"] == ""
+    # The pure sentence: low with a running-out clock and a sign on the vessel.
+    low = {"empty": False, "low": True, "remainingMl": 60, "daysUntilEmpty": 1.7}
+    assert nps_engine.home_bottle_nudge(low, {"status": "producing", "harvestBlocked": True}, "Nanno A").startswith("runs out in ~1.7 d — Nanno A is off-colour")
+    assert nps_engine.home_bottle_nudge(low, {"status": "none"}, "Nanno A") == "runs out in ~1.7 d — Nanno A is not running; seed it and the bottle fills at the first split"
+    early = nps_engine.home_bottle_nudge(low, {"status": "producing", "splitEligible": False, "harvest": {"hoursUntil": 96}}, "Nanno A", 6)
+    assert early == "runs out in ~1.7 d — Nanno A's next split is due in ~4 d (your record says ~6 d to dark) — a small early split tides it over"
+
+
+def test_normaliser_keeps_the_light_block_and_the_stage_b_stamps():
+    raw = {"enabled": True, "jars": {"c1": {"name": "Nanno A", "species": "nanno",
+                                            "light": {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "6:30", "latestOff": "25:00", "tempEntity": "sensor.x"},
+                                            "state": {"backupOf": "c9", "lightOnAt": "2026-09-21T19:00:00+00:00", "lightMinutesToday": 9999, "lightDay": "2026-09-21", "lightWatchAt": "x", "lightLostDay": "2026-09-21"},
+                                            "history": [{"event": "light", "at": "2026-09-20T23:59:00+00:00", "lightH": 15.5, "lampH": 3.2, "daylightH": 12.3}]}}}
+    out = integration._normalise_cultures(raw)
+    jar = out["jars"]["c1"]
+    assert jar["light"] == {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "06:30", "latestOff": "00:00", "tempEntity": "sensor.x"}
+    assert jar["state"]["backupOf"] == "c9" and jar["state"]["lightMinutesToday"] == 1440 and jar["state"]["lightDay"] == "2026-09-21"
+    assert jar["history"][0]["lightH"] == 15.5 and jar["history"][0]["lampH"] == 3.2 and jar["history"][0]["daylightH"] == 12.3
+    junk = integration._normalise_cultures({"jars": {"c1": {"species": "nanno", "light": {"mode": "moon", "switchEntity": "not an entity"}}}})
+    assert junk["jars"]["c1"]["light"]["mode"] == "sun" and junk["jars"]["c1"]["light"]["switchEntity"] == "" and junk["jars"]["c1"]["light"]["onAt"] == "07:00"
+    assert "light" in integration._normalise_cultures({"jars": {"c1": {"species": "rotifer_L"}}})["jars"]["c1"], "every jar carries the block; only a vessel reads it"
 
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":

@@ -764,6 +764,39 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
     }
 
 
+def home_bottle_nudge(state: dict[str, Any], jar_state: Any, jar_name: str,
+                      days_to_dark: Any = None) -> str:
+    """The shelf's split nudge (phyto-culture §5.4, Stage B): a home phyto
+    bottle running low or empty says what the VESSEL is doing about it —
+    dark and ready (split now), greening (the next split in ~N days), or
+    empty (seed it). One sentence, never a figure the vessel has not earned."""
+    state = state if isinstance(state, dict) else {}
+    st = jar_state if isinstance(jar_state, dict) else {}
+    empty = bool(state.get("empty")) or _f(state.get("remainingMl")) <= 0
+    days_left = state.get("daysUntilEmpty")
+    soon = isinstance(days_left, (int, float)) and not isinstance(days_left, bool) and days_left <= 3
+    if not (empty or state.get("low") or soon):
+        return ""
+    status = str(st.get("status") or "none")
+    name = jar_name or "the vessel"
+    lead = "empty" if empty else f"runs out in ~{days_left:g} d" if soon else "running low"
+    if status not in ("establishing", "producing"):
+        return f"{lead} — {name} is not running; seed it and the bottle fills at the first split"
+    harvest = st.get("harvest") if isinstance(st.get("harvest"), dict) else {}
+    if st.get("splitEligible") and (harvest.get("due") or str(st.get("lastTint") or "") == "dark"):
+        return f"{lead} — {name} reads dark: split into this bottle"
+    if st.get("harvestBlocked"):
+        return f"{lead} — {name} is off-colour or carries a sign: nothing goes into the bottle until a look says green or dark"
+    hours = harvest.get("hoursUntil")
+    expect = _f(days_to_dark) if _f(days_to_dark) > 0 else None
+    if isinstance(hours, (int, float)) and not isinstance(hours, bool) and hours > 0:
+        due_days = hours / 24.0
+        when = f"~{due_days:.0f} d" if due_days >= 1 else "under a day"
+        early = " — a small early split tides it over" if soon and isinstance(days_left, (int, float)) and days_left < due_days else ""
+        return f"{lead} — {name}'s next split is due in {when}" + (f" (your record says ~{expect:g} d to dark)" if expect else "") + early
+    return f"{lead} — {name} is greening; the next split fills it"
+
+
 def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
                      tz: Any = None) -> dict[str, Any]:
     """Everything the food shelf shows for one bottle."""

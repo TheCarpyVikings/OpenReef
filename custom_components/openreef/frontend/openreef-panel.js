@@ -2056,6 +2056,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-rig-play") this._culturesRigPlay();
       if (action === "cultures-sign") this._culturesSign(id, target.dataset.sign || "");
       if (action === "cultures-apply-learned") this._culturesApplyLearned(id, target.dataset.field || "");
+      if (action === "cultures-refresh-backup") this._culturesRefreshBackup(id);
       if (action === "cultures-enrich-done") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: true }, "Enriched rotifers bottled — the boost clock runs from now.");
       if (action === "cultures-enrich-plain") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: false }, "Bottled plain — still live food.");
       if (action === "nps-cysts-opened") this._npsCystsOpened(target.dataset.id || "");
@@ -2984,8 +2985,17 @@ class OpenReefPanel extends HTMLElement {
               jar.mode = "batch";
               jar.nutrient = { productId: "", mlPerL: preset.nutrientMlPerL || 1.5 };
               jar.bottleMl = jar.bottleMl || 1000;
+              jar.light = jar.light || { mode: "sun", switchEntity: "", onAt: "07:00", latestOff: "00:00", tempEntity: "" };
             }
           }
+        } else if (field.startsWith("light.")) {
+          // The light block (doc §5.6, Stage B): the mode, the lamp's plug,
+          // the clock times, the vessel sensor — the hours are the cadence's.
+          jar.light = { mode: "sun", switchEntity: "", onAt: "07:00", latestOff: "00:00", tempEntity: "", ...(jar.light || {}) };
+          const key = field.slice(6);
+          if (key === "mode") jar.light.mode = ["sun", "lamp", "sun+lamp"].includes(value) ? value : "sun";
+          else if (key === "onAt" || key === "latestOff") jar.light[key] = /^\d{2}:\d{2}$/.test(String(value || "")) ? String(value) : (key === "onAt" ? "07:00" : "00:00");
+          else if (key === "switchEntity" || key === "tempEntity") jar.light[key] = String(value || "").trim();
         } else if (field === "harvestTo") {
           jar.harvestTo = ["tank", "source"].includes(value) ? value : "bottle";
         } else if (field === "mode") {
@@ -13016,6 +13026,7 @@ class OpenReefPanel extends HTMLElement {
         ${bar}
         <small>${s.bottleMl ? `${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml` : "Set the bottle size in Settings to start the ledger"} · ${runway}</small>
         ${planLine}
+        ${s.splitNudge ? `<small style="color:var(--warning-color,#f5a524)" data-shelf-nudge="${eid}">${esc(s.splitNudge)}</small>` : ""}
         <div class="button-row">
           ${dosedButton}
           <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
@@ -13872,6 +13883,15 @@ const rigSteps = [
       sizing: { available: true, yieldMlDay: 94, demandMlDay: 35, ratio: 2.7, idealL: 0.47, line: "the rack drinks ~35 ml a day (the tank's hand dose); this vessel makes ~94 at a 60 % split every 8 days — 3× more than it needs — run it at ~0.5 L, or scale up when the drip or the cone drinks it; the bottle absorbs the difference for three weeks" },
       starter: { available: true, status: "fresh", daysLeft: 15, ageDays: 13, openedAt: iso(13 * 24), arrivalTint: "green" },
       drips: [], hygiene: "Its own airline with a check valve, its own syringe and jug — never the rotifer kit.", nutrientNote: "f/2 goes in with NEW water only — the split's fresh litres, never the whole vessel, never mid-cycle.",
+      // Stage B: the sun as HA reads it and the lamp's sunset window, the
+      // backup fields (this is the main vessel), the daily offer not yet earned.
+      light: { mode: "sun+lamp", switchEntity: "switch.demo_phyto_lamp", tempEntity: "", targetH: 16, daylightH: 12.3, sunAvailable: true, isDay: true,
+        lampH: 0, deliveredH: 12.3, plannedLampH: 3.7, window: { onAt: iso(-5), offAt: iso(-8.7), active: false, over: false, rule: "sunset", hoursIn: null },
+        plugState: "off", plugOn: false, lit: true, shortDay: false, status: "ok",
+        line: "daylight 12.3 h (astronomical — the window gives less) · lamp 3.7 h from sunset 19:03 → 22:46 · 0 h lamp so far", nudge: "",
+        aerationNote: "Air is never switched — a still culture settles and dies; only the lamp rides the plug." },
+      backupOf: "", refresh: { isBackup: false, fromId: "", fromName: "", available: false, due: false, hoursUntil: null, everyDays: null, at: null, starterMl: null, freshMl: null, nutrientMl: null, workingL: null, backupId: "", backupName: "" },
+      dailyOffer: { available: false, pct: null },
       harvestGuide: { totalMl: 750, mixMl: 750, rodiMl: 0, targetPpt: 35 }, restartGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, fillGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 35 },
       history: [row("tint", 9, { tint: "green", tempC: 25.4 }), row("tint", 33, { tint: "green", tempC: 25.1 }), row("tint", 57, { tint: "pale", tempC: 24.8 }),
         row("harvest", 6 * 24, { ml: 750, tint: "dark", tempC: 25.0, dests: [{ to: "bottle", ml: 620 }, { to: "tank", ml: 130 }], freshMl: 750, nutrientMl: 1.1 }),
@@ -13896,7 +13916,7 @@ const rigSteps = [
       cones: [vessel(jarA), vessel(jarB)], tub: vessel(tub),
       jug: { harvestMl: 625, mixMl: 480, rodiMl: 145, ppt: 27, purgeMl: 50, sieveUm: 50 },
       bottle: { ml: 480, pct: 48, status: "fresh" },
-      phyto: [{ id: "n", name: "Nanno A", kind: "bottle", status: "producing", tint: "green", pct: 75, airOn: true, lightOn: true, splitHot: false, freshHot: false, lookHot: false,
+      phyto: [{ id: "n", name: "Nanno A", kind: "bottle", status: "producing", tint: "green", pct: 75, airOn: true, lightOn: true, lightWatch: false, backup: false, refreshHot: false, splitHot: false, freshHot: false, lookHot: false,
         offColour: false, peakHeld: false, advice: "wait", tempStatus: "ok", establishDays: null, firstHarvestDays: 7, cycleDay: 6, cycleOf: 8, workingL: 1.25, bottleMl: 620, bottleStatus: "fresh", scaleUp: false }],
       phytoJug: { jarName: "Nanno A", outMl: 750, freshMl: 750, mixMl: 750, rodiMl: 0, ppt: 35, nutrientMl: 1.1, scaleUp: false, workingLAfter: 1.25, available: true, reason: "" },
     };
@@ -14112,7 +14132,17 @@ const rigSteps = [
   _culturesApplyLearned(jarId, field) {
     if (!field) return;
     this._culturesCall({ type: "openreef/cultures_apply_learned", jar_id: jarId, field },
-      "Cadence set from the journal — the reminder follows it.");
+      field === "mode" ? "Daily mode — a small draw every day, sized to the culture; the split reminder now runs daily."
+        : "Cadence set from the journal — the reminder follows it.");
+  }
+
+  // Refresh the backup (doc §5.8, Stage B): a small split of the main vessel
+  // with the whole share into B — B's old litre to waste, seeded again 1:4.
+  _culturesRefreshBackup(jarId) {
+    const jar = (this._cultures?.summary?.jars || []).find((j) => j.id === jarId) || {};
+    const from = jar.refresh?.fromName || "the main vessel";
+    this._culturesCall({ type: "openreef/cultures_refresh_backup", jar_id: jarId },
+      `Backup refreshed from ${from} — the old culture to waste, a fresh litre on the sill; ${from} topped up like for like.`);
   }
 
   // Restart — and, by default when the rack has no backup, seed B from the
@@ -14215,6 +14245,7 @@ const rigSteps = [
       jars[`c${next}`] = {
         name: hasPhyto ? `Nanno ${next}` : "Nanno A", species: "nanno", vesselKind: "bottle", volumeL: 4,
         salinityPpt: 35, starterMl: 250, harvestTo: "bottle", mode: "batch", nutrient: { productId: "", mlPerL: 1.5 },
+        light: { mode: "sun", switchEntity: "", onAt: "07:00", latestOff: "00:00", tempEntity: "" },
         bottleMl: 1000, feed: { productId: "", doseMl: 5 }, cadence: {}, state: {}, history: [],
       };
     } else {
@@ -14316,6 +14347,21 @@ const rigSteps = [
           anchor(freshId, jar?.state?.lastRestartAt || jar?.state?.startedAt);
         } else if (tasks[freshId]) {
           delete tasks[freshId];
+        }
+        // B's refresh chore (doc §5.8, Stage B): only a backup carries it —
+        // every restartCycles splits of the main vessel, a week at the least.
+        const refreshId = `culture_${jid}_refresh`;
+        const parent = jar?.state?.backupOf ? jars[jar.state.backupOf] : null;
+        if (parent) {
+          const refreshDays = Math.max(7, (cycles || 4) * splitDays);
+          tasks[refreshId] = {
+            ...(tasks[refreshId] || { label: `Refresh ${name} from ${parent.name || jar.state.backupOf}`, enabled: true, notify: true,
+              notes: "The backup: tip the old litre, seed it again from the main vessel's split — 1:4 into fresh water with f/2. Tap Refresh on the Cultures tab." }),
+            cadenceDays: refreshDays, criticalAfterDays: refreshDays + 7,
+          };
+          anchor(refreshId, jar?.state?.startedAt);
+        } else if (tasks[refreshId]) {
+          delete tasks[refreshId];
         }
         for (const gone of [`culture_${jid}_feed`, `culture_${jid}_water_change`]) if (tasks[gone]) delete tasks[gone];
         seeded.push(name);
@@ -14529,11 +14575,11 @@ const rigSteps = [
       const label = this._escape((p.name || "PHYTO").toUpperCase());
       const line = p.status === "none" ? "empty — seed it" : p.status === "crashed" ? "crashed"
         : p.status === "establishing" ? `greening · day ${p.establishDays ?? 0} of ~${p.firstHarvestDays ?? 7}`
-          : `${p.tint || "producing"} · day ${p.cycleDay ?? 0} of ~${p.cycleOf ?? 8}${p.peakHeld ? " · held at peak" : ""}`;
+          : `${p.tint || "producing"} · day ${p.cycleDay ?? 0} of ~${p.cycleOf ?? 8}${p.peakHeld ? " · held at peak" : ""}${p.backup ? (p.refreshHot ? " · backup — refresh it" : " · backup") : ""}`;
       const textColour = p.status === "none" ? "#78909c" : strokeP === "#e5484d" ? "#e5484d" : p.tint === "pale" ? "#aed581" : p.tint === "dark" ? "#66bb6a" : fill;
       return `
         <g data-cultures-phyto="${this._escape(p.id || "")}"${i > 0 ? ' opacity="0.6"' : ""}>
-          ${running ? `<rect x="${x - 4}" y="48" width="74" height="6" rx="2" fill="#ffe082"></rect>${[x + 10, x + 33, x + 56].map((rx) => `<path d="M ${rx} 56 V 62" stroke="#ffe082" stroke-width="1.6" stroke-linecap="round"></path>`).join("")}` : ""}
+          ${running ? `<rect x="${x - 4}" y="48" width="74" height="6" rx="2" fill="${p.lightOn === false ? (p.lightWatch ? "#e5484d" : "#546e7a") : "#ffe082"}"></rect>${p.lightOn === false ? "" : [x + 10, x + 33, x + 56].map((rx) => `<path d="M ${rx} 56 V 62" stroke="#ffe082" stroke-width="1.6" stroke-linecap="round"></path>`).join("")}` : ""}
           <rect x="${x + 22}" y="58" width="22" height="9" rx="2" fill="#546e7a"></rect>
           <path d="${body}" fill="#101a22" stroke="${strokeP}" stroke-width="2.5" ${p.status === "none" ? 'stroke-dasharray="6 4"' : ""}></path>
           ${op > 0 ? `<clipPath id="culRigPhyto${i}"><path d="${body}"></path></clipPath>
@@ -14780,7 +14826,7 @@ const rigSteps = [
   // is fed and harvested; a phyto vessel is looked at, split and given a
   // fresh vessel — the backend's keys stay one machine, the words do not.
   _culturesChoreWord(jar, key) {
-    if (jar && jar.kind === "phyto") return ({ look: "look", harvest: "split", restart: "fresh vessel" })[key] || key;
+    if (jar && jar.kind === "phyto") return ({ look: "look", harvest: "split", restart: "fresh vessel", refresh: "refresh the backup" })[key] || key;
     return ({ feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look" })[key] || key;
   }
 
@@ -14790,7 +14836,7 @@ const rigSteps = [
     const sum = st.summary || {};
     const jars = Array.isArray(sum.jars) ? sum.jars : [];
     const bottle = sum.bottle || {};
-    const chore = { feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look" };
+    const chore = { feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look", refresh: "refresh the backup" };
     const anyPhyto = jars.some((j) => j.kind === "phyto");
     const onlyPhyto = jars.length > 0 && jars.every((j) => j.kind === "phyto");
 
@@ -15197,13 +15243,19 @@ const rigSteps = [
         : `day ${Math.round(cycle.day || 0)} / ~${Math.round(cycle.ofDays || 8)}`;
     const clip = `culPhyto-${this._escape(jar.id)}`;
     const body = "M 40 26 H 64 V 34 Q 78 40 78 52 V 100 Q 78 108 70 108 H 34 Q 26 108 26 100 V 52 Q 26 40 40 34 Z";
+    // The lamp glyph follows the real light (Stage B): lit = the sun is up or
+    // the plug is on; a grey lamp is a dark vessel, a red one a lamp that
+    // should be on and is not.
+    const lightInfo = jar?.light && jar.light.mode ? jar.light : null;
+    const lit = lightInfo ? !!lightInfo.lit : running;
+    const lampFill = !running ? "" : lightInfo && lightInfo.status === "watch" && lightInfo.window?.active && !lightInfo.plugOn ? "#e5484d" : lit ? "#ffe082" : "#546e7a";
     return `
       <svg viewBox="0 0 104 124" style="width:96px;flex:0 0 auto;" role="img" aria-label="${this._escape(jar?.speciesName || "Phyto")} — ${this._escape(status)}${tint ? `, ${this._escape(tint)}` : ""}" data-culture-phyto-svg="${this._escape(jar.id)}">
         <style>
           @keyframes nps-bub { from { transform: translateY(0); opacity:.9; } to { transform: translateY(-42px); opacity:0; } }
           .nps-bub { animation: nps-bub 2.2s linear infinite; }
         </style>
-        ${running ? `<rect x="30" y="2" width="44" height="6" rx="2" fill="#ffe082"></rect>${[38, 52, 66].map((x) => `<path d="M ${x} 9 V 15" stroke="#ffe082" stroke-width="1.5" stroke-linecap="round"></path>`).join("")}` : ""}
+        ${running ? `<rect x="30" y="2" width="44" height="6" rx="2" fill="${lampFill}" data-culture-lamp="${lit ? "on" : "off"}"></rect>${lit ? [38, 52, 66].map((x) => `<path d="M ${x} 9 V 15" stroke="${lampFill}" stroke-width="1.5" stroke-linecap="round"></path>`).join("") : ""}` : ""}
         <rect x="40" y="16" width="24" height="10" rx="2" fill="#546e7a"></rect>
         <path d="${body}" fill="rgba(255,255,255,0.04)" stroke="${stroke}" stroke-width="2.5" ${status === "none" ? 'stroke-dasharray="5 4"' : ""}></path>
         ${level > 0 ? `<clipPath id="${clip}"><path d="${body}"></path></clipPath>
@@ -15227,9 +15279,9 @@ const rigSteps = [
     const status = s.status || "none";
     const running = status === "producing" || status === "establishing";
     const due = j.due || [];
-    const reasonWord = { dark: "it reads dark", cycles: `${esc(s.cyclesSinceFresh ?? "")} splits since the last`, sign: "a sign" };
+    const reasonWord = { dark: "it reads dark", cycles: `${esc(s.cyclesSinceFresh ?? "")} splits since the last`, sign: "a sign", backup: `${esc(Math.round(s.ageDays || 0))} days on the sill` };
     const chips = due.map((d) => {
-      const reason = d === "harvest" ? reasonWord[s.harvest?.reason] : d === "restart" ? reasonWord[s.restart?.reason] : "";
+      const reason = d === "harvest" ? reasonWord[s.harvest?.reason] : d === "restart" ? reasonWord[s.restart?.reason] : d === "refresh" ? reasonWord[s.refresh?.reason] : "";
       return `<span class="pill warning" style="font-size:11px;">${esc(this._culturesChoreWord(j, d))} due${reason ? ` · ${reason}` : ""}</span>`;
     }).join(" ");
     const cycle = s.cycle || {};
@@ -15251,7 +15303,8 @@ const rigSteps = [
         <label class="culture-field" title="Optional: the depth at which a mark on a white stick disappears in the culture. Nothing is inferred from it yet — the readings accrue for the printable stick (Stage C).">Secchi<span class="unit"><input type="number" min="0" max="60" step="0.5" placeholder="cm" data-cultures-secchi="${esc(j.id)}"><small class="muted">cm · optional</small></span></label>` : "";
     const canSplit = running && !s.harvestBlocked;
     const drips = Array.isArray(j.drips) ? j.drips : [];
-    const canB = !!(sum.canAddJar || (sum.idleJars || []).some((id) => (jars.find((x) => x.id === id) || {}).species === j.species));
+    const refresh = j.refresh || {};
+    const canB = !!(sum.canAddJar || refresh.backupId || (sum.idleJars || []).some((id) => (jars.find((x) => x.id === id) || {}).species === j.species));
     const destRow = (dest, label, title, on, ml, extra = "", noMl = false) => `
         <div class="culture-field" title="${esc(title)}"><span>${label}</span><span class="culture-tick" style="gap:6px;"><input type="checkbox" data-cultures-dest-${dest}="${esc(j.id)}" ${on ? "checked" : ""}>${noMl
           ? `<small class="muted">${extra}</small>`
@@ -15262,7 +15315,9 @@ const rigSteps = [
         ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
         ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
         ${drips.length ? destRow("drip", "→ drip", `Load the drip's jar (${drips.map((d) => d.name).join(", ")}) — its day clock restarts; the jar takes what fits.`, false, "", "the jar's fill", true) : ""}
-        ${canB ? destRow("vessel", "→ B", "Seed a second vessel from this one — a windowsill backup on its own light; a litre is plenty.", false, "", " for B") : ""}
+        ${canB ? (refresh.backupId
+          ? destRow("vessel", `→ ${esc(refresh.backupName)}`, `Refresh ${refresh.backupName} from this vessel — its old culture to waste, this share of today's crop as the new seed (1:4 into fresh water + f/2).`, false, "", ` to refresh ${esc(refresh.backupName)}`)
+          : destRow("vessel", "→ B", "Seed a second vessel from this one — a windowsill backup on its own light; a litre is plenty.", false, "", " for B")) : ""}
         <label class="culture-field" title="Fresh ${esc(j.salinityPpt)} ppt water goes in like for like. A bigger working volume is a SCALE-UP: ${esc(starter.workingL || 1.25)} L → ${esc(kit.workingL || 3.5)} L over the first splits, once the drip or the cone drinks it.">After<span class="unit"><input type="number" min="0.2" max="${esc(j.volumeL || 4)}" step="0.05" data-cultures-working-after="${esc(j.id)}" value="${esc(s.workingL || j.volumeL)}"><small class="muted">L working (max ${esc(j.volumeL)})</small></span></label>
         <div class="culture-field"><span></span><label class="culture-tick" title="${esc(j.nutrientNote || "f/2 rides the fresh water only.")}"><input type="checkbox" data-cultures-f2="${esc(j.id)}" checked> f/2 with the fresh water — ${esc(guide.nutrientMl ?? 0)} ml${j.nutrient?.productName ? ` off ${esc(j.nutrient.productName)}` : " (no f/2 bottle on the shelf)"}</label></div>` : "";
     const seedCard = !running ? `
@@ -15291,12 +15346,29 @@ const rigSteps = [
       : "no f/2 bottle on the shelf — add Reefphyto's Phytoplankton Nutrient from the presets and link it in Culture settings"}</small>`;
     const starterLine = running && j.starter?.available ? `<small class="muted">starter bottle: ${j.starter.status === "stale" ? `<span style="color:var(--warning-color,#f5a524)">past its four weeks</span>` : `${esc(j.starter.daysLeft)} d of its four weeks left`}${j.starter.arrivalTint ? ` · arrived ${esc(j.starter.arrivalTint)}` : ""}</small>` : "";
     const lineageLine = running && j.lineage?.line ? `<small class="muted">${esc(j.lineage.line)}</small>` : "";
+    const tempWhere = j.temp?.source === "vessel" ? "the vessel's own sensor" : "this is the rack's air, not the culture — a vessel sensor in Culture settings reads the water";
     const tempLine = j.temp?.available && j.temp.status !== "ok"
-      ? `<small style="color:${j.temp.status === "hot" || j.temp.status === "critical" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}">🌡️ ${esc(j.temp.tempC)} °C — ${j.temp.status === "cool"
+      ? `<small style="color:${j.temp.status === "hot" || j.temp.status === "critical" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-temp-source="${esc(j.temp.source || "")}">🌡️ ${esc(j.temp.tempC)} °C — ${j.temp.status === "cool"
         ? `below the ${esc(j.temp.minC)} °C band — it will green slowly`
-        : `over the ${esc(j.temp.status === "warm" ? j.temp.maxC : j.temp.hardMaxC)} °C ${j.temp.status === "warm" ? "band" : "line"} — the alga declines abruptly near 30: shade it, move it off the sunlit shelf, a cooler room (this is the rack's air, not the culture, unless a vessel sensor says otherwise)`}</small>` : "";
+        : `over the ${esc(j.temp.status === "warm" ? j.temp.maxC : j.temp.hardMaxC)} °C ${j.temp.status === "warm" ? "band" : "line"} — the alga declines abruptly near 30: shade it, move it off the sunlit shelf, a cooler room`} (${tempWhere})</small>` : "";
+    // Light (doc §5.6, Stage B): the sun as HA reads it, the lamp's window
+    // and what it delivered, the short-day nudge, the lamp-off watch.
+    const light = j.light || {};
+    const lightLine = running && light.mode
+      ? `<small ${light.status === "act" ? 'style="color:var(--error-color,#e5484d)"' : light.status === "watch" ? 'style="color:var(--warning-color,#f5a524)"' : 'class="muted"'} data-culture-light="${esc(light.status || "ok")}" title="${esc(light.aerationNote || "")}">${light.mode === "sun" ? "☀" : light.mode === "lamp" ? "💡" : "☀+💡"} ${esc(light.line || "")}${light.nudge ? ` — ${esc(light.nudge)}` : ""}</small>` : "";
+    const refreshLine = running && refresh.isBackup
+      ? `<small class="muted" data-culture-backup="${esc(refresh.fromId || "")}">backup of ${esc(refresh.fromName || refresh.fromId)} · ${refresh.due ? `<span style="color:var(--warning-color,#f5a524)">refresh due</span>` : refresh.hoursUntil != null ? `refresh in ~${esc(Math.max(1, Math.round(refresh.hoursUntil / 24)))} d` : "refresh when its clock says"}${refresh.everyDays ? ` (every ~${esc(Math.round(refresh.everyDays))} d)` : ""} · ${esc(refresh.starterMl || 250)} ml from ${esc(refresh.fromName || "A")} + ${esc(refresh.freshMl || 750)} ml fresh + ${esc(refresh.nutrientMl ?? 1.1)} ml f/2</small>` : "";
     const learned = j.learned || {};
-    const learnedLine = running && learned.daysToDark?.available ? `<small class="muted">Your vessel darkens in ~${esc(learned.daysToDark.days)} days (${esc(learned.daysToDark.samples)} cycles).</small>` : "";
+    const offer = j.dailyOffer || {};
+    const learnedLine = running && learned.daysToDark?.available && learned.suggest?.splitIntervalDays == null ? `<small class="muted">Your vessel darkens in ~${esc(learned.daysToDark.days)} days (${esc(learned.daysToDark.samples)} cycles).</small>` : "";
+    const applyLines = running ? [
+      learned.suggest?.splitIntervalDays != null && learned.daysToDark?.available
+        ? `<small class="muted">Your vessel darkens in ~${esc(learned.daysToDark.days)} days (${esc(learned.daysToDark.samples)} cycles) — split every ${esc(learned.suggest.splitIntervalDays)}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${esc(j.id)}" data-field="splitIntervalDays">Apply</button></small>` : "",
+      offer.available && learned.suggest?.mode === "daily"
+        ? `<small class="muted">Two cycles learned — run it daily? A ${esc(offer.pct)} % draw every day, sized to the culture, never to the tank; the surplus goes to the bottle. <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${esc(j.id)}" data-field="mode">Switch to daily</button></small>` : "",
+      learned.depth?.available ? `<small class="muted">${esc(learned.depth.line)}.</small>` : "",
+      learned.light?.line ? `<small class="muted">${esc(learned.light.line)}.</small>` : "",
+    ].filter(Boolean).join("") : "";
     const signs = running ? `
         <div class="culture-field" title="A sign brings the fresh vessel forward and blocks the split until a look says green or dark again — tap the one you see"><span>Signs</span>
           <div class="culture-signs">${(j.signs || sum.phytoSigns || []).map((sg) => `<button class="secondary compact-button"${j.lastSign === sg.id ? ' style="border-color:var(--error-color,#e5484d);"' : ""} data-action="cultures-sign" data-id="${esc(j.id)}" data-sign="${esc(sg.id)}">${esc(sg.id)}</button>`).join("")}</div>
@@ -15309,10 +15381,11 @@ const rigSteps = [
       running ? `<button class="${due.includes("look") ? "primary" : "secondary"} compact-button" data-action="cultures-looked" data-id="${esc(j.id)}" title="Logs the colour (and a Secchi reading if you typed one) — nothing else moves">Looked</button>` : "",
       running ? `<button class="${due.includes("harvest") && canSplit ? "primary" : "secondary"} compact-button" data-action="cultures-split-phyto" data-id="${esc(j.id)}" title="${canSplit ? "The harvest: out to the places ticked, fresh water and f/2 in, the colour back to pale" : "Blocked — off-colour or a sign on the record; a look that says green or dark unblocks it, a fresh vessel is the way out"}" ${canSplit ? "" : "disabled"}>Split</button>` : "",
       running ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-fresh-vessel" data-id="${esc(j.id)}" title="The same split, the seed into a sterilised container of new water + f/2 — every ${esc(s.restartCycles || 4)} splits, or on a sign${s.harvestBlocked ? "; an off-colour crop goes to waste, never the bottle" : ""}">Fresh vessel</button>` : "",
+      running && refresh.isBackup && refresh.available ? `<button class="${due.includes("refresh") ? "primary" : "secondary"} compact-button" data-action="cultures-refresh-backup" data-id="${esc(j.id)}" title="A small split of ${esc(refresh.fromName)}: ${esc(refresh.starterMl || 250)} ml of its crop into this bottle with fresh water and f/2 — the old culture to waste">Refresh from ${esc(refresh.fromName)}</button>` : "",
       running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${esc(j.id)}">Crashed</button>` : "",
       status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${esc(j.id)}" title="A picture of this vessel's story — the last 14 days of colour">Share card</button>` : "",
     ].filter(Boolean).join("");
-    const notes = [advice, risk, jug, warn, sizing, seedLine, bottleLine, nutrient, starterLine, learnedLine, lineageLine, tempLine].filter(Boolean).join("");
+    const notes = [advice, risk, lightLine, jug, warn, sizing, seedLine, bottleLine, refreshLine, nutrient, starterLine, learnedLine, applyLines, lineageLine, tempLine].filter(Boolean).join("");
     return `
         <div class="culture-tile" data-culture="${esc(j.id)}" data-culture-kind="phyto">
           <div class="culture-jar">${this._culturesPhytoSvg(j)}</div>
@@ -15429,6 +15502,7 @@ const rigSteps = [
   _culturesPhytoSettingsRow(jid, jar, preset, cad, running, speciesList, products, numberField) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const nutrient = jar?.nutrient || {};
+    const light = jar?.light || {};
     return `
         <div class="stack" style="gap:6px;padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);" data-culture-settings-kind="phyto">
           <div class="mini-grid">
@@ -15452,18 +15526,27 @@ const rigSteps = [
               ${Object.entries(products).map(([pid, p]) => `<option value="${esc(pid)}" ${(nutrient.productId || "") === pid ? "selected" : ""}>${esc(p?.name || pid)}</option>`).join("")}
             </select></label>
             <label title="Reefphyto: 1.5 ml per litre of NEW water — never re-dosed mid-cycle. The label wins.">f/2 per litre of new water (ml)<input type="number" min="0" max="10" step="0.1" data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="nutrientMlPerL" value="${esc(nutrient.mlPerL ?? preset.nutrientMlPerL ?? 1.5)}"></label>
-            <label title="Batch: 50–70 % every 7–10 days, at least 30 % left as seed. Daily (semi-continuous): 20–30 % a day replaced with fresh medium — offered once the journal has learned your days-to-dark twice (Stage B).">Mode<select data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="mode">
+            <label title="Batch: 50–70 % every 7–10 days, at least 30 % left as seed. Daily (semi-continuous): 20–30 % a day replaced with fresh medium, the draw sized to the culture — the tile offers it once the journal has learned your days-to-dark twice.">Mode<select data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="mode">
               <option value="batch" ${(jar?.mode || "batch") !== "daily" ? "selected" : ""}>batch — split when it reads dark</option>
               <option value="daily" ${jar?.mode === "daily" ? "selected" : ""}>daily — a small split every day</option>
             </select></label>
           </div>
-          <small class="awc-hint">The culture IS the colour: pale → green → dark under a 6000–6500 K lamp 10–15 cm away for 16 h, or the window while the days are long enough (Stage B puts the lamp on a plug and reads the sun). <strong>Hygiene, said once:</strong> its own airline with a check valve, its own syringe and jug — never the rotifer kit. Tint and days do not count cells; the fridge bottle is uncounted (dose by tint) until something counts it.</small>
+          <div class="mini-grid" data-culture-light="${esc(jid)}">
+            <label title="Sun: the rack's window — the day length comes from Home Assistant's sun. Lamp: the LED on a plug, on at the time below for the light hours. Sun + lamp: the plug runs from SUNSET until daylight + lamp reach the light hours, never past the latest-off time.">Light<select data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.mode">
+              ${[["sun", "sun — the window, no plug"], ["lamp", "lamp — the LED on a plug"], ["sun+lamp", "sun + lamp — the plug from sunset"]].map(([v, l]) => `<option value="${v}" ${(light.mode || "sun") === v ? "selected" : ""}>${l}</option>`).join("")}
+            </select></label>
+            <label title="The smart plug the LED hangs off. Only the lamp is ever switched — never the air.">Lamp plug<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.switchEntity" value="${esc(light.switchEntity || "")}" placeholder="switch.phyto_lamp"></label>
+            <label title="Lamp mode: on at this time for the light hours (07:00 + 16 h = 23:00). Sun + lamp falls back to it only when the sun cannot be read.">Lamp on at<input type="time" data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.onAt" value="${esc(light.onAt || "07:00")}"></label>
+            <label title="Sun + lamp: the lamp never runs past this — a 16 h day always leaves the eight dark hours.">Latest off<input type="time" data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.latestOff" value="${esc(light.latestOff || "00:00")}"></label>
+            <label title="Optional: a sensor in or on the vessel. A vessel in the sun runs over the room and over the rack sensor — without one the heat line is the rack's air, and says so.">Vessel sensor (optional)<input data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.tempEntity" value="${esc(light.tempEntity || "")}" placeholder="sensor.nanno_water"></label>
+          </div>
+          <small class="awc-hint">The culture IS the colour: pale → green → dark under a 6000–6500 K lamp 10–15 cm away for 16 h, or the window while the days are long enough — the tile reads the sun and says when the days drop under 12 h; sun + lamp runs the plug from sunset so the day always adds up to the light hours with the eight dark hours kept. Direct sun cooks a vessel: yellowing and heat are the signs. <strong>Hygiene, said once:</strong> its own airline with a check valve, its own syringe and jug — never the rotifer kit. Tint and days do not count cells; the fridge bottle is uncounted (dose by tint) until something counts it.</small>
           <small class="awc-hint">Cadence — starting points. A dark look brings the split forward whatever the calendar says; the fresh vessel comes every few splits, or on a sign.</small>
           <div class="mini-grid">
             ${numberField(jid, "splitPct", "Split (%)", cad.splitPct ?? 60, 10, 90, 5, "50–70 % out, at least 30 % left as seed; warned above 70")}
             ${numberField(jid, "splitIntervalDays", "Split every (days)", cad.splitIntervalDays ?? 8, 1, 30, 0.5, "7–10 days to dark under a lamp; the journal learns yours")}
             ${numberField(jid, "restartCycles", "Fresh vessel every (splits, 0 = never)", cad.restartCycles ?? 4, 0, 20, 1, "A fresh, sterilised container every 3–4 splits")}
-            ${numberField(jid, "lightHours", "Light (h a day)", cad.lightHours ?? 16, 0, 24, 1, "16 h on, 8 h dark — the lamp on a plug reads this in Stage B")}
+            ${numberField(jid, "lightHours", "Light (h a day)", cad.lightHours ?? 16, 0, 24, 1, "16 h on, 8 h dark — the lamp's window and the sunset rule read this")}
           </div>
           <div class="button-row">
             <button class="danger-text compact-button" data-action="cultures-remove-jar" data-id="${esc(jid)}" ${running ? 'title="Mark it crashed first"' : ""}>Remove vessel</button>
@@ -31296,7 +31379,7 @@ const rigSteps = [
     if (Number.isFinite(snoozeMs) && snoozeMs > Date.now()) {
       return { status: "ok", label: "snoozed", detail: `Snoozed until ${this._formatActivityTime(task.snoozedUntil)}.`, latest, snoozed: true };
     }
-    const cultureTask = /^culture_(.+)_(feed|harvest|restart|water_change|look)$/.exec(id);
+    const cultureTask = /^culture_(.+)_(feed|harvest|restart|water_change|look|refresh)$/.exec(id);
     if (cultureTask) {
       if (!this._culturesEnabled()) return { status: "unknown", label: "cultures off", detail: "Cultures are disabled.", latest };
       if (!this._cultures.demo && !this._cultures.loading && (!this._cultures.at || Date.now() - this._cultures.at > 30000)) this._culturesLoadSummary();
@@ -31629,7 +31712,7 @@ const rigSteps = [
       const vessel = this._npsVesselEntries().find(([v]) => v === vid);
       return { kind: "hatchery", label: vessel?.[1]?.name || "Hatchery", tab: "hatchery" };
     }
-    const culture = /^culture_(.+)_(?:feed|harvest|restart|water_change)$/.exec(id);
+    const culture = /^culture_(.+)_(?:feed|harvest|restart|water_change|look|refresh)$/.exec(id);
     if (culture) {
       const jar = this._config?.nps?.cultures?.jars?.[culture[1]];
       return { kind: "cultures", label: jar?.name || "Culture", tab: "cultures" };

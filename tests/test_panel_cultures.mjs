@@ -1352,5 +1352,133 @@ test("the demo rack carries the phyto vessel and renders without placeholders", 
   } finally { restore(); }
 });
 
+// --- 0.7.208 — Stage B: light, heat, backup, learning (doc §5.6, §5.8, §5.10, §11) ---
+function stageBLight(over = {}) {
+  return { mode: "sun+lamp", switchEntity: "switch.phyto_lamp", tempEntity: "", targetH: 16, daylightH: 12.4, sunAvailable: true, isDay: false,
+    sunsetAt: iso(2), sunriseAt: iso(-10), lampH: 1.5, deliveredH: 13.9, plannedLampH: 3.6,
+    window: { onAt: iso(2), offAt: iso(-1.6), active: true, over: false, rule: "sunset", hoursIn: 1.9 },
+    plugState: "on", plugOn: true, lit: true, shortDay: false, status: "ok",
+    line: "daylight 12.4 h (astronomical — the window gives less) · lamp 3.6 h from sunset 19:09 → 22:45 · 1.5 h lamp so far", nudge: "",
+    aerationNote: "Air is never switched — a still culture settles and dies; only the lamp rides the plug.", ...over };
+}
+
+test("Stage B tile: the light line, the vessel-sensor words, the Apply chips, the learned lines and the refresh label on the B share", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = phytoJar({
+      light: stageBLight(),
+      temp: { available: true, status: "hot", tempC: 29.6, minC: 20, maxC: 27, hardMaxC: 29, actC: 30, criticalC: 32, act: false, source: "vessel" },
+      learned: { clearingH: { available: false }, firstHarvestDays: { available: false }, runLengthDays: { available: false }, yieldMlDay: 94, yieldLWeek: 0.66,
+        suggest: { splitIntervalDays: 6, mode: "daily" }, daysToDark: { available: true, days: 6, samples: 2 },
+        depth: { available: true, line: "> 65 % splits took ~5 d to darken, ≤ 50 % splits took ~3 d to darken — this does not establish the cause" },
+        light: { weekH: 11, days: 7, line: "a week under 14 h of light (~11 h a day) beside a slow cycle — the light is the first thing to check; nothing here proves it" } },
+      dailyOffer: { available: true, pct: 20 },
+      refresh: { isBackup: false, fromId: "", fromName: "", available: false, due: false, backupId: "n2", backupName: "Nanno B", everyDays: 32 },
+    });
+    const panel = await culturesPanel(phytoConfig(), phytoSummary(jar));
+    const html = panel._culturesTab();
+    noPlaceholders(html, "stage B tile");
+    assert(html.includes('data-culture-light="ok"') && html.includes("☀+💡 daylight 12.4 h (astronomical — the window gives less) · lamp 3.6 h from sunset 19:09 → 22:45 · 1.5 h lamp so far"), "the light line");
+    assert(html.includes('data-culture-lamp="on"'), "the tile's lamp glyph is lit");
+    assert(html.includes('data-culture-temp-source="vessel"') && html.includes("29.6 °C") && html.includes("(the vessel's own sensor)"), "the vessel sensor names itself");
+    assert(html.includes("split every 6? <button") && html.includes('data-action="cultures-apply-learned" data-id="n1" data-field="splitIntervalDays"'), "Apply on days-to-dark");
+    assert(html.includes("Two cycles learned — run it daily? A 20 % draw every day") && html.includes('data-field="mode">Switch to daily'), "the daily offer");
+    assert(html.includes("&gt; 65 % splits took ~5 d to darken") && html.includes("a week under 14 h of light"), "recovery by depth and the light line");
+    assert(html.includes("→ Nanno B</span>") && html.includes("to refresh Nanno B"), "the B share refreshes the running backup");
+    // The lamp that should be on and is not: a watch, a red lamp, the risk line's words.
+    const dark = phytoJar({ light: stageBLight({ status: "watch", plugOn: false, plugState: "off", lit: false, line: "daylight 12.4 h … · lamp 3.6 h from sunset 19:09 → 22:45 · 0.0 h lamp so far — lamp off 1.9 h into its window" }),
+      risk: { level: "watch", reason: "lamp off 1.9 h into its window" } });
+    const html2 = panel._culturesPhytoTile(dark, phytoSummary(dark), [dark]);
+    assert(html2.includes('data-culture-light="watch"') && html2.includes("lamp off 1.9 h into its window") && html2.includes('data-culture-lamp="off"') && html2.includes('fill="#e5484d"'), "the lamp-off watch");
+    // Sun mode with a short day: the nudge rides the line.
+    const sunOnly = phytoJar({ light: stageBLight({ mode: "sun", switchEntity: "", status: "watch", shortDay: true, daylightH: 11.6, deliveredH: 11.6, plugOn: false, isDay: true, lit: true,
+      line: "daylight 11.6 h (astronomical — the window gives less)", nudge: "the days are under 12 h — put the LED on the plug" }) });
+    const html3 = panel._culturesPhytoTile(sunOnly, phytoSummary(sunOnly), [sunOnly]);
+    assert(html3.includes("☀ daylight 11.6 h (astronomical — the window gives less) — the days are under 12 h — put the LED on the plug"), "the short-day nudge");
+    // The rack's air, when no vessel sensor is bound.
+    const rack = phytoJar({ temp: { available: true, status: "warm", tempC: 27.5, minC: 20, maxC: 27, hardMaxC: 29, actC: 30, criticalC: 32, act: false, source: "rack" } });
+    assert(panel._culturesPhytoTile(rack, phytoSummary(rack), [rack]).includes("(this is the rack's air, not the culture — a vessel sensor in Culture settings reads the water)"), "the rack's words");
+  } finally { restore(); }
+});
+
+test("Stage B: the backup's tile — its parent, the refresh clock, the Refresh tap and the chore word; the refresh tap sends its WS", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const a = phytoJar({ refresh: { isBackup: false, backupId: "n2", backupName: "Nanno B" }, light: stageBLight() });
+    const b = phytoJar({ id: "n2", name: "Nanno B", volumeL: 1, workingL: 1, tint: "green", due: ["look", "refresh"], backupOf: "n1",
+      light: stageBLight({ mode: "sun", switchEntity: "", status: "ok", line: "daylight 12.4 h (astronomical — the window gives less)" }),
+      densityAdvice: { action: "wait", reason: "growing — dark in ~2 d" },
+      refresh: { isBackup: true, fromId: "n1", fromName: "Nanno A", available: true, due: true, hoursUntil: 0, everyDays: 32, starterMl: 250, freshMl: 750, nutrientMl: 1.1, workingL: 1, backupId: "", backupName: "" },
+      state: { ...phytoJar().state, ageDays: 33, workingL: 1, splitEligible: false, harvest: clock(false, 0, false),
+        refresh: { available: true, due: true, at: NOW, hoursUntil: 0, hoursOverdue: 24, reason: "backup", everyDays: 32 }, backupOf: "n1" },
+      risk: { level: "watch", reason: "the backup is 33 days old — refresh it from the main vessel" } });
+    const summary = { ...phytoSummary(a), jars: [a, b], dueCount: 3,
+      rig: { ...phytoSummary(a).rig, phyto: [...phytoSummary(a).rig.phyto, { id: "n2", name: "Nanno B", kind: "bottle", status: "producing", tint: "green", pct: 40, airOn: true, lightOn: true, lightWatch: false, backup: true, refreshHot: true,
+        splitHot: false, freshHot: false, lookHot: true, offColour: false, peakHeld: false, advice: "wait", tempStatus: "ok", establishDays: null, firstHarvestDays: 7, cycleDay: 33, cycleOf: 8, workingL: 1, bottleMl: 0, bottleStatus: "empty", scaleUp: false }] } };
+    const config = phytoConfig();
+    config.nps.cultures.jars.n2 = { ...config.nps.cultures.jars.n1, name: "Nanno B", volumeL: 1, state: { ...config.nps.cultures.jars.n1.state, backupOf: "n1", workingL: 1, startedAt: iso(33 * 24) } };
+    config.maintenance = { enabled: true, tasks: {}, completions: {} };
+    const panel = await culturesPanel(config, summary);
+    panel._culturesSeedReminders();
+    const html = panel._culturesTab();
+    noPlaceholders(html, "backup tile");
+    assert(html.includes('data-culture-backup="n1"') && html.includes("backup of Nanno A · <span") && html.includes("refresh due") && html.includes("(every ~32 d) · 250 ml from Nanno A + 750 ml fresh + 1.1 ml f/2"), `the backup line: ${html.match(/backup of[^<]*<span[^<]*<\/span>[^<]*/)}`);
+    assert(html.includes('class="primary compact-button" data-action="cultures-refresh-backup" data-id="n2"') && html.includes("Refresh from Nanno A</button>"), "the Refresh tap, primary when due");
+    assert(html.includes("refresh the backup due · 33 days on the sill"), `the chore chip: ${html.match(/<span class="pill warning"[^>]*>[^<]*/g)}`);
+    assert(!html.includes('data-action="cultures-refresh-backup" data-id="n1"'), "the main vessel has no Refresh tap");
+    assert(html.includes("backup — refresh it"), "the rig names the backup's chore");
+    assert(html.includes("3 chores"), "the mission row counts the refresh");
+    let sent = null;
+    panel._culturesCall = (msg) => { sent = msg; };
+    panel._culturesRefreshBackup("n2");
+    assert(sent && sent.type === "openreef/cultures_refresh_backup" && sent.jar_id === "n2", `the refresh tap: ${JSON.stringify(sent)}`);
+    panel._culturesApplyLearned("n1", "mode");
+    assert(sent.type === "openreef/cultures_apply_learned" && sent.field === "mode", "the daily offer's Apply");
+    assert(panel._culturesChoreWord(b, "refresh") === "refresh the backup", "the chore word");
+    const due = panel._maintenanceDueState("culture_n2_refresh");
+    assert(due.status === "warning" && due.label === "due", `the refresh reminder reads B's clock: ${JSON.stringify(due)}`);
+    assert(panel._maintenanceDueState("culture_n1_look").label === "due", "the look reminder still reads the jar");
+  } finally { restore(); }
+});
+
+test("Stage B settings: the Light group in the vessel's row, the refresh reminder for a backup, the add-jar default and the demo rack", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const config = phytoConfig();
+    config.nps.cultures.jars.n1.light = { mode: "sun+lamp", switchEntity: "switch.phyto_lamp", onAt: "07:00", latestOff: "23:30", tempEntity: "sensor.nanno_water" };
+    config.nps.cultures.jars.n2 = { ...config.nps.cultures.jars.n1, name: "Nanno B", volumeL: 1, light: { mode: "sun" }, state: { ...config.nps.cultures.jars.n1.state, backupOf: "n1", workingL: 1 } };
+    config.maintenance = { enabled: true, tasks: {}, completions: {} };
+    const panel = await culturesPanel(config, phytoSummary());
+    const settings = panel._culturesSettings();
+    noPlaceholders(settings, "phyto settings with light");
+    assert(settings.includes('data-culture-light="n1"') && settings.includes('data-field="light.mode"') && settings.includes('<option value="sun+lamp" selected>'), "the Light select");
+    assert(settings.includes('data-field="light.switchEntity" value="switch.phyto_lamp"') && settings.includes('data-field="light.latestOff" value="23:30"') && settings.includes('data-field="light.tempEntity" value="sensor.nanno_water"'), "the plug, the cap and the vessel sensor");
+    assert(settings.includes('type="time" data-scope="nps-culture-jar" data-id="n1" data-field="light.onAt" value="07:00"'), "the on-at clock");
+    assert(!settings.includes("Stage B"), "no promise of a later stage in the hints");
+    panel._culturesSeedReminders();
+    const tasks = panel._config.maintenance.tasks;
+    assert(tasks.culture_n2_refresh && tasks.culture_n2_refresh.cadenceDays === 32 && tasks.culture_n2_refresh.label === "Refresh Nanno B from Nanno A", `the backup's refresh chore: ${JSON.stringify(tasks.culture_n2_refresh)}`);
+    assert(!tasks.culture_n1_refresh, "the main vessel carries no refresh chore");
+    assert(tasks.culture_n1_look && tasks.culture_n1_harvest && tasks.culture_n1_restart, "the Stage A chores stay");
+    delete panel._config.nps.cultures.jars.n2.state.backupOf;
+    panel._culturesSeedReminders();
+    assert(!panel._config.maintenance.tasks.culture_n2_refresh, "no longer a backup: the chore goes");
+    panel._culturesAddJar("nanno");
+    const added = Object.values(panel._config.nps.cultures.jars).find((j) => j.name === "Nanno 3" || j.name.startsWith("Nanno") && !["Nanno A", "Nanno B"].includes(j.name));
+    assert(added && added.light && added.light.mode === "sun" && added.light.onAt === "07:00" && added.light.latestOff === "00:00", `a new vessel starts on the sun: ${JSON.stringify(added?.light)}`);
+    const shelf = panel._npsProductCard("home_phyto_n1", panel._config.consumables.products.home_phyto_n1,
+      { bottleMl: 1000, remainingMl: 0, percent: 0, empty: true, low: true, expiry: { status: "empty" }, handDose: { planned: true, ml: 35, everyDays: 1, clock: {} },
+        shake: { applies: true, due: false }, splitNudge: "empty — Nanno A reads dark: split into this bottle" });
+    assert(shelf.includes('data-shelf-nudge="home_phyto_n1"') && shelf.includes("empty — Nanno A reads dark: split into this bottle"), "the shelf's split nudge");
+    const demo = panel._culturesDemoData().summary;
+    const vessel = demo.jars.find((j) => j.kind === "phyto");
+    assert(vessel.light && vessel.light.mode === "sun+lamp" && vessel.refresh && vessel.dailyOffer, "the demo vessel carries the Stage B fields");
+    panel._cultures.summary = demo; panel._cultures.demo = true;
+    const html = panel._culturesTab();
+    noPlaceholders(html, "demo tab with the light");
+    assert(html.includes("☀+💡 daylight 12.3 h"), "the demo shows the light line");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

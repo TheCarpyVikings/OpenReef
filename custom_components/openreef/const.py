@@ -53,7 +53,7 @@ CORAL_SPECIES = (
 )
 CORAL_COLOURS = ("purple", "pink", "green", "teal", "orange", "red", "gold", "blue")
 CORAL_SCAPES = ("island", "twinpeaks", "slope", "arch", "pillars", "peninsula", "valley")
-INTEGRATION_VERSION = "0.7.207"
+INTEGRATION_VERSION = "0.7.208"
 
 # Legacy key: the removed Guardian avatar stored its API keys here, outside the
 # CONF_SETTINGS blob. Kept only so setup can strip the stale secrets on load.
@@ -880,6 +880,8 @@ SPAWNING_TEMP_PLAUSIBLE_MAX_C = 32.0
 COOLING_TICK_UNSUB = "cooling_tick_unsub"
 COOLING_RUNTIME = "cooling_runtime"          # hass.data: last snapshot, notify cooldowns, last warn band
 COOLING_TICK_SECONDS = 300                   # room air moves slowly; five minutes is plenty
+CULTURES_TICK_UNSUB = "cultures_tick_unsub"  # the phyto vessel's lamp on its plug (Stage B)
+CULTURES_TICK_SECONDS = 60                   # the window is a clock time; a minute is the plug's resolution
 COOLING_STALE_MINUTES = 30                   # sensor silence beyond this ⇒ "unknown", never a warning
 COOLING_NOTIFY_COOLDOWN_S = 6 * 3600         # one warning per band per six hours
 COOLING_FORECAST_TTL_S = 30 * 60             # weather.get_forecasts re-read cadence

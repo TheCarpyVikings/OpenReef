@@ -177,6 +177,8 @@ from .const import (
     COOLING_RUNTIME,
     COOLING_TICK_UNSUB,
     COOLING_TICK_SECONDS,
+    CULTURES_TICK_UNSUB,
+    CULTURES_TICK_SECONDS,
     COOLING_STALE_MINUTES,
     COOLING_NOTIFY_COOLDOWN_S,
     COOLING_FORECAST_TTL_S,
@@ -1239,6 +1241,11 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                    if isinstance(secchi, (int, float)) and not isinstance(secchi, bool) else {}),
                 **({"arrivalTint": str(item.get("arrivalTint"))}
                    if str(item.get("arrivalTint") or "") in cultures_engine.PHYTO_TINTS else {}),
+                # Stage B: the daily ``light`` row — lamp hours by own stamps,
+                # astronomical daylight, and their sum.
+                **({"lightH": round(_awc_num(item.get("lightH"), 0, 0, 24), 1)} if item.get("lightH") is not None else {}),
+                **({"lampH": round(_awc_num(item.get("lampH"), 0, 0, 24), 1)} if item.get("lampH") is not None else {}),
+                **({"daylightH": round(_awc_num(item.get("daylightH"), 0, 0, 24), 1)} if item.get("daylightH") is not None else {}),
                 "eggRatio": _awc_num(item.get("eggRatio"), 0, 0, 100) if item.get("eggRatio") is not None else None,
                 "fed": bool(item.get("fed", item.get("event") == "feed")),
                 "tankMl": _awc_num(item.get("tankMl"), 0, 0, 20000) if item.get("tankMl") is not None else None,
@@ -1264,6 +1271,7 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
         phyto = preset["kind"] == "phyto"
         harvest_to = str(raw_jar.get("harvestTo") or "")
         raw_nutrient = raw_jar.get("nutrient") if isinstance(raw_jar.get("nutrient"), dict) else {}
+        raw_light = raw_jar.get("light") if isinstance(raw_jar.get("light"), dict) else {}
         jars[jid] = {
             "name": _awc_str(raw_jar.get("name"), 40) or f"Culture {len(jars) + 1}",
             "species": species,
@@ -1300,6 +1308,17 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             },
             "bottleProductId": _awc_str(raw_jar.get("bottleProductId"), 64),
             "bottleMl": _awc_num(raw_jar.get("bottleMl"), 1000, 100, 20000),
+            # Light (doc §5.6, Stage B): the sun on the rack, the LED on a plug,
+            # or both (the plug from sunset to the target, never past
+            # latestOff); the target hours are the cadence's lightHours; an
+            # optional vessel-side sensor reads the water itself.
+            "light": {
+                "mode": (str(raw_light.get("mode")) if str(raw_light.get("mode") or "") in cultures_engine.LIGHT_MODES else "sun"),
+                "switchEntity": _normalise_entity_id(raw_light.get("switchEntity")),
+                "onAt": _normalise_schedule_time(raw_light.get("onAt")) or cultures_engine.LIGHT_ON_AT_DEFAULT,
+                "latestOff": _normalise_schedule_time(raw_light.get("latestOff")) or cultures_engine.LIGHT_LATEST_OFF_DEFAULT,
+                "tempEntity": _normalise_entity_id(raw_light.get("tempEntity")),
+            },
             "cadence": cultures_engine.cadence_for(species, raw_cad),
             "state": {
                 "startedAt": _awc_str(raw_state.get("startedAt"), 40),
@@ -1328,6 +1347,18 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "starterOpenedAt": _awc_str(raw_state.get("starterOpenedAt"), 40),
                 "arrivalTint": (str(raw_state.get("arrivalTint"))
                                 if str(raw_state.get("arrivalTint") or "") in cultures_engine.PHYTO_TINTS else ""),
+                # Stage B (all server-written): B's parent — the split's vessel
+                # share sets it, the refresh chore hangs off it; the lamp's own
+                # stamps — on since, off at, the minutes banked today and the
+                # local day they belong to; the once-per-window watch and the
+                # once-a-day lost-light stamps.
+                "backupOf": _awc_str(raw_state.get("backupOf"), 24),
+                "lightOnAt": _awc_str(raw_state.get("lightOnAt"), 40),
+                "lightOffAt": _awc_str(raw_state.get("lightOffAt"), 40),
+                "lightMinutesToday": _awc_num(raw_state.get("lightMinutesToday"), 0, 0, 1440),
+                "lightDay": _awc_str(raw_state.get("lightDay"), 10),
+                "lightWatchAt": _awc_str(raw_state.get("lightWatchAt"), 40),
+                "lightLostDay": _awc_str(raw_state.get("lightLostDay"), 10),
             },
             "history": history[:600],
         }
@@ -6832,6 +6863,7 @@ async def _async_save_config(
     await _async_schedule_dosing_tick(hass, entry, normalised)
     await _async_schedule_spawning_tick(hass, entry, normalised)
     await _async_schedule_cooling_tick(hass, entry, normalised)
+    await _async_schedule_cultures_tick(hass, entry, normalised)
     # The circulation chain re-arms from its persisted stamps on every save —
     # that save-driven re-arm IS how its burst legs chain (see the scheduler).
     await _async_schedule_mixing_circulation(hass, entry, normalised)
@@ -17676,7 +17708,7 @@ def _cultures_task_clock(config: dict[str, Any], task_id: str, now: datetime) ->
         return {}
     for jid, jar in (cultures.get("jars") or {}).items():
         for chore, key in (("feed", "feed"), ("harvest", "harvest"), ("restart", "restart"),
-                           ("water_change", "waterChange"), ("look", "look")):
+                           ("water_change", "waterChange"), ("look", "look"), ("refresh", "refresh")):
             if task_id == _cultures_task_id(jid, chore):
                 return cultures_engine.culture_state(jar, now).get(key) or {}
     return {}
@@ -17814,30 +17846,213 @@ def _cultures_bottle_fill(bottle: dict[str, Any], ml: float, now: datetime, enri
     _cultures_bottle_history(bottle, "enriched" if enriched else "filled", now, accepted)
 
 
+def _entity_temp_c(hass: HomeAssistant, entity_id: Any) -> float | None:
+    """One temperature entity in °C (°F and K converted), None when unmapped,
+    unavailable, non-numeric, in an unknown unit or implausible."""
+    if not entity_id:
+        return None
+    state = hass.states.get(str(entity_id))
+    if state is None or str(state.state) in UNAVAILABLE_STATES:
+        return None
+    try:
+        temp = float(state.state)
+    except (TypeError, ValueError):
+        return None
+    unit = str((getattr(state, "attributes", None) or {}).get("unit_of_measurement") or "°C")
+    if unit in ("°F", "F", "fahrenheit"):
+        temp = (temp - 32) * 5 / 9
+    elif unit in ("K", "kelvin"):
+        temp -= 273.15
+    elif unit not in ("°C", "C", "celsius"):
+        return None
+    return temp if cultures_engine.temperature_advice(temp, "rotifer_L")["available"] else None
+
+
 def _cultures_temp_c(hass: HomeAssistant, config: dict[str, Any], cultures: dict[str, Any]) -> float | None:
     """The room the jars sit in: the cultures' own sensor, else the hatchery's
     (same bench, usually) — advisory only, never moves a clock."""
     hatchery = (config.get("nps") or {}).get("hatchery") or {}
     for entity_id in (cultures.get("tempEntity"), hatchery.get("tempEntity")):
-        if not entity_id:
-            continue
-        state = hass.states.get(str(entity_id))
-        if state is None:
-            continue
-        try:
-            temp = float(state.state)
-            unit = str((getattr(state, "attributes", None) or {}).get("unit_of_measurement") or "°C")
-            if unit in ("°F", "F", "fahrenheit"):
-                temp = (temp - 32) * 5 / 9
-            elif unit in ("K", "kelvin"):
-                temp -= 273.15
-            elif unit not in ("°C", "C", "celsius"):
-                continue
-            if cultures_engine.temperature_advice(temp, "rotifer_L")["available"]:
-                return temp
-        except (TypeError, ValueError):
-            continue
+        temp = _entity_temp_c(hass, entity_id)
+        if temp is not None:
+            return temp
     return None
+
+
+def _cultures_vessel_temp_c(hass: HomeAssistant, jar: dict[str, Any]) -> float | None:
+    """Stage B (doc §5.6): the optional vessel-side sensor — a vessel in the
+    sun runs over the room AND over the rack sensor; this reads the water
+    itself. None without one, and the copy then says it is the rack's air."""
+    light = jar.get("light") if isinstance(jar.get("light"), dict) else {}
+    return _entity_temp_c(hass, light.get("tempEntity"))
+
+
+def _cultures_sun_snapshot(hass: HomeAssistant) -> dict[str, Any]:
+    """HA's sun entity as the engine reads it (doc §5.6): the state and its
+    next rising / setting stamps. Empty when the integration is not loaded —
+    the engine then says the daylight is unknown, never a guess."""
+    try:
+        state = hass.states.get("sun.sun")
+    except (AttributeError, TypeError):
+        return {}
+    if state is None:
+        return {}
+    attrs = getattr(state, "attributes", None) or {}
+    return {"state": str(state.state), "next_rising": str(attrs.get("next_rising") or ""),
+            "next_setting": str(attrs.get("next_setting") or ""), "elevation": attrs.get("elevation")}
+
+
+def _cultures_plug_state(hass: HomeAssistant, entity_id: Any) -> str | None:
+    """The lamp plug's state string (on / off / unavailable / unknown), None
+    when nothing is bound or the entity does not exist."""
+    if not entity_id:
+        return None
+    state = hass.states.get(str(entity_id))
+    return None if state is None else str(state.state)
+
+
+def _clear_cultures_tick(hass: HomeAssistant) -> None:
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(CULTURES_TICK_UNSUB, None)
+    if unsub is not None:
+        unsub()
+
+
+async def _async_schedule_cultures_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry | None, config: dict[str, Any] | None = None,
+) -> None:
+    """The phyto vessel's minute tick (Stage B): armed while the cultures are
+    on and a phyto vessel stands on the rack — the lamp's plug follows its
+    window, the day's light is banked at midnight. Nothing else rides it."""
+    _clear_cultures_tick(hass)
+    if entry is None:
+        return
+    config = config or _config_from_entry(entry)
+    cultures = ((config.get("nps") or {}).get("cultures") or {}) if isinstance(config.get("nps"), dict) else {}
+    if not isinstance(cultures, dict) or not cultures.get("enabled"):
+        return
+    jars = cultures.get("jars") if isinstance(cultures.get("jars"), dict) else {}
+    if not any(isinstance(j, dict) and cultures_engine.species_kind(j.get("species")) == "phyto" for j in jars.values()):
+        return
+
+    async def _handle(now: datetime) -> None:
+        latest_entry = _first_entry(hass)
+        if latest_entry is None or latest_entry.entry_id != entry.entry_id:
+            return
+        await _async_cultures_light_tick(hass, latest_entry, datetime.now(timezone.utc))
+
+    hass.data.setdefault(DOMAIN, {})[CULTURES_TICK_UNSUB] = async_track_time_interval(
+        hass, _handle, timedelta(seconds=CULTURES_TICK_SECONDS)
+    )
+
+
+async def _async_cultures_light_tick(hass: HomeAssistant, entry: OpenReefConfigEntry,
+                                     now_utc: datetime) -> None:
+    """The lamp on its plug (doc §5.6): ``lamp`` runs on-at + the target hours;
+    ``sun+lamp`` runs from SUNSET until daylight + lamp = the target, never
+    past latestOff; ``sun`` never touches the plug. The window is the engine's
+    (light_window) so the card and the plug agree. Own stamps only: on since,
+    the minutes banked today, the local day; at the day roll yesterday's
+    light goes into the journal as a ``light`` row. A failed call retries next
+    tick with no stamp; an unbound plug clears the stamps; a plug off inside
+    its window earns one warning per window, a lost day one per day. Air is
+    never switched. Saves only when something changed."""
+    config = _config_from_entry(entry)
+    cultures = ((config.get("nps") or {}).get("cultures") or {}) if isinstance(config.get("nps"), dict) else {}
+    if not isinstance(cultures, dict) or not cultures.get("enabled"):
+        return
+    jars = cultures.get("jars") if isinstance(cultures.get("jars"), dict) else {}
+    now_local = dt_util.as_local(now_utc)
+    today = now_local.date().isoformat()
+    midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    sun = _cultures_sun_snapshot(hass)
+    day = cultures_engine.sun_day(sun, now_local)
+    changed = False
+    for jid in sorted(jars):
+        jar = jars[jid]
+        if not isinstance(jar, dict) or cultures_engine.species_kind(jar.get("species")) != "phyto":
+            continue
+        state = jar.setdefault("state", {})
+        if not isinstance(state, dict):
+            continue
+        st = cultures_engine.culture_state(jar, now_utc)
+        running = st["status"] in ("establishing", "producing")
+        light = jar.get("light") if isinstance(jar.get("light"), dict) else {}
+        mode = str(light.get("mode") or "sun")
+        mode = mode if mode in cultures_engine.LIGHT_MODES else "sun"
+        plug = str(light.get("switchEntity") or "")
+        name = str(jar.get("name") or jid)
+        on_since = _parse_datetime(state.get("lightOnAt"))
+        # ---- the day roll: yesterday's light into the journal, the counters reset
+        if running and str(state.get("lightDay") or "") != today:
+            if state.get("lightDay"):
+                minutes = _awc_num(state.get("lightMinutesToday"), 0, 0, 1440)
+                if on_since is not None and on_since < midnight:
+                    minutes += max(0.0, (midnight - on_since.astimezone(now_local.tzinfo)).total_seconds() / 60.0)
+                    state["lightOnAt"] = midnight.isoformat()       # the burst carries into today
+                    on_since = midnight
+                lamp_h = round(min(24.0, minutes / 60.0), 1)
+                sun_h = round(awc_engine._f(day.get("daylightH")), 1) if day.get("available") and mode in ("sun", "sun+lamp") else None
+                _cultures_history(jar, "light", midnight - timedelta(minutes=1), lampH=lamp_h,
+                                  daylightH=sun_h, lightH=round(min(24.0, lamp_h + (sun_h or 0.0)), 1))
+            state["lightMinutesToday"] = 0.0
+            state["lightDay"] = today
+            changed = True
+        # ---- the plug
+        window = cultures_engine.light_window(light, st["cadence"].get("lightHours"), now_local, sun)
+        want_on = bool(running and plug and mode in ("lamp", "sun+lamp") and window.get("active"))
+        plug_state = _cultures_plug_state(hass, plug) if plug else None
+        if on_since is not None and not want_on:
+            # Ours to switch off: the window ended, the mode changed, the
+            # vessel stopped, or the plug was unbound (then nothing to stop).
+            ok = True
+            if plug:
+                try:
+                    await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: plug}, blocking=True)
+                except Exception:  # noqa: BLE001 — retry next tick, the stamp stays
+                    _LOGGER.exception("Could not switch the phyto lamp %s off", plug)
+                    ok = False
+            if ok:
+                banked = max(0.0, (now_local - max(on_since.astimezone(now_local.tzinfo), midnight)).total_seconds() / 60.0)
+                state["lightMinutesToday"] = round(min(1440.0, _awc_num(state.get("lightMinutesToday"), 0, 0, 1440) + banked), 1)
+                state["lightOnAt"] = ""
+                state["lightOffAt"] = now_utc.isoformat()
+                total_h = _awc_num(state.get("lightMinutesToday"), 0, 0, 1440) / 60.0
+                sun_words = (f" — {total_h + awc_engine._f(day.get('daylightH')):.1f} h with the sun"
+                             if mode == "sun+lamp" and day.get("available") else "")
+                _append_activity(config, f"{name}: lamp off — {total_h:.1f} h on the plug today{sun_words}", "control")
+                changed = True
+        elif want_on and on_since is None:
+            try:
+                await hass.services.async_call("switch", "turn_on", {ATTR_ENTITY_ID: plug}, blocking=True)
+            except Exception:  # noqa: BLE001 — try again next tick
+                _LOGGER.exception("Could not switch the phyto lamp %s on", plug)
+            else:
+                state["lightOnAt"] = now_utc.isoformat()
+                on_l = _parse_datetime(window.get("onAt"))
+                when = on_l.astimezone(now_local.tzinfo).strftime("%H:%M") if on_l is not None else ""
+                plan = awc_engine._f(window.get("plannedLampH"))
+                target = awc_engine._f(st["cadence"].get("lightHours"), 16.0)
+                _append_activity(config, (f"{name}: lamp on at sunset ({when}) — {plan:.1f} h to the {target:g} h day"
+                                          if window.get("rule") in ("sunset", "latest_off")
+                                          else f"{name}: lamp on ({when}) — {plan:.1f} h"), "control")
+                changed = True
+        if want_on and str(plug_state or "") != "on" and on_since is not None \
+                and str(state.get("lightWatchAt") or "") != str(window.get("onAt") or ""):
+            # The plug reads off or unavailable inside its window after we
+            # switched it on: one warning per window; the risk line carries it.
+            hours_in = max(0.0, (now_local - _parse_datetime(window["onAt"]).astimezone(now_local.tzinfo)).total_seconds() / 3600.0)
+            what = "unavailable" if str(plug_state or "") in ("unavailable", "unknown", "") else "off"
+            _append_activity(config, f"{name}: lamp {what} {hours_in:.1f} h into its window — check the plug", "warning")
+            state["lightWatchAt"] = str(window.get("onAt") or "")
+            changed = True
+        if running and mode != "sun" and plug and window.get("over") and str(state.get("lightLostDay") or "") != today:
+            reading = cultures_engine.light_state(jar, st["cadence"], now_local, sun, plug_state)
+            if reading.get("status") == "act":
+                _append_activity(config, f"{name}: {reading.get('line')}", "warning")
+                state["lightLostDay"] = today
+                changed = True
+    if changed:
+        await _async_save_config(hass, entry, config)
 
 
 def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any], jar_id: str = "",
@@ -17945,6 +18160,31 @@ def _cultures_home_bottle(config: dict[str, Any], jar_id: str, jar: dict[str, An
     _append_activity(config, f"{jar.get('name') or jar_id}: a home phyto bottle joined the shelf — "
                              f"its {dose_ml:g} ml hand dose is the tank's daily driver", "control")
     return products[pid]
+
+
+def _cultures_shelf_nudges(config: dict[str, Any], states: dict[str, Any], now: datetime) -> None:
+    """The shelf's split nudge (doc §5.4, Stage B): every home phyto bottle's
+    card says what its vessel is doing about a low or empty bottle. Reads the
+    vessel's own clock (LOCKSTEP: never re-derived here)."""
+    try:
+        cultures = ((config.get("nps") or {}).get("cultures") or {}) if isinstance(config.get("nps"), dict) else {}
+        jars = cultures.get("jars") if isinstance(cultures, dict) and isinstance(cultures.get("jars"), dict) else {}
+        by_bottle: dict[str, tuple[str, dict[str, Any]]] = {}
+        for jid, jar in jars.items():
+            if not isinstance(jar, dict) or cultures_engine.species_kind(jar.get("species")) != "phyto":
+                continue
+            pid = str(jar.get("bottleProductId") or "") or _cultures_home_bottle_id(str(jid))
+            by_bottle[pid] = (str(jid), jar)
+        for pid, state in states.items():
+            if not isinstance(state, dict) or str(pid) not in by_bottle:
+                continue
+            jid, jar = by_bottle[str(pid)]
+            st = cultures_engine.culture_state(jar, now)
+            learned = cultures_engine.learned_cadences(jar, [], now) if st["status"] in ("establishing", "producing") else {}
+            state["splitNudge"] = nps_engine.home_bottle_nudge(
+                state, st, str(jar.get("name") or jid), (learned.get("daysToDark") or {}).get("days"))
+    except (AttributeError, TypeError, ValueError):     # advice only — never break the shelf
+        return
 
 
 def _cultures_ensure_home_bottles(config: dict[str, Any]) -> None:
@@ -18119,6 +18359,10 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     # forecast by it. None without a rack sensor or a projection row for now.
     rack_offset = cultures_engine.rack_offset_c(projection_hours, temp_c, now)
     mix_ppt = _cultures_mix_ppt(config)
+    # Stage B: the sun as HA reads it and the local clock the lamp windows
+    # are read in — one snapshot for every vessel on the rack.
+    now_local = dt_util.as_local(now)
+    sun = _cultures_sun_snapshot(hass)
     jars_payload = []
     due_count = 0
     producing_by_species: dict[str, list[str]] = {}
@@ -18136,10 +18380,17 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         phyto = preset["kind"] == "phyto"
         st = cultures_engine.culture_state(jar, now)
         cad = st["cadence"]
-        due = [key for key in (("look", "harvest", "restart") if phyto else ("feed", "harvest", "restart", "waterChange"))
+        due = [key for key in (("look", "harvest", "restart", "refresh") if phyto else ("feed", "harvest", "restart", "waterChange"))
                if (st.get(key) or {}).get("due")]
         due_count += len(due)
-        temp_advice = cultures_engine.temperature_advice(temp_c, jar["species"])
+        # A vessel-side sensor (Stage B) reads the culture itself; otherwise
+        # the rack's air stands in and the copy says so.
+        vessel_c = _cultures_vessel_temp_c(hass, jar) if phyto else None
+        temp_advice = cultures_engine.temperature_advice(vessel_c if vessel_c is not None else temp_c, jar["species"])
+        temp_advice["source"] = "vessel" if vessel_c is not None else ("rack" if temp_c is not None else "")
+        light = (cultures_engine.light_state(jar, cad, now_local, sun,
+                                             _cultures_plug_state(hass, (jar.get("light") or {}).get("switchEntity")))
+                 if phyto else None)
         sibling_histories = [cultures["jars"][o]["history"] for o in cultures["jars"]
                              if cultures["jars"][o]["species"] == jar["species"]]
         learned = cultures_engine.learned_cadences(jar, sibling_histories, now)
@@ -18147,7 +18398,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         if phyto:
             feed_advice = cultures_engine.density_advice(
                 jar["state"]["lastTint"], st, (learned.get("daysToDark") or {}).get("days"))
-            phyto_payload = _cultures_phyto_payload(config, jid, jar, st, cad, preset, mix_ppt, tank_l, channels, now)
+            phyto_payload = _cultures_phyto_payload(config, jid, jar, st, cad, preset, mix_ppt, tank_l, channels, now,
+                                                    light=light, learned=learned)
         else:
             feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"], st["harvest"],
                                                       cad["harvestIntervalDays"] * 24.0, jar["species"])
@@ -18204,7 +18456,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "feedAdvice": feed_advice,
             "temp": temp_advice,
             "learned": learned,
-            "risk": cultures_engine.risk_line(jar, st, temp_advice, now),
+            "risk": cultures_engine.risk_line(jar, st, temp_advice, now, light=light),
             "lastSign": jar["state"]["lastSign"],
             "harvestGuide": cultures_engine.harvest_guide(jar, mix_ppt),
             "restartGuide": fill_guide,
@@ -18305,6 +18557,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "canAddJar": len(cultures["jars"]) < cultures_engine.CULTURE_JARS_MAX,
         "bottle": bottle_payload,
         "tempC": round(temp_c, 1) if temp_c is not None else None,
+        # Stage B: the sun as the rack sees it (astronomical, an upper bound).
+        "sun": cultures_engine.sun_day(sun, now_local),
         "species": [dict(s) for s in cultures_engine.SPECIES],
         "tints": list(cultures_engine.TINTS),
         "signs": [{"id": sid, "label": cultures_engine.SIGN_WORDS[sid]} for sid in cultures_engine.SIGNS],
@@ -18316,7 +18570,8 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
 
 def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any], st: dict[str, Any],
                             cad: dict[str, float], preset: dict[str, Any], mix_ppt: float, tank_l: float,
-                            channels: dict[str, Any], now: datetime) -> dict[str, Any]:
+                            channels: dict[str, Any], now: datetime, light: Any = None,
+                            learned: Any = None) -> dict[str, Any]:
     """The phyto vessel's half of its summary row (doc §5.9): the split jug,
     the two seed recipes, the home bottle as the shelf sees it, the f/2
     budget, the sizing line, the starter's clock, the drips a split can load,
@@ -18388,8 +18643,35 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
     status = str(st.get("status") or "none")
     reseed_bottle = bool(status in ("none", "crashed") and home.get("exists") and awc_engine._f(home.get("remainingMl")) > 0
                          and opened is not None and (now - opened).total_seconds() <= cultures_engine.BOTTLE_RESEED_DAYS * 86400)
+    # B (doc §5.8, Stage B): this vessel's parent when it is the backup (the
+    # refresh recipe = its own 1:4 from the parent's split), or the backup it
+    # owns (so the split form can say "→ B (refresh Nanno B)").
+    jars = cultures.get("jars") if isinstance(cultures.get("jars"), dict) else {}
+    backup_of = str(state.get("backupOf") or "")
+    parent = jars.get(backup_of) if backup_of else None
+    parent_running = (isinstance(parent, dict)
+                      and cultures_engine.culture_state(parent, now)["status"] in ("establishing", "producing"))
+    refresh_seed = cultures_engine.seed_guide(jar, mix_ppt) if backup_of else {}
+    refresh_clock = st.get("refresh") if isinstance(st.get("refresh"), dict) else {}
+    owned = next(((ojid, other) for ojid, other in sorted(jars.items())
+                  if ojid != jid and isinstance(other, dict) and str((other.get("state") or {}).get("backupOf") or "") == jid
+                  and cultures_engine.culture_state(other, now)["status"] in ("establishing", "producing")), None)
+    learned = learned if isinstance(learned, dict) else {}
     return {
         "mode": st.get("mode", "batch"), "workingL": st.get("workingL"),
+        "light": light if isinstance(light, dict) else None,
+        "backupOf": backup_of,
+        "refresh": {
+            "isBackup": bool(backup_of), "fromId": backup_of,
+            "fromName": str(parent.get("name") or backup_of) if isinstance(parent, dict) else "",
+            "available": bool(backup_of and parent_running and status in ("establishing", "producing")),
+            "due": bool(refresh_clock.get("due")), "hoursUntil": refresh_clock.get("hoursUntil"),
+            "everyDays": refresh_clock.get("everyDays"), "at": refresh_clock.get("at"),
+            "starterMl": refresh_seed.get("starterMl"), "freshMl": refresh_seed.get("freshMl"),
+            "nutrientMl": refresh_seed.get("nutrientMl"), "workingL": refresh_seed.get("workingL"),
+            "backupId": owned[0] if owned else "", "backupName": str(owned[1].get("name") or owned[0]) if owned else "",
+        },
+        "dailyOffer": learned.get("dailyOffer") or {"available": False, "pct": None},
         "densityAdvice": cultures_engine.density_advice(state.get("lastTint"), st,
                                                         None),
         "splitGuide": split, "freshVesselGuide": split,
@@ -18820,14 +19102,22 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
     drips = _cultures_drip_channels(config, bottle_id) if any(s["to"] == "drip" for s in shares) else []
     if any(s["to"] == "drip" for s in shares) and not drips:
         return "no_drip", "No phyto drip is set up — bind a standing pump on the Dosing tab, or send this share to the bottle"
+    vessel_into = ""
     if any(s["to"] == "vessel" for s in shares):
         idle = [jid for jid in sorted(cultures["jars"]) if jid != jar_id
                 and cultures["jars"][jid]["species"] == jar["species"]
                 and cultures_engine.culture_state(cultures["jars"][jid], now)["status"] in ("none", "crashed")]
-        if not idle and len(cultures["jars"]) >= cultures_engine.CULTURE_JARS_MAX:
+        # Stage B (doc §5.8): a running backup of THIS vessel is refreshed by
+        # the share — the old litre to waste, the seed from today's crop.
+        backup = next((jid for jid in sorted(cultures["jars"]) if jid != jar_id
+                       and cultures["jars"][jid]["species"] == jar["species"]
+                       and str(cultures["jars"][jid]["state"].get("backupOf") or "") == jar_id
+                       and cultures_engine.culture_state(cultures["jars"][jid], now)["status"] in ("establishing", "producing")), "")
+        if not idle and not backup and len(cultures["jars"]) >= cultures_engine.CULTURE_JARS_MAX:
             return "jars_full", f"All {cultures_engine.CULTURE_JARS_MAX} jars are in use — the B share has nowhere to go"
         if not st.get("splitEligible") and not fresh_vessel:
             return "not_ready_to_split", "B wants a green or dark vessel with no sign on the record"
+        vessel_into = idle[0] if idle else backup
     nutrient_ml = awc_engine._f(guide["nutrientMl"]) if nutrient and fresh > 0 else 0.0
     _npid, nutrient_product = _cultures_nutrient_product(config, jar) if nutrient_ml > 0 else ("", None)
     # ---- every check passed: write ---------------------------------------
@@ -18913,7 +19203,7 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
     if vessel_share is not None:
         # LAST: the split into B re-normalises the block (the restart's own
         # lesson) — nothing above may touch ``jar`` after this call.
-        error, _into = _cultures_split_apply(hass, config, jar_id, "", now, starter_ml=vessel_share["ml"] or None,
+        error, _into = _cultures_split_apply(hass, config, jar_id, vessel_into, now, starter_ml=vessel_share["ml"] or None,
                                              check=False)
         if error is not None:
             _append_activity(config, f"{name}: B was not seeded from the split — {error[1]}", "warning")
@@ -19316,7 +19606,12 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
     target = jars[into_id]
     if target["species"] != jar["species"]:
         return ("species_mismatch", "Split into a vessel for the same species"), into_id
-    if cultures_engine.culture_state(target, now)["status"] not in ("none", "crashed"):
+    target_status = cultures_engine.culture_state(target, now)["status"]
+    # Stage B (doc §5.8): the running backup of this vessel is REFRESHED — its
+    # old culture goes to waste (a restart row on B), the seed is today's crop.
+    refresh = bool(phyto and not check and target_status in ("establishing", "producing")
+                   and str(target["state"].get("backupOf") or "") == jar_id)
+    if target_status not in ("none", "crashed") and not refresh:
         return ("jar_busy", f"{target['name']} is already running"), into_id
     guide = _cultures_fill_guide(config, target)
     if guide.get("available") is False:
@@ -19326,15 +19621,82 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
         seed = cultures_engine.seed_guide(target, _cultures_mix_ppt(config), starter, None)
         if seed.get("available") is False:
             return ("invalid_volume", seed["reason"]), into_id
+    if refresh:
+        old_ml = round(awc_engine._f(target["state"].get("workingL")) * 1000.0)
+        _cultures_history(target, "restart", now, ml=old_ml, tint=target["state"].get("lastTint") or None,
+                          dests=[{"to": "waste", "ml": old_ml}] if old_ml > 0 else None, **{"from": jar_id})
+        _cultures_log_completion(config, into_id, "refresh", now,
+                                 f"Logged automatically — {target['name']} refreshed from {jar['name']}")
     _cultures_seed_jar(config, target, now, jar_id, starter_ml=starter_ml if phyto else None)
+    if phyto:
+        target["state"]["backupOf"] = jar_id
     _cultures_history(jar, "split", now, ml=round(awc_engine._f(starter_ml), 1) if phyto and awc_engine._f(starter_ml) > 0 else 0,
                       **{"from": into_id})
-    _append_activity(config, f"{jar['name']} split into {target['name']} — "
-                             + ("a windowsill backup on its own light" if phyto else "check the restart dates to stagger them"),
+    _append_activity(config, (f"{target['name']} refreshed from {jar['name']} — the old culture to waste, a fresh litre on the sill"
+                              if refresh else
+                              f"{jar['name']} split into {target['name']} — "
+                              + ("a windowsill backup on its own light" if phyto else "check the restart dates to stagger them")),
                      "control")
     _mixing_hatchery_debit(hass, config, _cultures_seed_mix_ml(config, target, starter_ml if phyto else None) / 1000.0,
                            f"splitting into {target['name']}")
     return None, into_id
+
+
+def _cultures_backup_refresh_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str, *,
+                                   ml: Any = None, nutrient: bool = True,
+                                   source: str = "the Cultures tab") -> tuple[str, str] | None:
+    """Refresh the backup (doc §5.8, Stage B): B's tap — a small split of its
+    parent A with the whole share into B: B's old culture to waste, B seeded
+    again 1:4 with fresh water and f/2, A topped up like for like. Every
+    refusal is the split's own (A must read green or dark with no sign).
+    Returns (code, message) on refusal; nothing is written before the checks."""
+    cultures = _nps_cultures_cfg(config)
+    jar = cultures["jars"].get(jar_id)
+    if not isinstance(jar, dict):
+        return "unknown_jar", f"No culture jar '{jar_id}'"
+    if cultures_engine.species_kind(jar["species"]) != "phyto":
+        return "not_phyto", f"{jar['name']} is not a phyto vessel"
+    parent_id = str(jar["state"].get("backupOf") or "")
+    parent = cultures["jars"].get(parent_id)
+    if not isinstance(parent, dict):
+        return "not_a_backup", f"{jar['name']} is not the backup of another vessel — seed it from a vessel's split instead"
+    now = datetime.now(timezone.utc)
+    if cultures_engine.culture_state(parent, now)["status"] not in ("establishing", "producing"):
+        return "parent_idle", f"{parent['name']} is not running — nothing to refresh {jar['name']} from"
+    if cultures_engine.culture_state(jar, now)["status"] not in ("establishing", "producing"):
+        return "jar_idle", f"{jar['name']} is not running — seed it from {parent['name']}'s split instead"
+    share = awc_engine._f(ml) if awc_engine._f(ml) > 0 else awc_engine._f(
+        cultures_engine.seed_guide(jar, _cultures_mix_ppt(config)).get("starterMl"))
+    if not 0 < share <= 50000:
+        return "invalid_volume", "Enter a finite volume for the refresh"
+    return _cultures_phyto_split_apply(hass, config, parent_id, ml=share, dests=[{"to": "vessel", "ml": share}],
+                                       nutrient=nutrient, now=now, source=source)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_refresh_backup",
+    vol.Required("jar_id"): str,
+    vol.Optional("ml"): vol.Any(int, float),
+    vol.Optional("nutrient"): bool,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_cultures_refresh_backup(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Refresh the backup from its parent (see ``_cultures_backup_refresh_apply``)."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    error = _cultures_backup_refresh_apply(hass, config, str(msg.get("jar_id") or ""), ml=msg.get("ml"),
+                                           nutrient=bool(msg.get("nutrient", True)))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
+        return
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -19395,30 +19757,48 @@ async def websocket_cultures_apply_learned(
         return
     jar_id, jar = found
     field = str(msg.get("field") or "")
-    if field not in ("feedIntervalH", "restartIntervalDays"):
+    if field not in ("feedIntervalH", "restartIntervalDays", "splitIntervalDays", "mode"):
         connection.send_error(msg["id"], "unknown_field", f"'{field}' is not a learned cadence")
         return
     now = datetime.now(timezone.utc)
     siblings = [cultures["jars"][o]["history"] for o in cultures["jars"]
                 if cultures["jars"][o]["species"] == jar["species"]]
-    value = cultures_engine.learned_cadences(jar, siblings, now)["suggest"].get(field)
+    learned = cultures_engine.learned_cadences(jar, siblings, now)
+    value = learned["suggest"].get(field)
     if value is None:
         connection.send_error(msg["id"], "not_learned", "The journal has not learned that number yet")
         return
-    jar.setdefault("cadence", {})[field] = float(value)
     tasks = ((config.get("maintenance") or {}).get("tasks") or {})
-    chore = "feed" if field == "feedIntervalH" else "restart"
+    if field == "mode":
+        # The daily offer (doc §5.2, Stage B): semi-continuous — a small
+        # draw every day sized to the CULTURE (the surplus goes to the
+        # bottle); the split clock becomes a day, the reminder with it.
+        pct = awc_engine._f((learned.get("dailyOffer") or {}).get("pct")) or 25.0
+        jar["mode"] = "daily"
+        jar.setdefault("cadence", {}).update({"splitIntervalDays": 1.0, "splitPct": pct})
+        task = tasks.get(_cultures_task_id(jar_id, "harvest"))
+        if isinstance(task, dict):
+            task.update({"cadenceDays": 1.0, "criticalAfterDays": 2.0, "cadenceHours": 24.0, "criticalAfterHours": 48.0})
+        _append_activity(config, (f"{jar['name']}: daily mode — a {pct:g} % draw every day, sized to the culture; "
+                                  "the surplus goes to the bottle"), "control")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config)
+        return
+    jar.setdefault("cadence", {})[field] = float(value)
+    chore = {"feedIntervalH": "feed", "restartIntervalDays": "restart", "splitIntervalDays": "harvest"}[field]
     task = tasks.get(_cultures_task_id(jar_id, chore))
     if isinstance(task, dict):
         if chore == "feed":
             task["cadenceHours"] = float(value)
             task["criticalAfterHours"] = float(value) * 2
         else:
+            slack = 3 if chore == "harvest" else 2       # the panel's own margins
             task["cadenceDays"] = float(value)
-            task["criticalAfterDays"] = float(value) + 2
+            task["criticalAfterDays"] = float(value) + slack
             task["cadenceHours"] = float(value) * 24
-            task["criticalAfterHours"] = (float(value) + 2) * 24
-    _append_activity(config, (f"{jar['name']}: {chore} cadence set from the journal — "
+            task["criticalAfterHours"] = (float(value) + slack) * 24
+    word = {"feed": "feed", "restart": "restart", "harvest": "split"}[chore]
+    _append_activity(config, (f"{jar['name']}: {word} cadence set from the journal — "
                               f"{value:g} {'h' if chore == 'feed' else 'days'}"), "control")
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -19474,18 +19854,23 @@ def _cultures_push_plan(summary: dict[str, Any]) -> list[dict[str, Any]]:
         if str(jar.get("kind") or "") == "phyto":
             # The one-question day for the vessel (doc §5.9): split? fresh
             # vessel? A look alone is not worth a push.
-            if not ({"harvest", "restart"} & set(due)):
+            if not ({"harvest", "restart", "refresh"} & set(due)):
                 continue
+            refresh = jar.get("refresh") if isinstance(jar.get("refresh"), dict) else {}
+            if "refresh" in due and refresh.get("available"):
+                actions.append({"action": f"OPENREEF_CULTURE_REFRESH:{jid}", "title": f"Refresh from {refresh.get('fromName') or 'A'}"[:32]})
             if "restart" in due:
                 actions.append({"action": f"OPENREEF_CULTURE_FRESH:{jid}", "title": "Fresh vessel"})
             if "harvest" in due and not st.get("harvestBlocked"):
                 actions.append({"action": f"OPENREEF_CULTURE_SPLIT:{jid}", "title": "Split to the bottle"})
             actions.append({"action": f"OPENREEF_CULTURE_LATER:{jid}", "title": "Later"})
             why = (jar.get("densityAdvice") or {}).get("reason") or ""
+            if "refresh" in due and not ({"harvest", "restart"} & set(due)):
+                why = f"the backup is {awc_engine._f(st.get('ageDays')):g} days old — a fresh litre from {refresh.get('fromName') or 'the main vessel'}"
             risk = jar.get("risk") or {}
             if risk.get("level") == "act":
                 why = risk.get("reason") or why
-            asks = [w for w, d in (("fresh vessel", "restart"), ("split", "harvest")) if d in due]
+            asks = [w for w, d in (("fresh vessel", "restart"), ("split", "harvest"), ("refresh", "refresh")) if d in due]
             plan.append({
                 "jarId": jid, "title": f"OpenReef: {name} — {' + '.join(asks)}?",
                 "message": (why[:1].upper() + why[1:]) if why else "Look at the colour, then tap.",
@@ -19554,10 +19939,12 @@ async def _async_cultures_heat_guard_push(hass: HomeAssistant, config: dict[str,
         last = _parse_datetime(cultures["guard"]["notified"].get(sid))
         if last is not None and (now - last).total_seconds() < 20 * 3600:
             continue
+        tail = (". The alga declines abruptly near 30 °C — shade the vessel, move it off the sunlit shelf, a cooler room."
+                if cultures_engine.species_kind(sid) == "phyto"
+                else ". Heat can directly stress animals and worsen oxygen and ammonia problems.")
         await _async_push_actionable(
             hass, target, f"OpenReef: heat ahead for the {item['speciesName']}",
-            (lambda line: line[:1].upper() + line[1:])(guard.get("line") or "")
-            + ". Heat can directly stress animals and worsen oxygen and ammonia problems.",
+            (lambda line: line[:1].upper() + line[1:])(guard.get("line") or "") + tail,
             [], tag=f"openreef_culture_guard_{sid}")
         cultures["guard"]["notified"][sid] = now.isoformat()
         _append_activity(config, f"Heat guard: {item['speciesName']} — {guard.get('line')}", "warning")
@@ -19593,6 +19980,8 @@ async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:
         error = _cultures_phyto_split_apply(hass, config, arg, source="the phone")
     elif kind == "OPENREEF_CULTURE_FRESH":
         error = _cultures_phyto_split_apply(hass, config, arg, fresh_vessel=True, source="the phone")
+    elif kind == "OPENREEF_CULTURE_REFRESH":
+        error = _cultures_backup_refresh_apply(hass, config, arg, source="the phone")
     elif kind == "OPENREEF_HATCH_LOADED":
         error = _nps_hatch_cancel_apply(hass, config, arg, True, datetime.now(timezone.utc))
     elif kind == "OPENREEF_ENRICH_LOADED":
@@ -20022,10 +20411,12 @@ async def websocket_nps_summary(
         live_dosed={cid: _dosing_live_state(hass, ch, config).get("dosedTodayMl")
                     for cid, ch in channels.items()
                     if isinstance(ch, dict) and dosing_engine.is_standing(ch)})
+    shelf = nps_engine.shelf_summary(shelf_products, now_utc, _awc_effective_tank_l(config), tz)
+    _cultures_shelf_nudges(config, shelf.get("products") or {}, now_utc)
     connection.send_result(msg["id"], {
         "enabled": bool((config.get("nps") or {}).get("enabled")),
         "shelf": {
-            **nps_engine.shelf_summary(shelf_products, now_utc, _awc_effective_tank_l(config), tz),
+            **shelf,
             # The live entries themselves (the panel has no config copy of them).
             "live": live_products,
         },
@@ -25373,6 +25764,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cultures_water_change)
     websocket_api.async_register_command(hass, websocket_cultures_split)
     websocket_api.async_register_command(hass, websocket_cultures_fresh_vessel)
+    websocket_api.async_register_command(hass, websocket_cultures_refresh_backup)
     websocket_api.async_register_command(hass, websocket_consumable_mark_shaken)
     websocket_api.async_register_command(hass, websocket_cultures_crash)
     websocket_api.async_register_command(hass, websocket_cultures_bottle)
@@ -25517,6 +25909,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_dosing_tick(hass, entry, normalised)
     await _async_schedule_spawning_tick(hass, entry, normalised)
     await _async_schedule_cooling_tick(hass, entry, normalised)
+    await _async_schedule_cultures_tick(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
         _async_kick_dosing_sync(hass, entry)
@@ -25549,6 +25942,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _clear_spawning_tick(hass)
     hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
     _clear_cooling_tick(hass)
+    _clear_cultures_tick(hass)
     _cooling_rt = hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME)
     if isinstance(_cooling_rt, dict):
         await _async_cooling_learning_save(hass, _cooling_rt, force=True)

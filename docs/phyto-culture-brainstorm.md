@@ -1,6 +1,6 @@
 # Phyto culture — Nannochloropsis on the rack · brainstorm (2026-09-20)
 
-> **STATUS: §8 LOCKED 2026-09-20. Stage A BUILT as 0.7.207 (2026-09-21, §10) — unverified on Reece's HA. Stage B (light, heat, backup, learning) next, back to back.**
+> **STATUS: §8 LOCKED 2026-09-20. Stage A BUILT as 0.7.207 (§10) and Stage B BUILT as 0.7.208 (§11), both 2026-09-21 — unverified on Reece's HA. Stage C (the rotifer coupling and the stick) next, after the first split.**
 > Grows the cultures arc (docs/live-cultures-brainstorm.md — the v1 grill parked "own phyto
 > culture = a later card, needs light", 2026-09-03) and closes the phyto-drip brief's loose end
 > (docs/phyto-drip-brainstorm.md §5.4 Q3 / §10: "a phyto culture on the rack feeding the jar is a
@@ -534,7 +534,7 @@ The original questions, for the record:
   shelf with its hand-dose plan and the *Shaken* tap, Loaded debits the bottle, the cone feed cap
   lift, tile + rig + hub + Pulse lines, reminders + the push, the day-the-starter-lands
   walkthrough (hygiene said once), the sizing line (§4.1/§5.11), the nutrient-budget note, tests.
-- **Stage B — light, heat, backup, learning:** the three light modes on the plug and the sun
+- **Stage B — light, heat, backup, learning (BUILT 0.7.208, §11):** the three light modes on the plug and the sun
   entity (the sunset rule, delivered hours, the short-day nudge, the lamp-off watch), the Nanno
   heat guard and sunlit-vessel copy + the optional vessel sensor, B and the refresh chore, learned
   days-to-dark / yield / recovery-by-depth, the `daily` mode offer, the risk line, the shelf's split
@@ -619,6 +619,92 @@ The vessel, the bottle, the tank. Everything below is code; nothing here has run
 - **Tests**: `test_cultures.py` +16 (84), `test_cultures_audit.py` +2 (28),
   `test_panel_cultures.mjs` +6 (46). Every suite that touches cultures, the shelf, dosing, saves
   and reports is green.
-- **Not in A (B next, back to back):** the light block and the sun entity, the Nanno heat guard
+- **Not in A (built in B, §11):** the light block and the sun entity, the Nanno heat guard
   copy on the projection, B's refresh chore, the `daily` offer and Apply on days-to-dark, the
   shelf's split nudge, the full risk line.
+
+## 11. As built — Stage B (0.7.208, 2026-09-21)
+
+Light, heat, backup, learning. Code only; nothing here has run on Reece's HA yet — the first
+sunset with the plug bound is the first live test.
+
+- **Light** (`cultures.py` `sun_day` / `light_window` / `light_state`, `__init__.py`
+  `_async_cultures_light_tick`): per jar `light {mode: sun | lamp | sun+lamp, switchEntity,
+  onAt, latestOff, tempEntity}`; the target hours are the cadence's `lightHours` (one field, not
+  two). `sun_day` reads HA's `sun.sun` from its two FUTURE stamps — day when the setting comes
+  first — so the day length (astronomical, an upper bound) and the sunset the window hangs off
+  (the LAST one at night, the coming one by day) need no calendar logic. `light_window` is the
+  one rule the tick and the card both ask: `lamp` = `onAt` + the target; `sun+lamp` = from
+  sunset until daylight + lamp = the target, never past `latestOff` (the first occurrence of
+  that clock time after the sunset — `00:00` = the coming midnight; a cap before the sunset means
+  tomorrow's, i.e. no cap); midsummer's sun alone reaching the target leaves the lamp off
+  (`sun_enough`); no sun to read in `sun+lamp` falls back to the lamp rule and says so. The tick
+  (`CULTURES_TICK_SECONDS` 60, armed while a phyto vessel stands) switches ONLY the lamp: on when
+  the window opens (own stamp `lightOnAt`), off when it closes (minutes banked in
+  `lightMinutesToday` under `lightDay`), a failed call retried next tick with no stamp, an
+  unbound plug clears the stamps; a plug reading off or unavailable after we lit it earns one
+  warning per window (`lightWatchAt`), never a fight with the keeper; at the local day roll
+  yesterday's lamp minutes + daylight go into the journal as a `light` row (`lampH`,
+  `daylightH`, `lightH`), the basis of the learned light line. Readout: *"daylight 12.4 h
+  (astronomical — the window gives less) · lamp 3.6 h from sunset 19:09 → 22:45 · 1.5 h lamp so
+  far"*; `sun` mode under 12 h → the nudge *"the days are under 12 h — put the LED on the plug"*
+  (a `watch`); under the target → a `watch`; the lamp off in its window → a `watch`; under 12 h
+  delivered by window end → an `act` (*"the culture lost a day of light — expect the split to
+  slip"*, one activity line a day, `lightLostDay`). Air is never switched; the tile's title says
+  why. The rig's lamp glyph and the tile's follow `light.lit` (grey when dark, red when it should
+  be on and is not).
+- **Heat**: the optional vessel-side sensor (`light.tempEntity`) overrides the rack reading for
+  that jar (`temp.source: vessel | rack`); the tile's heat line names the source (*"the vessel's
+  own sensor"* vs *"this is the rack's air, not the culture — a vessel sensor in Culture settings
+  reads the water"*); `heat_guard` and its push speak the alga's copy for `kind == "phyto"`
+  (*shade it, move it off the sunlit shelf, a cooler room — the alga declines abruptly near
+  30 °C*), the animals keep theirs; `_entity_temp_c` is the one unit-converting reader.
+- **Backup** (`state.backupOf`, server-written by the split's `vessel` share): the engine's
+  `refresh` clock on a backup — due `max(7, restartCycles × splitIntervalDays)` days after its
+  seed (32 by default), reason `backup`; the calendar never asks B for a split (a dark look
+  still does). The `vessel` share now targets an idle same-species jar, else the RUNNING backup
+  of this vessel (a refresh: a `restart` row on B with its old litre to waste, then the seed
+  again 1:4 from today's crop — B's clocks restart, its generation is A's + 1, `backupOf`
+  kept), else a new jar. New WS `cultures_refresh_backup {jar_id (B), ml?, nutrient?}` =
+  a small split of A with the whole share into B (every refusal the split's own:
+  `not_a_backup`, `parent_idle`, `jar_idle`, `not_ready_to_split`…); the phone's
+  `OPENREEF_CULTURE_REFRESH` and the daily push *"Nanno B — refresh?"*; the maintenance chore
+  `culture_<jid>_refresh` (the panel seeds it only for a jar with `backupOf`, cadence from the
+  same formula; `_cultures_task_clock` reads the engine's clock); the tile's *"backup of Nanno A ·
+  refresh in ~N d (every ~32 d) · 250 ml from Nanno A + 750 ml fresh + 1.1 ml f/2"* line and the
+  **Refresh from Nanno A** tap; A's split form labels the share *"→ Nanno B … to refresh Nanno B"*.
+- **Learning** (`learned_cadences`, phyto): `suggest.splitIntervalDays` now has its **Apply**
+  (`cultures_apply_learned` re-times the split reminder with the panel's +3 d margin);
+  `dailyOffer {available, pct}` after two learned cycles — `daily_draw_pct` = the daily fraction
+  matching the batch cycle's growth, held to 20–30 % — and **Switch to daily**
+  (`field: "mode"`: `mode = daily`, `splitIntervalDays 1`, `splitPct = pct`, the reminder daily;
+  the offer disappears in daily mode); `yieldLWeek`; `depth` = recovery by split depth
+  (`darkening_by_depth`: ≤ 50 % / 50–65 % / > 65 % buckets, two runs at each of two depths
+  before it speaks, *"this does not establish the cause"*); `light {weekH, days, line}` = the
+  mean of the last seven `light` rows, the line only under 14 h AND beside a cycle slower than
+  the record (*"the light is the first thing to check; nothing here proves it"*).
+- **The risk line** (`risk_line(…, light=)`): the Stage A items plus the light's watch / act
+  (the nudge or the lamp-off words; the lost day as an `act`), no f/2 logged at the last split,
+  `restartCycles` splits since a fresh vessel (*sterilise the spare*), the backup's age when its
+  refresh is due, the starter bottle past four weeks while the vessel is still establishing.
+- **The shelf's split nudge** (`nps.home_bottle_nudge`, attached by `_cultures_shelf_nudges` on
+  the NPS summary as `splitNudge` on a `home_phyto_*` card): a low or empty home bottle says what
+  the vessel is doing about it — *"empty — Nanno A reads dark: split into this bottle"*, *"runs
+  out in ~1.7 d — Nanno A's next split is due in ~4 d (your record says ~6 d to dark) — a small
+  early split tides it over"*, off-colour / not running variants; silent when the bottle is fine.
+- **Payload**: per jar `light`, `backupOf`, `refresh {isBackup, fromId, fromName, available, due,
+  hoursUntil, everyDays, starterMl, freshMl, nutrientMl, workingL, backupId, backupName}`,
+  `dailyOffer`, `temp.source`; `due` gains `refresh`; top-level `sun`. Normaliser: the `light`
+  block, the state stamps (`backupOf`, `lightOnAt`, `lightOffAt`, `lightMinutesToday`,
+  `lightDay`, `lightWatchAt`, `lightLostDay` — all under the existing whole-`state` preserve
+  guard), the `light` history row fields.
+- **Panel**: the Light group in the vessel's settings row (mode, plug, on-at, latest-off, vessel
+  sensor; the hints no longer promise a later stage), the tile's light line / Apply chips /
+  learned lines / backup line / Refresh tap / share label / heat-source words, the reminders'
+  `culture_<jid>_refresh`, the due-state regexes, the chore word *refresh the backup*, the
+  shelf card's nudge line, the demo vessel's light.
+- **Tests**: `test_cultures.py` +12 (96), `test_cultures_audit.py` +1 (29),
+  `test_panel_cultures.mjs` +3 (49); the full regression green.
+- **Not in B (Stage C next, after the first split):** refill-with-phyto on the rotifer harvest
+  and restart, the cone's default dose from a home bottle, the printable Secchi stick, Reef
+  Report yield; the camera/phone green index is Stage D.

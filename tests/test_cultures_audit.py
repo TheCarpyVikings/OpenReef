@@ -342,6 +342,49 @@ def test_phyto_split_refusals_leave_no_ledger_behind():
         integration._mixing_hatchery_debit = real
 
 
+def test_light_tick_only_ever_touches_the_lamp_and_a_refused_refresh_writes_nothing():
+    """0.7.208: the plug tick names ONE entity — the lamp's — never the air, never
+    a plug in sun mode; a refused refresh leaves every ledger as it found it."""
+    from test_cultures import _phyto_jar, _phyto_entry, _cultures
+    from _fake_ha import FakeState
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    jar = _phyto_jar(started_ago_days=6, lastTint="green")
+    jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": ""}
+    entry = _phyto_entry(jars={"c1": jar})
+    sun = {"next_rising": _iso(now + timedelta(hours=9)), "next_setting": _iso(now + timedelta(hours=23))}
+    hass = FakeHass(states={"switch.lamp": "off", "switch.air": "on", "sun.sun": FakeState("below_horizon", sun)}, entries=[entry])
+    for minutes in (0, 1, 30, 70, 130):
+        run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=minutes)))
+    named = {v for c in hass.services.calls if c.domain == "switch" for v in c.data.values() if isinstance(v, str)}
+    assert named == {"switch.lamp"}, f"the tick touched {named}"
+    assert hass.states.get("switch.air").state == "on" and hass.states.get("switch.lamp").state == "off"
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["light"]["mode"] = "sun"
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    hass.states.set("switch.lamp", "on")
+    before = [c for c in hass.services.calls if c.domain == "switch"]
+    run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=200)))
+    assert [c for c in hass.services.calls if c.domain == "switch"] == before, "sun mode never switches a plug the keeper turned on"
+    # A refused refresh: B is not a backup, then A is not ready — nothing moves.
+    b = _phyto_jar(started_ago_days=20, lastTint="green", workingL=1.0)
+    b["name"], b["volumeL"] = "Nanno B", 1.0
+    entry = _phyto_entry(jars={"c1": _phyto_jar(started_ago_days=20, lastTint="pale", lastHarvestAt=_iso(REAL - timedelta(days=1))), "c2": b})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    snapshot = copy.deepcopy((_config(entry)["nps"]["cultures"]["jars"], _config(entry)["consumables"]["products"]))
+    run(integration.websocket_cultures_refresh_backup(hass, conn, {"id": 1, "jar_id": "c2"}))
+    assert conn.errors[-1].code == "not_a_backup"
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c2"]["state"]["backupOf"] = "c1"
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    snapshot = copy.deepcopy((cfg["nps"]["cultures"]["jars"], cfg["consumables"]["products"]))
+    run(integration.websocket_cultures_refresh_backup(hass, conn, {"id": 2, "jar_id": "c2"}))
+    assert conn.errors[-1].code == "not_ready_to_split"
+    after = (_config(entry)["nps"]["cultures"]["jars"], _config(entry)["consumables"]["products"])
+    assert after[0]["c1"]["history"] == snapshot[0]["c1"]["history"] and after[0]["c2"]["history"] == snapshot[0]["c2"]["history"]
+    assert after[0]["c2"]["state"] == snapshot[0]["c2"]["state"] and after[1]["f2"]["remainingMl"] == snapshot[1]["f2"]["remainingMl"]
+
 if __name__ == '__main__':
     names = [k for k in sorted(globals()) if k.startswith('test_')]
     failures = 0

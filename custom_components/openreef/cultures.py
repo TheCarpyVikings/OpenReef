@@ -66,6 +66,17 @@ PHYTO_SEED_RATIO = 4.0         # the starter page's 1:4 — 250 ml into 1 L of n
 PHYTO_RECOVER_DAYS = 2.0       # an off-colour vessel that has not recovered in two days is a crash
 BOTTLE_RESEED_DAYS = 7.0       # a fridge bottle under a week old is a legitimate starter
 SHAKE_EVERY_H = 48.0           # Reefphyto: shake the bottle every one to two days
+# Light (doc §5.6, Stage B): sun on the rack, the LED on a plug, or both — in
+# sun+lamp the plug runs from SUNSET until daylight + lamp = the target, never
+# past latestOff (a 16 h day always leaves the eight dark hours). Daylight is
+# astronomical (HA's sun entity) — an upper bound of what the window gives.
+LIGHT_MODES: tuple[str, ...] = ("sun", "lamp", "sun+lamp")
+LIGHT_SHORT_DAY_H = 12.0       # under this the window alone will not green a vessel — the nudge
+LIGHT_LOST_DAY_H = 12.0        # under this delivered by window end = a lost day of light (act)
+LIGHT_ON_AT_DEFAULT = "07:00"  # lamp mode: on at this, for lightHours
+LIGHT_LATEST_OFF_DEFAULT = "00:00"   # sun+lamp: the lamp never runs past this
+LIGHT_WEEK_LOW_H = 14.0        # a week under this beside a slow cycle earns the learned line
+BACKUP_REFRESH_MIN_DAYS = 7.0  # B is refreshed from A every restartCycles splits, never sooner than a week
 # §4.1: what a faint tint in the display costs, as an ESTIMATE — one tint of
 # ~10,000 cells/ml from a dark home culture of ~1.5×10⁷ cells/ml. The culture
 # is uncounted; nothing here is ever shown as the bottle's cells/ml.
@@ -466,6 +477,21 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
         out["harvest"].update({"available": True, "due": True, "hoursUntil": 0.0,
                                "at": now.isoformat() if not out["harvest"].get("due") else out["harvest"]["at"],
                                "reason": "dark"})
+    restart_cycles = _f(cad.get("restartCycles"))
+    backup_of = str(state.get("backupOf") or "")
+    out["backupOf"] = backup_of
+    out["refresh"] = {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None,
+                      "reason": None}
+    if backup_of:
+        # B (doc §5.8, Stage B): a windowsill bottle seeded by A's split and
+        # refreshed from A every restartCycles splits (a week at the least).
+        # The calendar never asks B for a split — only a dark look does.
+        refresh_days = max(BACKUP_REFRESH_MIN_DAYS, interval * (restart_cycles if restart_cycles > 0 else 4.0))
+        out["refresh"] = _due(None, started.isoformat(), timedelta(days=refresh_days), now)
+        out["refresh"]["reason"] = "backup" if out["refresh"]["due"] else None
+        out["refresh"]["everyDays"] = round(refresh_days, 1)
+        if out["harvest"].get("reason") == "cap":
+            out["harvest"].update({"due": False, "reason": None, "hoursOverdue": 0.0})
     # A sign since the last fresh vessel brings it forward and blocks the
     # split until a tint tap after the sign says green or dark (doc §5.3).
     sign_at = _parse_iso(state.get("lastSignAt"))
@@ -478,7 +504,6 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
                 break
     out["harvestBlocked"] = (signed and not ok_after_sign) or tint == "off"
     cycles = int(max(0.0, _f(state.get("cyclesSinceFresh"))))
-    restart_cycles = _f(cad.get("restartCycles"))
     if restart_cycles > 0:
         due = cycles >= restart_cycles
         left = max(0.0, restart_cycles - cycles)
@@ -508,7 +533,7 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
     out["mode"] = str(jar.get("mode") or "batch") if str(jar.get("mode") or "") in PHYTO_MODES else "batch"
     out["splitEligible"] = (not establishing and tint in ("green", "dark") and not out["harvestBlocked"])
     chores = []
-    for key in ("look", "harvest", "restart"):
+    for key in ("look", "harvest", "restart", "refresh"):
         clock = out[key]
         if clock.get("available") and clock.get("at"):
             chores.append((0 if clock["due"] else 1, clock["at"], key))
@@ -717,6 +742,260 @@ def starter_state(opened_iso: Any, shelf_days: Any, now: datetime) -> dict[str, 
     return {"available": True, "status": status, "daysLeft": round(max(0.0, left), 1), "ageDays": round(age, 1)}
 
 
+def _hhmm(value: Any, default: str) -> tuple[int, int]:
+    """'HH:MM' → (h, m); junk falls back to the default."""
+    for cand in (value, default):
+        try:
+            h, m = str(cand).strip().split(":")[:2]
+            h, m = int(h), int(m)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h, m
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return 0, 0
+
+
+def _last_at(now_local: datetime, hhmm: Any, default: str) -> datetime:
+    """The most recent occurrence of a local clock time at or before now."""
+    h, m = _hhmm(hhmm, default)
+    at = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    return at if at <= now_local else at - timedelta(days=1)
+
+
+def _next_at(after: datetime, hhmm: Any, default: str) -> datetime:
+    """The first occurrence of a local clock time strictly after ``after``."""
+    h, m = _hhmm(hhmm, default)
+    at = after.replace(hour=h, minute=m, second=0, microsecond=0)
+    return at if at > after else at + timedelta(days=1)
+
+
+def sun_day(sun: Any, now: datetime) -> dict[str, Any]:
+    """HA's sun entity read for the vessel (doc §5.6): from the two FUTURE
+    stamps it carries (next_rising, next_setting) — day when the setting comes
+    first, night otherwise — the astronomical day length and the sunset the
+    lamp's window hangs off: the LAST sunset at night (the window may be
+    open), the coming one by day. Never a guess: no stamps, ``available``
+    False. Daylight is an upper bound of what the rack's window gives."""
+    sun = sun if isinstance(sun, dict) else {}
+    rising = _parse_iso(sun.get("next_rising"))
+    setting = _parse_iso(sun.get("next_setting"))
+    if rising is None or setting is None:
+        return {"available": False, "isDay": None, "daylightH": None, "sunsetAt": None,
+                "sunriseAt": None, "nextSunsetAt": None}
+    day = setting < rising
+    if day:
+        daylight_h = (setting - (rising - timedelta(days=1))).total_seconds() / 3600.0
+        window_sunset = setting
+    else:
+        daylight_h = (setting - rising).total_seconds() / 3600.0
+        window_sunset = setting - timedelta(days=1)
+    daylight_h = max(0.0, min(24.0, daylight_h))
+    return {"available": True, "isDay": day, "daylightH": round(daylight_h, 2),
+            "sunsetAt": window_sunset.isoformat(), "sunriseAt": rising.isoformat(),
+            "nextSunsetAt": setting.isoformat()}
+
+
+def light_window(light: Any, target_h: Any, now_local: datetime, sun: Any = None) -> dict[str, Any]:
+    """The plug's window today (doc §5.6). ``lamp``: on at ``onAt`` for the
+    target hours. ``sun+lamp``: on at SUNSET, off when daylight + lamp = the
+    target, never past ``latestOff`` — with no sun reading the lamp falls back
+    to the ``lamp`` rule and says so. ``sun``: no window. ``now_local`` sets
+    the zone the clock times are read in. Pure — the tick and the card both
+    ask this, so they can never disagree."""
+    light = light if isinstance(light, dict) else {}
+    mode = str(light.get("mode") or "sun")
+    mode = mode if mode in LIGHT_MODES else "sun"
+    target = max(0.0, min(24.0, _f(target_h, 16.0)))
+    tz = now_local.tzinfo
+    day = sun_day(sun, now_local) if mode == "sun+lamp" else {"available": False}
+    out: dict[str, Any] = {"mode": mode, "targetH": target, "plannedLampH": 0.0, "onAt": None, "offAt": None,
+                           "active": False, "over": False, "rule": "none", "sunAvailable": bool(day.get("available")),
+                           "daylightH": day.get("daylightH")}
+    if mode == "sun" or target <= 0:
+        return out
+    if mode == "sun+lamp" and day.get("available"):
+        sunset = _parse_iso(day["sunsetAt"]).astimezone(tz)
+        lamp_h = max(0.0, target - _f(day["daylightH"]))
+        out["plannedLampH"] = round(lamp_h, 2)
+        out["rule"] = "sunset"
+        if lamp_h <= 0:
+            out["rule"] = "sun_enough"
+            return out
+        off = sunset + timedelta(hours=lamp_h)
+        cap = _next_at(sunset, light.get("latestOff"), LIGHT_LATEST_OFF_DEFAULT)
+        if cap < off:
+            off = cap
+            out["rule"] = "latest_off"
+            out["plannedLampH"] = round((off - sunset).total_seconds() / 3600.0, 2)
+        on = sunset
+    else:
+        on = _last_at(now_local, light.get("onAt"), LIGHT_ON_AT_DEFAULT)
+        off = on + timedelta(hours=target)
+        out["plannedLampH"] = round(target, 2)
+        out["rule"] = "on_at" if mode == "lamp" else "on_at_fallback"
+    out["onAt"] = on.isoformat()
+    out["offAt"] = off.isoformat()
+    out["active"] = on <= now_local < off
+    out["over"] = now_local >= off
+    return out
+
+
+def _lamp_minutes_today(state: dict[str, Any], now_local: datetime) -> float:
+    """Own stamps only: the minutes banked today plus the burst still running,
+    counted from local midnight when it started yesterday."""
+    today = now_local.date().isoformat()
+    minutes = _f(state.get("lightMinutesToday")) if str(state.get("lightDay") or "") == today else 0.0
+    on_at = _parse_iso(state.get("lightOnAt"))
+    if on_at is not None:
+        on_local = on_at.astimezone(now_local.tzinfo)
+        midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = max(on_local, midnight)
+        if start < now_local:
+            minutes += (now_local - start).total_seconds() / 60.0
+    return max(0.0, minutes)
+
+
+def light_state(jar: dict[str, Any], cad: dict[str, float], now_local: datetime, sun: Any = None,
+                plug_state: Any = None) -> dict[str, Any]:
+    """The vessel's light as the card says it (doc §5.6): the mode, today's
+    daylight (astronomical), the lamp's window and what it delivered (own
+    stamps), the short-day nudge, the lamp-off watch, the lost-day act.
+    ``plug_state`` is the switch's state string (on / off / unavailable /
+    None = no entity). Advisory: the tick decides from light_window."""
+    light = jar.get("light") if isinstance(jar.get("light"), dict) else {}
+    state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
+    mode = str(light.get("mode") or "sun")
+    mode = mode if mode in LIGHT_MODES else "sun"
+    plug = str(light.get("switchEntity") or "")
+    target = max(0.0, min(24.0, _f(cad.get("lightHours"), 16.0)))
+    day = sun_day(sun, now_local)
+    window = light_window(light, target, now_local, sun)
+    lamp_min = _lamp_minutes_today(state, now_local) if mode != "sun" and plug else 0.0
+    lamp_h = round(lamp_min / 60.0, 2)
+    daylight = _f(day.get("daylightH")) if day.get("available") else None
+    counts_sun = mode in ("sun", "sun+lamp")
+    delivered = round(lamp_h + (daylight or 0.0), 1) if (counts_sun and daylight is not None) or mode == "lamp" else None
+    plug_on = str(plug_state or "") == "on"
+    lit = bool((counts_sun and day.get("isDay")) or plug_on)
+    status, line, nudge = "ok", "", ""
+    hours_in = None
+    if window.get("active"):
+        hours_in = round((now_local - _parse_iso(window["onAt"]).astimezone(now_local.tzinfo)).total_seconds() / 3600.0, 1)
+    if mode == "sun":
+        if daylight is None:
+            status, line = "unknown", "daylight unknown — no sun entity to read"
+        elif daylight < LIGHT_SHORT_DAY_H:
+            status = "watch"
+            line = f"daylight {daylight:.1f} h (astronomical — the window gives less)"
+            nudge = f"the days are under {LIGHT_SHORT_DAY_H:g} h — put the LED on the plug"
+        elif daylight < target:
+            status = "watch"
+            line = f"daylight {daylight:.1f} h (astronomical — the window gives less) — under the {target:g} h target"
+        else:
+            line = f"daylight {daylight:.1f} h (astronomical — the window gives less)"
+    else:
+        if not plug:
+            status, line = "watch", "no plug bound — bind the LED's switch in Culture settings"
+        elif window.get("active") and not plug_on:
+            status = "watch"
+            what = "unavailable" if str(plug_state or "") in ("unavailable", "unknown", "") else "off"
+            line = f"lamp {what} {hours_in:g} h into its window"
+        elif window.get("over") and delivered is not None and delivered < LIGHT_LOST_DAY_H:
+            status = "act"
+            line = f"{delivered:g} h of light today — the culture lost a day of light; expect the split to slip"
+        if mode == "sun+lamp":
+            if daylight is None:
+                sun_words = "no sun entity — the lamp runs on its on-at time instead"
+                if status == "ok":
+                    status = "watch"
+            else:
+                sun_words = f"daylight {daylight:.1f} h (astronomical — the window gives less)"
+            plan = window.get("plannedLampH") or 0.0
+            when = ""
+            if window.get("onAt") and window.get("offAt"):
+                on_l = _parse_iso(window["onAt"]).astimezone(now_local.tzinfo)
+                off_l = _parse_iso(window["offAt"]).astimezone(now_local.tzinfo)
+                when = f" from sunset {on_l.strftime('%H:%M')} → {off_l.strftime('%H:%M')}" if window["rule"] in ("sunset", "latest_off") \
+                    else f" {on_l.strftime('%H:%M')} → {off_l.strftime('%H:%M')}"
+            lamp_words = (f"lamp {plan:.1f} h{when}" if plan > 0 else "the sun alone reaches the target — the lamp stays off")
+            if window["rule"] == "latest_off":
+                lamp_words += f" (capped at {str(light.get('latestOff') or LIGHT_LATEST_OFF_DEFAULT)})"
+            readout = f"{sun_words} · {lamp_words} · {lamp_h:.1f} h lamp so far"
+        else:
+            on_l = _parse_iso(window["onAt"]).astimezone(now_local.tzinfo) if window.get("onAt") else None
+            off_l = _parse_iso(window["offAt"]).astimezone(now_local.tzinfo) if window.get("offAt") else None
+            readout = (f"lamp {target:g} h {on_l.strftime('%H:%M')} → {off_l.strftime('%H:%M')} · {lamp_h:.1f} h so far"
+                       if on_l and off_l else f"lamp {target:g} h a day")
+        line = f"{readout}" + (f" — {line}" if line else "")
+    return {"mode": mode, "switchEntity": plug, "tempEntity": str(light.get("tempEntity") or ""),
+            "targetH": target, "daylightH": daylight, "sunAvailable": bool(day.get("available")),
+            "isDay": day.get("isDay"), "sunsetAt": day.get("sunsetAt"), "sunriseAt": day.get("sunriseAt"),
+            "lampH": lamp_h, "deliveredH": delivered, "plannedLampH": window.get("plannedLampH"),
+            "window": {"onAt": window.get("onAt"), "offAt": window.get("offAt"), "active": bool(window.get("active")),
+                       "over": bool(window.get("over")), "rule": window.get("rule"), "hoursIn": hours_in},
+            "plugState": str(plug_state) if plug_state is not None else "", "plugOn": plug_on, "lit": lit,
+            "shortDay": bool(daylight is not None and daylight < LIGHT_SHORT_DAY_H),
+            "status": status, "line": line, "nudge": nudge,
+            "aerationNote": "Air is never switched — a still culture settles and dies; only the lamp rides the plug."}
+
+
+def light_samples(history: Any, days: int = 7) -> list[float]:
+    """Hours of light delivered per day, from the daily ``light`` rows the
+    tick writes (lamp by own stamps + astronomical daylight). Newest first."""
+    rows = [(at, row) for at, row in _chronological(history) if row.get("event") == "light" and not row.get("undoneAt")]
+    rows.sort(key=lambda item: item[0], reverse=True)
+    out = []
+    for _at, row in rows[:days]:
+        hours = row.get("lightH")
+        if isinstance(hours, (int, float)) and not isinstance(hours, bool) and math.isfinite(hours):
+            out.append(round(float(hours), 1))
+    return out
+
+
+def darkening_by_depth(history: Any) -> dict[str, Any]:
+    """Recovery by split depth (doc §5.10, the purge_note shape): the days to
+    the first dark tap after a split, grouped by how much came out. Two runs
+    at each of two depths before it speaks; it never claims a cause."""
+    buckets: dict[str, list[float]] = {}
+    anchor: tuple[datetime, str] | None = None
+    for at, row in _chronological(history):
+        event = row.get("event")
+        if event in ("harvest", "restart"):
+            ml = _f(row.get("ml"))
+            after = _f(row.get("workingMl"))
+            before = after - _f(row.get("freshMl")) + ml
+            pct = 100.0 * ml / before if before > 0 and ml > 0 else None
+            if pct is None:
+                anchor = None
+                continue
+            label = "≤ 50 %" if pct <= 50 else "50–65 %" if pct <= 65 else "> 65 %"
+            anchor = (at, label)
+            continue
+        if event in ("seeded", "crashed"):
+            anchor = None
+            continue
+        if anchor is not None and str(row.get("tint") or "") == "dark":
+            days = (at - anchor[0]).total_seconds() / 86400.0
+            if 0 < days <= 30:
+                buckets.setdefault(anchor[1], []).append(days)
+            anchor = None
+    spoken = {k: v for k, v in buckets.items() if len(v) >= PURGE_RUNS_MIN}
+    if len(spoken) < 2:
+        return {"available": False, "line": "", "byDepth": {k: round(sum(v) / len(v), 1) for k, v in buckets.items()}}
+    parts = [f"{k} splits took ~{sum(v) / len(v):.0f} d to darken" for k, v in sorted(spoken.items())]
+    return {"available": True, "byDepth": {k: round(sum(v) / len(v), 1) for k, v in buckets.items()},
+            "line": ", ".join(parts) + " — this does not establish the cause"}
+
+
+def daily_draw_pct(split_pct: Any, days_to_dark: Any) -> float:
+    """The semi-continuous draw (doc §5.2): the daily fraction that matches
+    the batch cycle's growth, held to the guide's 20–30 % a day."""
+    pct = max(10.0, min(90.0, _f(split_pct, 60.0)))
+    days = max(1.0, _f(days_to_dark, 8.0))
+    daily = 100.0 * (1.0 - (1.0 - pct / 100.0) ** (1.0 / days))
+    return float(round(max(20.0, min(30.0, daily))))
+
+
 def feed_advice(tint: Any, feed_clock: dict[str, Any], harvest_clock: Any = None,
                 harvest_interval_h: Any = None, species_id: Any = "rotifer_L") -> dict[str, Any]:
     """Inspection and feeding advice from reported tint and chore clocks.
@@ -904,10 +1183,15 @@ def rig_state(jars: Any, bottle: Any) -> dict[str, Any]:
         bottle = j.get("homeBottle") if isinstance(j.get("homeBottle"), dict) else {}
         guide = j.get("splitGuide") if isinstance(j.get("splitGuide"), dict) else {}
         tint = str(j.get("tint") or "") if running else ""
+        light = j.get("light") if isinstance(j.get("light"), dict) else {}
+        light_on = running and (bool(light.get("lit")) if light.get("mode") in LIGHT_MODES and (light.get("sunAvailable") or light.get("switchEntity")) else True)
         phyto.append({
             "id": str(j.get("id") or ""), "name": str(j.get("name") or ""),
             "kind": str(j.get("vesselKind") or "bottle"), "status": status, "tint": tint,
-            "pct": round(pct), "airOn": running, "lightOn": running,
+            "pct": round(pct), "airOn": running, "lightOn": light_on,
+            "lightWatch": running and light.get("status") in ("watch", "act"),
+            "backup": bool(str(j.get("backupOf") or (st.get("backupOf") or ""))),
+            "refreshHot": "refresh" in due,
             "splitHot": "harvest" in due and not st.get("harvestBlocked"),
             "freshHot": "restart" in due, "lookHot": "look" in due,
             "offColour": bool(st.get("harvestBlocked")) or tint == "off",
@@ -1280,21 +1564,45 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
            "purge": purge_note(run_length_runs(history))}
     if species_kind(jar.get("species")) == "phyto":
         # Days-to-dark (doc §5.10): split → the first dark tap; rolling three,
-        # two before it speaks. The Apply on splitIntervalDays is Stage B.
+        # two before it speaks; Apply moves splitIntervalDays (Stage B).
         dark = _rolling(darkening_samples(history), "days")
         out["daysToDark"] = dark
         suggest["splitIntervalDays"] = None
+        suggest["mode"] = None
+        mode = str(jar.get("mode") or "batch")
         if dark["available"]:
             days = max(2.0, min(21.0, round(dark["days"])))
-            if abs(days - cad["harvestIntervalDays"]) >= 1:
+            if abs(days - cad["harvestIntervalDays"]) >= 1 and mode != "daily":
                 suggest["splitIntervalDays"] = days
+            # Two learned cycles unlock the daily (semi-continuous) offer: a
+            # small draw every day, sized to the culture — never to the tank.
+            if mode != "daily":
+                suggest["mode"] = "daily"
+        out["dailyOffer"] = {"available": bool(dark["available"] and mode != "daily"),
+                             "pct": daily_draw_pct(cad.get("harvestPct"), dark.get("days")) if dark["available"] else None}
+        # Yield (litres a week — the demand line's other half), recovery by
+        # split depth, and the light delivered against a slow cycle.
+        y = out["yieldMlDay"]
+        out["yieldLWeek"] = round(_f(y) * 7.0 / 1000.0, 2) if y else None
+        out["depth"] = darkening_by_depth(history)
+        week = light_samples(history)
+        week_h = round(sum(week) / len(week), 1) if week else None
+        samples = darkening_samples(history)
+        slow = bool(samples and dark["available"] and samples[0] > dark["days"] + 1) or \
+            bool(samples and not dark["available"] and samples[0] > cad["harvestIntervalDays"] + 1)
+        out["light"] = {"weekH": week_h, "days": len(week),
+                        "line": (f"a week under {LIGHT_WEEK_LOW_H:g} h of light (~{week_h:g} h a day) beside a slow cycle — "
+                                 "the light is the first thing to check; nothing here proves it")
+                        if week_h is not None and len(week) >= 5 and week_h < LIGHT_WEEK_LOW_H and slow else ""}
     return out
 
 
-def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now: datetime) -> dict[str, Any]:
+def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now: datetime,
+              light: Any = None) -> dict[str, Any]:
     """The hatchery nose, made explainable (doc §8.8): one sentence with the
     cause, built only from stamps — never a score. ``act`` = do something
-    today, ``watch`` = look harder, ``ok`` = leave it alone."""
+    today, ``watch`` = look harder, ``ok`` = leave it alone. ``light`` is the
+    phyto vessel's light_state (Stage B) — its watch / act rides the line."""
     if st.get("status") not in ("establishing", "producing"):
         return {"level": "ok", "reason": ""}
     state = jar.get("state") if isinstance(jar.get("state"), dict) else {}
@@ -1320,6 +1628,27 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
         harvest = st.get("harvest") or {}
         if harvest.get("reason") == "cap" and _f(harvest.get("hoursOverdue")) >= 72 and tint not in ("dark", "off"):
             watch.append(f"not dark at day {_f(st.get('daysSinceSplit')):g} — light, heat, or f/2 skipped at the last split?")
+        # Stage B (doc §5.10): the light, the f/2 at the last split, the fresh
+        # vessel overdue by cycles, the backup's refresh, the starter's month.
+        light = light if isinstance(light, dict) else {}
+        if light.get("status") == "act" and light.get("line"):
+            act.append(str(light["line"]).split(" — ", 1)[-1] if " — the culture" in str(light["line"]) else str(light["line"]))
+        elif light.get("status") == "watch":
+            watch.append(light.get("nudge") or (str(light.get("line") or "").rsplit(" — ", 1)[-1] if light.get("line") else "light under the target"))
+        last_split = next((row for _at, row in reversed(_chronological(jar.get("history")))
+                           if row.get("event") in ("harvest", "restart") and not row.get("undoneAt")), None)
+        if isinstance(last_split, dict) and _f(last_split.get("freshMl")) > 0 and _f(last_split.get("nutrientMl")) <= 0:
+            watch.append("no f/2 logged at the last split — the fresh water went in bare")
+        restart = st.get("restart") or {}
+        if restart.get("due") and restart.get("reason") == "cycles":
+            watch.append(f"{_f(st.get('cyclesSinceFresh')):g} splits since a fresh vessel — sterilise the spare")
+        refresh = st.get("refresh") or {}
+        if refresh.get("due"):
+            watch.append(f"the backup is {_f(st.get('ageDays')):g} days old — refresh it from the main vessel")
+        preset = species_preset(jar.get("species"))
+        starter = starter_state(state.get("starterOpenedAt"), preset.get("starterShelfDays"), now)
+        if st.get("status") == "establishing" and starter.get("status") == "stale":
+            watch.append("the starter bottle is past its four weeks — seed from it today or not at all")
         if act:
             return {"level": "act", "reason": "; ".join(act)}
         if watch:
@@ -1497,13 +1826,17 @@ def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
     where = "the rack" if base["offsetC"] else "room"
     rack_note = f", rack {offset:+.1f} °C over the room" if base["offsetC"] else ""
     cross = next((r for r in rows if r[1] >= hard), None)
+    # The alga's copy (doc §5.6): it declines abruptly near 30 — shade, move,
+    # cool; an animal's jar wants air and a water change ready.
+    advice = ("shade it, move it off the sunlit shelf, a cooler room — the alga declines abruptly near 30 °C"
+              if species.get("kind") == "phyto" else "extra air, shade, feed lightly, a 50 % change ready")
     if cross is not None:
         at, room, hours = cross
         return {**base, "available": True, "status": "warn", "peakC": round(peak_c, 1),
                 "peakAt": peak_at.isoformat(), "crossAt": at.isoformat(),
                 "hoursUntil": round(max(0.0, hours), 1),
                 "line": (f"{where} passes {hard:g} °C in ~{max(0.0, hours):.0f} h (peak {peak_c:.1f} °C{rack_note}) — "
-                         "extra air, shade, feed lightly, a 50 % change ready")}
+                         f"{advice}")}
     if peak_c > band:
         return {**base, "available": True, "status": "watch", "peakC": round(peak_c, 1),
                 "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
