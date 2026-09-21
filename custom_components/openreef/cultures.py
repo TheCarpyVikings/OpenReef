@@ -44,9 +44,9 @@ VESSEL_KINDS: tuple[str, ...] = ("cone", "tub", "jar", "bottle", "reactor")
 # or the enrichment soak first. A species without a bottle only knows "tank".
 HARVEST_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "soak")
 # Where a phyto SPLIT goes — several in one tap (doc §5.3): the home fridge
-# bottle, straight into the tank, the drip's jar, or a second vessel (B).
-# The rotifer cone joins in Stage C.
-SPLIT_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "drip", "vessel")
+# bottle, straight into the tank, the drip's jar, a second vessel (B), or —
+# Stage C — a rotifer cone as its feed (a DRAW, see PHYTO_DRAW_MAX_PCT).
+SPLIT_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "drip", "vessel", "cone")
 # Crash signs the keeper can tap (doc §8.5): each one is a restart (rotifers)
 # or a water change (pods) due NOW, whatever the calendar says.
 SIGNS: tuple[str, ...] = ("foam", "milky", "smell", "surface")
@@ -82,6 +82,15 @@ BACKUP_REFRESH_MIN_DAYS = 7.0  # B is refreshed from A every restartCycles split
 # is uncounted; nothing here is ever shown as the bottle's cells/ml.
 TINT_CELLS_PER_ML = 10_000.0
 HOME_CULTURE_CELLS_PER_ML_ESTIMATE = 1.5e7
+# Stage C (doc §4.1, §5.5): the cone's "light green" ~1 × 10⁶ cells/ml — one
+# tint dose of a 2.5 L cone from a dark home culture ≈ 170 ml, an ESTIMATE.
+CONE_TINT_CELLS_PER_ML = 1.0e6
+# A phyto split that takes less than this share of the working volume is a
+# DRAW (a cone dose, a syringe for the tank): the vessel's ledger moves, its
+# colour, split clock and cycle counter do not. Daily mode always re-anchors.
+PHYTO_DRAW_MAX_PCT = 30.0
+SECCHI_FIT_MIN_POINTS = 4          # cm readings across ≥ 2 days before the fit speaks
+SECCHI_BAND_MIN_READINGS = 2       # readings at a tint before its band is drawn on the stick
 LEARN_SAMPLES = 3          # rolling window, the hatch clock's contract
 SLOW_FACTOR = 1.5          # two slower clearing observations prompt inspection
 # Supplier-specific soak default; storage/boost windows are scheduling estimates,
@@ -987,6 +996,98 @@ def darkening_by_depth(history: Any) -> dict[str, Any]:
             "line": ", ".join(parts) + " — this does not establish the cause"}
 
 
+def secchi_samples(history: Any) -> list[dict[str, Any]]:
+    """Every Secchi reading with the tint beside it and the days since the
+    split (or seed) it belongs to — the stick's calibration data (doc §6).
+    A crash ends the cycle; taken-back rows never count. Oldest first."""
+    out: list[dict[str, Any]] = []
+    anchor: datetime | None = None
+    for at, row in _chronological(history):
+        event = row.get("event")
+        if event in ("seeded", "harvest", "restart"):
+            anchor = at
+            continue
+        if event == "crashed":
+            anchor = None
+            continue
+        cm = row.get("secchiCm")
+        if not isinstance(cm, (int, float)) or isinstance(cm, bool) or not math.isfinite(cm) or cm <= 0:
+            continue
+        days = round((at - anchor).total_seconds() / 86400.0, 2) if anchor is not None else None
+        out.append({"at": at.isoformat(), "cm": round(float(cm), 1), "tint": str(row.get("tint") or ""),
+                    "days": days if days is not None and 0 <= days <= 30 else None})
+    return out
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return round(ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0, 1)
+
+
+def secchi_fit(history: Any, cm_now: Any = None) -> dict[str, Any]:
+    """The printable stick's calibration (doc §6, Stage C), from the keeper's
+    own readings and nothing else. Two halves: the BANDS — the median depth
+    at which the vessel read pale, green and dark (two readings at a tint
+    before its band is drawn) — and the LOG FIT — Secchi depth falls as the
+    culture grows, so ln(cm) against days since the split is a line; its
+    slope gives the halving time and, with a dark band, how many days a
+    reading of ``cm_now`` is from dark. Four points over two days before
+    the fit speaks; a slope that is not downward is reported, never used.
+    Cells are never counted: the stick reads depth, the tints are the words."""
+    samples = secchi_samples(history)
+    by_tint: dict[str, list[float]] = {}
+    for smp in samples:
+        if smp["tint"] in PHYTO_TINTS and smp["tint"] != "off":
+            by_tint.setdefault(smp["tint"], []).append(smp["cm"])
+    bands = {tint: _median(vals) if len(vals) >= SECCHI_BAND_MIN_READINGS else None for tint, vals in by_tint.items()}
+    counts = {tint: len(vals) for tint, vals in by_tint.items()}
+    dark_cm = bands.get("dark")
+    green_cm = bands.get("green")
+    pale_cm = bands.get("pale")
+    stick = None
+    ordered = [v for v in (dark_cm, green_cm, pale_cm) if v is not None]
+    if len(ordered) >= 2 and ordered == sorted(ordered) and len(set(ordered)) == len(ordered):
+        stick = {"darkMaxCm": round((dark_cm + green_cm) / 2.0, 1) if dark_cm is not None and green_cm is not None else None,
+                 "greenMaxCm": round((green_cm + pale_cm) / 2.0, 1) if green_cm is not None and pale_cm is not None else None}
+        if stick["darkMaxCm"] is None and dark_cm is not None and pale_cm is not None:
+            stick["darkMaxCm"] = round((dark_cm + pale_cm) / 2.0, 1)
+    points = [(smp["days"], math.log(smp["cm"])) for smp in samples if smp["days"] is not None and smp["cm"] > 0]
+    fit: dict[str, Any] = {"available": False, "points": len(points), "slopePerDay": None, "halvingDays": None, "r2": None}
+    distinct_days = {round(d, 1) for d, _ in points}
+    if len(points) >= SECCHI_FIT_MIN_POINTS and len(distinct_days) >= 2:
+        n = float(len(points))
+        mx = sum(d for d, _ in points) / n
+        my = sum(y for _, y in points) / n
+        sxx = sum((d - mx) ** 2 for d, _ in points)
+        sxy = sum((d - mx) * (y - my) for d, y in points)
+        syy = sum((y - my) ** 2 for _, y in points)
+        if sxx > 0:
+            slope = sxy / sxx                       # ln(cm) per day; downward while it grows
+            r2 = (sxy * sxy) / (sxx * syy) if syy > 0 else 0.0
+            fit.update({"slopePerDay": round(slope, 3), "r2": round(r2, 2)})
+            if slope < 0:
+                fit["available"] = True
+                fit["halvingDays"] = round(math.log(2.0) / -slope, 1)
+    days_to_dark = None
+    now_cm = _f(cm_now)
+    if fit["available"] and dark_cm and now_cm > 0:
+        days_to_dark = round(max(0.0, math.log(now_cm / dark_cm) / -fit["slopePerDay"]), 1) if now_cm > dark_cm else 0.0
+    words: list[str] = []
+    if any(v is not None for v in bands.values()):
+        named = [f"{tint} ~{bands[tint]:g} cm" for tint in ("dark", "green", "pale") if bands.get(tint) is not None]
+        words.append("on your stick: " + ", ".join(named) + f" ({len(samples)} readings)")
+    if fit["available"]:
+        words.append(f"the depth halves every ~{fit['halvingDays']:g} d ({fit['points']} readings, your fit)")
+    if days_to_dark is not None:
+        words.append(f"today's {now_cm:g} cm is ~{days_to_dark:g} d from dark" if days_to_dark > 0 else f"today's {now_cm:g} cm is dark on your stick")
+    return {"available": bool(words), "readings": len(samples), "bands": bands, "counts": counts,
+            "stick": stick, "fit": fit, "daysToDark": days_to_dark, "lastCm": samples[-1]["cm"] if samples else None,
+            "line": "Secchi: " + " · ".join(words) if words else ""}
+
+
 def daily_draw_pct(split_pct: Any, days_to_dark: Any) -> float:
     """The semi-continuous draw (doc §5.2): the daily fraction that matches
     the batch cycle's growth, held to the guide's 20–30 % a day."""
@@ -1049,12 +1150,17 @@ def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
             "act": t >= _f(base["actC"]), **base}
 
 
-def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0) -> dict[str, Any]:
+def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0,
+                 phyto_ml: Any = None, phyto_ppt: Any = None) -> dict[str, Any]:
     """The measured jug: how much water a fill / harvest / water change moves,
     and — for a brackish jar — how to cut the mixing station's water to hit
     it. ``mix_ppt`` is the station's target (35 unless the keeper set another);
     the split is a straight dilution, RODI counted as 0 ppt. ``sg`` is the
-    target on the hobby anchor line, for the refractometer."""
+    target on the hobby anchor line, for the refractometer. Stage C (doc
+    §4.2): with ``phyto_ml`` at ``phyto_ppt`` the jug goes THREE-WAY — the
+    phyto carries its own salt, the station's water and RODI make up the rest
+    to the target; more phyto than the target salt allows is refused, never
+    fudged (cone at 27 ppt, 675 ml, 350 ml of 35 ppt phyto → 171 mix + 154 RODI)."""
     vol = max(0.0, _f(volume_l))
     frac = min(1.0, max(0.0, _f(pct) / 100.0))
     total_ml = round(vol * frac * 1000.0)
@@ -1068,6 +1174,27 @@ def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0) 
                 "reason": f"Cannot make {target:g} ppt by diluting {mix:g} ppt water; prepare stronger saltwater and measure it first."}
     if target < 0:
         target = 0.0
+    phyto = float(round(min(float(total_ml), max(0.0, _f(phyto_ml))))) if _f(phyto_ml) > 0 else 0.0
+    if phyto > 0:
+        p_ppt = max(0.0, _f(phyto_ppt, mix))
+        water = total_ml - phyto                                  # whole millilitres from here on
+        salt_needed = total_ml * target - phyto * p_ppt          # ppt·ml the water must carry
+        base = {"totalMl": total_ml, "phytoMl": round(phyto), "phytoPpt": round(p_ppt, 1),
+                "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target)}
+        if salt_needed < -0.5:
+            most = int(total_ml * target / p_ppt) if p_ppt > 0 else total_ml
+            return {**base, "available": False, "mixMl": 0, "rodiMl": round(water),
+                    "resultPpt": round(phyto * p_ppt / total_ml, 1) if total_ml else None,
+                    "reason": (f"{phyto:g} ml of {p_ppt:g} ppt phyto alone would put the refill over {target:g} ppt — "
+                               f"cut the phyto to {most} ml, or refill the whole jar")}
+        mix_ml = round(salt_needed / mix)
+        if mix_ml > water + 0.5:
+            return {**base, "available": False, "mixMl": round(water), "rodiMl": 0,
+                    "resultPpt": round((phyto * p_ppt + water * mix) / total_ml, 1) if total_ml else None,
+                    "reason": (f"Cannot reach {target:g} ppt with {phyto:g} ml of {p_ppt:g} ppt phyto and {mix:g} ppt water — "
+                               "less phyto, or stronger saltwater")}
+        mix_ml = min(round(water), max(0, mix_ml))
+        return {**base, "mixMl": mix_ml, "rodiMl": round(water) - mix_ml, "resultPpt": round(target, 1)}
     if target == mix:
         return {"totalMl": total_ml, "mixMl": total_ml, "rodiMl": 0, "targetPpt": round(mix, 1),
                 "mixPpt": round(mix, 1), "sg": sg_from_ppt(mix)}
@@ -1076,12 +1203,23 @@ def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0) 
             "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target)}
 
 
-def harvest_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, ml: Any = None) -> dict[str, Any]:
-    """Harvest volume is separate from the purge; replace both withdrawals."""
+def cone_dose_ml(volume_l: Any) -> float:
+    """One tint of an animal jar from a dark home culture (doc §4.1): a
+    2.5 L cone to ~1 × 10⁶ cells/ml ≈ 170 ml. An estimate to a leafy green —
+    nobody has counted this culture; the keeper raises or lowers it by eye."""
+    litres = max(0.1, _f(volume_l, 2.5))
+    ml = litres * 1000.0 * CONE_TINT_CELLS_PER_ML / HOME_CULTURE_CELLS_PER_ML_ESTIMATE
+    return float(max(10.0, round(ml / 10.0) * 10.0))
+
+
+def harvest_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, ml: Any = None,
+                  phyto_ml: Any = None, phyto_ppt: Any = None) -> dict[str, Any]:
+    """Harvest volume is separate from the purge; replace both withdrawals.
+    Stage C: ``phyto_ml`` at ``phyto_ppt`` rides the refill (the three-way jug)."""
     cad = cadence_for(jar.get("species"), jar.get("cadence"))
     harvest = round(_f(ml, _f(jar.get("volumeL")) * cad["harvestPct"] * 10), 1)
     purge = max(0.0, _f(jar.get("purgeMl"))) if jar.get("vesselKind") == "cone" else 0.0
-    refill = refill_guide((harvest + purge) / 1000, 100, jar.get("salinityPpt"), mix_ppt)
+    refill = refill_guide((harvest + purge) / 1000, 100, jar.get("salinityPpt"), mix_ppt, phyto_ml, phyto_ppt)
     removal_pct = (harvest + purge) / max(1.0, _f(jar.get("volumeL")) * 1000) * 100
     warning = (f"Harvest plus purge removes {removal_pct:.1f}% of the working volume; "
                "this exceeds the default 25–30% harvest guidance. Reduce the withdrawal and check population recovery.") if removal_pct > 30 else ""
@@ -1590,6 +1728,10 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
         samples = darkening_samples(history)
         slow = bool(samples and dark["available"] and samples[0] > dark["days"] + 1) or \
             bool(samples and not dark["available"] and samples[0] > cad["harvestIntervalDays"] + 1)
+        # Stage C: the stick's calibration off the accrued cm readings.
+        last_cm = next((row.get("secchiCm") for row in history[::-1]
+                        if isinstance(row.get("secchiCm"), (int, float)) and not isinstance(row.get("secchiCm"), bool)), None)
+        out["secchi"] = secchi_fit(history, last_cm)
         out["light"] = {"weekH": week_h, "days": len(week),
                         "line": (f"a week under {LIGHT_WEEK_LOW_H:g} h of light (~{week_h:g} h a day) beside a slow cycle — "
                                  "the light is the first thing to check; nothing here proves it")

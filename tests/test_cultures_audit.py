@@ -385,6 +385,62 @@ def test_light_tick_only_ever_touches_the_lamp_and_a_refused_refresh_writes_noth
     assert after[0]["c1"]["history"] == snapshot[0]["c1"]["history"] and after[0]["c2"]["history"] == snapshot[0]["c2"]["history"]
     assert after[0]["c2"]["state"] == snapshot[0]["c2"]["state"] and after[1]["f2"]["remainingMl"] == snapshot[1]["f2"]["remainingMl"]
 
+def test_three_way_jug_conserves_volume_and_salt_and_a_refused_phyto_refill_writes_nothing():
+    """0.7.209: over a grid of cones, refills and phyto shares the three-way jug
+    adds up in millilitres AND in salt, or refuses; a refused refill-with-phyto
+    leaves the cone, the bottle and the vessel exactly as they were."""
+    from test_cultures import _phyto_jar, _phyto_entry, _cultures, _phyto_products
+    for target in (20, 27, 35):
+        for total_l in (0.3, 0.675, 2.5):
+            for share in (0.0, 0.1, 0.25, 0.5, 1.0):
+                for p_ppt in (27, 35):
+                    phyto = total_l * 1000 * share
+                    g = cultures.refill_guide(total_l, 100, target, 35, phyto if phyto > 0 else None, p_ppt)
+                    total = g["totalMl"]
+                    if g.get("available") is False:
+                        continue
+                    p_ml = g.get("phytoMl", 0)
+                    assert p_ml + g["mixMl"] + g["rodiMl"] == total, (target, total_l, share, p_ppt, g)
+                    salt = (p_ml * (p_ppt if p_ml else 0) + g["mixMl"] * 35) / total if total else 0
+                    assert abs(salt - target) <= 0.6, (target, total_l, share, p_ppt, g, salt)
+    cone = _jar(started_ago_days=12, lastTint="green")
+    cone["salinityPpt"] = 27
+    vessel = _phyto_jar(started_ago_days=12, lastTint="dark")
+    vessel["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=1)), "tint": "dark"}]
+    products = {**_phyto_products(), "home_phyto_c2": {"name": "Home phyto (Nanno A)", "category": "phyto", "bottleMl": 1000, "remainingMl": 100,
+                                                       "refrigerated": True, "stirDaily": True, "shelfLifeDaysOpened": 21, "openedAt": _iso(REAL - timedelta(days=2)), "history": []}}
+    entry = _phyto_entry(jars={"c1": cone, "c2": vessel}, products=products)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    debits = []
+    real = integration._mixing_hatchery_debit
+    integration._mixing_hatchery_debit = lambda hass_, config_, litres, why: debits.append(litres)
+    try:
+        def snap():
+            cfg = _config(entry)
+            return copy.deepcopy((cfg["nps"]["cultures"]["jars"], cfg["consumables"]["products"]))
+        before = snap()
+        cases = [({"phyto_from": "bottle:home_phyto_c2"}, "still_green"),
+                 ({"phyto_from": "vessel:c2"}, "still_green")]
+        for extra, code in cases:
+            run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True, **extra}))
+            assert conn.errors[-1].code == code and snap() == before, (extra, conn.errors[-1])
+        cfg = _config(entry)
+        cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] = "clear"
+        entry.options = {**entry.options, CONF_SETTINGS: cfg}
+        before = snap()
+        cases = [({"phyto_from": "bottle:home_phyto_c2", "phyto_ml": 300}, "phyto_short"),
+                 ({"phyto_from": "vessel:c2", "phyto_ml": 5000}, "invalid_volume"),
+                 ({"phyto_from": "vessel:nope"}, "no_phyto_source"),
+                 ({"phyto_from": "bottle:f2"}, "no_phyto_source"),
+                 ({"phyto_from": "vessel:c2", "phyto_ml": 650}, "salinity_unavailable")]
+        for extra, code in cases:
+            run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "harvested": True, **extra}))
+            assert conn.errors[-1].code == code and snap() == before, (extra, conn.errors[-1])
+        assert debits == [], "no refill was ever drawn from the station"
+    finally:
+        integration._mixing_hatchery_debit = real
+
 if __name__ == '__main__':
     names = [k for k in sorted(globals()) if k.startswith('test_')]
     failures = 0

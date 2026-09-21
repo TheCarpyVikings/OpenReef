@@ -1,6 +1,6 @@
 # Phyto culture — Nannochloropsis on the rack · brainstorm (2026-09-20)
 
-> **STATUS: §8 LOCKED 2026-09-20. Stage A BUILT as 0.7.207 (§10) and Stage B BUILT as 0.7.208 (§11), both 2026-09-21 — unverified on Reece's HA. Stage C (the rotifer coupling and the stick) next, after the first split.**
+> **STATUS: §8 LOCKED 2026-09-20. Stages A (0.7.207, §10), B (0.7.208, §11) and C (0.7.209, §12) BUILT 2026-09-21 — unverified on Reece's HA. Stage D (the camera/phone green index) parked with drip Stage D; the hardware track shelved.**
 > Grows the cultures arc (docs/live-cultures-brainstorm.md — the v1 grill parked "own phyto
 > culture = a later card, needs light", 2026-09-03) and closes the phyto-drip brief's loose end
 > (docs/phyto-drip-brainstorm.md §5.4 Q3 / §10: "a phyto culture on the rack feeding the jar is a
@@ -540,7 +540,7 @@ The original questions, for the record:
   days-to-dark / yield / recovery-by-depth, the `daily` mode offer, the risk line, the shelf's split
   nudge. *Reece will be seeding under sun within days — A and B ship back to back, before the
   first split.*
-- **Stage C — the rotifer coupling and the stick:** refill-with-phyto on the rotifer harvest and
+- **Stage C — the rotifer coupling and the stick (BUILT 0.7.209, §12):** refill-with-phyto on the rotifer harvest and
   restart (three-way jug when salinities differ, the still-green refusal), the cone's default dose
   from a home bottle, the printable Secchi stick + log fit off the accrued cm readings, Reef Report
   yield.
@@ -705,6 +705,68 @@ sunset with the plug bound is the first live test.
   shelf card's nudge line, the demo vessel's light.
 - **Tests**: `test_cultures.py` +12 (96), `test_cultures_audit.py` +1 (29),
   `test_panel_cultures.mjs` +3 (49); the full regression green.
-- **Not in B (Stage C next, after the first split):** refill-with-phyto on the rotifer harvest
-  and restart, the cone's default dose from a home bottle, the printable Secchi stick, Reef
-  Report yield; the camera/phone green index is Stage D.
+- **Not in B (built in C, §12):** refill-with-phyto on the rotifer harvest and restart, the
+  cone's default dose from a home bottle, the printable Secchi stick, Reef Report yield; the
+  camera/phone green index is Stage D.
+
+## 12. As built — Stage C (0.7.209, 2026-09-21)
+
+The rotifer coupling and the stick. Code only; nothing here has run on Reece's HA yet.
+
+- **Refill with phyto** (`cultures_log` / `cultures_restart` take `phyto_ml`, `phyto_from` =
+  `bottle:<pid>` | `vessel:<jid>`; blank ml = one tint of the jar): the rotifer / pod harvest's
+  own refill carries the phyto and the jar is FED in the same tap — `lastFedAt`, tint green, the
+  feed reminder done, the harvest row `fed` with `phytoMl` / `phytoFrom`. A home bottle is
+  debited `to: jar`; a vessel is DRAWN through the split ceremony's cone share, written LAST
+  (`cone_stamps=False` — the cone's own ceremony already fed it). `_cultures_phyto_source` runs
+  every refusal before a write: **`still_green`** (Reefphyto's first crash cause is one big dose —
+  plain water this time), `no_phyto_source`, `phyto_short`, `vessel_not_ready` (green or dark, no
+  sign), `invalid_volume` (more than the refill / the vessel), `salinity_unavailable`. The
+  clean-cone **restart** takes it too (FAO's batch method; the default still one tint; the still-
+  green rule waived — the whole water goes) and the linked feed product is NOT also debited.
+- **The three-way jug** (`refill_guide(…, phyto_ml, phyto_ppt)`, `harvest_guide` through it): the
+  phyto's own salt counted — cone 27 ppt, 675 ml, 350 ml of 35 ppt phyto → **171 ml mix + 154 ml
+  RODI** (§4.2's numbers); too much salty phyto is refused with the most the jar could take; a
+  brackish phyto into a full-strength jar is "not reachable"; whole millilitres throughout; the
+  no-phyto path byte-identical. The audit grid checks volume AND salt over cones, refills and
+  shares.
+- **The vessel feeds the cone** (`SPLIT_DESTINATIONS` + `cone`; a share `{to: "cone", ml, jarId}`;
+  a zero share = one tint; a green cone refuses; `_cultures_cone_feed_apply` writes the cone's
+  feed row + stamps + reminder). **The draw rule** (`PHYTO_DRAW_MAX_PCT` 30): a split that takes
+  under 30 % of the working volume in batch mode is a DRAW — the ledger moves (`workingL`, the
+  row `draw: True`, its dests), the colour, the split clock, the cycle counter and the harvest
+  completion do not; daily mode always re-anchors (the draw IS the day's split). `cone_dose_ml`
+  = one tint of an animal jar (2.5 L → 170 ml; 4 L tub → 270; rounded to 10 ml; an estimate).
+- **The cone's default dose** (`_cultures_default_cone_feed`, on every save and at a phyto seed):
+  an animal jar with no feed product is linked to the rack's first `home_phyto_*` bottle at one
+  tint of its volume (an activity line says so); a jar already on a home bottle at the untouched
+  5 ml default gets one tint; a keeper's own number is never moved; nothing without a home bottle.
+- **The Secchi stick** (`secchi_samples`, `secchi_fit`, `learned.secchi`): the accrued cm
+  readings beside their tints → per-tint median **bands** (two readings at a tint before it
+  draws), the stick's zones (`darkMaxCm` / `greenMaxCm` = the midpoints), and the **log fit** —
+  ln(cm) against days since the split, four points over two days, a downward slope only
+  (`halvingDays`), with a dark band the days a reading is from dark (`daysToDark`, the density
+  advice appends *"your stick says ~N d"*). Depth on the stick, never cells. The panel's
+  **Print Secchi stick** (`_culturesSecchiStickSvg`: true size — mm units, 40 × 270 mm, 5 mm
+  ticks over 20 cm, a quartered disc, the keeper's bands as zones once they exist;
+  `_culturesPrintSecchiStick` via `window.open` + `print`, the report's own pattern).
+- **Reef Report** (`cultures_section`): each jar's `kind`; a vessel's `yieldL` + `dests` (bottle /
+  tank / drip / cone / waste); an animal's `phytoFedMl`; `phytoYieldL`; the text line *"Nanno A:
+  1 looks, 3 splits — 1.6 L (1.1 L bottle, 0.17 L cone, 0.21 L tank, 0.08 L waste)"* and
+  *"Rotifers A: … 340 ml of home phyto"*; the viewer's line to match.
+- **Payload**: an animal jar carries `phytoSources` (every home bottle with something in it,
+  every running vessel with its tint and readiness), `coneDoseMl`, `phytoRefill` (the three-way
+  guide at one tint from the first ready source, `stillGreen`), `phytoRestart`; a vessel carries
+  `cones` (the animal jars it can feed, their dose and colour) and `secchi`. Normaliser: dests
+  carry `jarId`; rows carry `phytoMl`, `phytoFrom`, `draw`.
+- **Panel**: the animal tile's Phyto row (source select — a pale vessel greyed — and an ml box
+  with one tint as its placeholder) and the three-way line (the still-green word beside it); the
+  harvest and restart senders carry `phyto_from` / `phyto_ml`; the vessel tile's → cone share
+  (a picker when two jars stand) and the split sender's `jarId`; the Secchi line (or how to
+  start) and the Print Secchi stick button; the report viewer's split line; the feed dose field
+  to 1000 ml with the one-tint hint; the demo vessel's cones and stick.
+- **Tests**: `test_cultures.py` +6 (102), `test_cultures_audit.py` +1 (30),
+  `test_panel_cultures.mjs` +3 (52); the full regression green.
+- **Not built (parked with the arc):** Stage D — the camera/phone green index shared with drip
+  Stage D, the optional pH / colour-sensor entities, "split now" advice off the curve, the
+  bottle's estimated density feeding the drip's line; the hardware track (§5.7).

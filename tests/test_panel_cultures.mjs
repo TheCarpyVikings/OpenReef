@@ -1480,5 +1480,95 @@ test("Stage B settings: the Light group in the vessel's row, the refresh reminde
   } finally { restore(); }
 });
 
+// --- 0.7.209 — Stage C: the rotifer coupling and the stick (doc §4.2, §5.5, §6, §12) ---
+test("Stage C animal tile: the phyto refill row, the three-way jug line, the still-green word, and the harvest and restart taps carry the source", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const summary = summaryFixture();
+    const cone = summary.jars[0];
+    const cid = cone.id;
+    cone.phytoSources = [{ id: "bottle:home_phyto_n1", kind: "bottle", name: "Home phyto (Nanno A)", ml: 600, ppt: 35, ready: true, tint: "" },
+      { id: "vessel:n1", kind: "vessel", name: "Nanno A", ml: 1250, ppt: 35, ready: true, tint: "dark" },
+      { id: "vessel:n2", kind: "vessel", name: "Nanno B", ml: 1000, ppt: 35, ready: false, tint: "pale" }];
+    cone.coneDoseMl = 170;
+    cone.phytoRefill = { totalMl: 625, refillMl: 675, phytoMl: 170, phytoPpt: 35, mixMl: 351, rodiMl: 154, targetPpt: 27, mixPpt: 35, resultPpt: 27, available: true, sourceId: "bottle:home_phyto_n1", sourceName: "Home phyto (Nanno A)", stillGreen: false };
+    const panel = await culturesPanel({}, summary);
+    const html = panel._culturesTab();
+    noPlaceholders(html, "animal tile with phyto sources");
+    assert(html.includes(`data-cultures-phyto-from="${cid}"`) && html.includes('<option value="bottle:home_phyto_n1" >Home phyto (Nanno A) · 600 ml</option>') && html.includes('<option value="vessel:n1" >Nanno A · dark</option>'), `the source select: ${html.match(/<select data-cultures-phyto-from[\s\S]*?<\/select>/)}`);
+    assert(html.includes('<option value="vessel:n2" disabled>Nanno B · pale (not ready)</option>'), "a pale vessel is offered greyed");
+    assert(html.includes(`data-cultures-phyto-ml="${cid}"`) && html.includes('placeholder="170"'), "the ml box shows one tint as its placeholder");
+    assert(html.includes("refill with phyto: 170 ml of 35 ppt phyto + 351 ml mix + 154 ml RODI → 27 ppt"), "the three-way jug line");
+    cone.phytoRefill.stillGreen = true;
+    const html2 = panel._culturesTab();
+    assert(html2.includes("still green — plain water this time"), "the still-green word");
+    // The senders: a picked source rides the harvest and the restart; blank ml lets the backend size one tint.
+    const picked = { value: "vessel:n1" }, box = { value: "" };
+    panel.shadowRoot = { querySelector: (sel) => sel.includes("phyto-from") ? picked : sel.includes("phyto-ml") ? box : null };
+    let sent = null;
+    panel._culturesCall = (msg) => { sent = msg; };
+    panel._culturesLog(cid, true, true);
+    assert(sent.type === "openreef/cultures_log" && sent.harvested === true && sent.phyto_from === "vessel:n1" && !("phyto_ml" in sent), `the harvest carries the source: ${JSON.stringify(sent)}`);
+    box.value = "200";
+    panel._culturesRestart(cid);
+    assert(sent.type === "openreef/cultures_restart" && sent.phyto_from === "vessel:n1" && sent.phyto_ml === 200, `the restart carries it too: ${JSON.stringify(sent)}`);
+    picked.value = "";
+    panel._culturesLog(cid, true, true);
+    assert(!("phyto_from" in sent), "no source, no phyto fields");
+    // A jar with no sources on the rack shows no row.
+    const bare = await culturesPanel({}, summaryFixture());
+    assert(!bare._culturesTab().includes("data-cultures-phyto-from"), "no phyto on the rack, no row");
+  } finally { restore(); }
+});
+
+test("Stage C phyto tile: the cone share, the Secchi line and the printable stick", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const jar = phytoJar({
+      cones: [{ id: "a", name: "Rotifers A", doseMl: 170, tint: "clearing", stillGreen: false, feedDue: true }],
+      secchi: { available: true, readings: 8, bands: { pale: 14, green: 8, dark: 4.2 }, counts: { pale: 3, green: 3, dark: 2 }, stick: { darkMaxCm: 6.1, greenMaxCm: 11 },
+        fit: { available: true, points: 8, slopePerDay: -0.233, halvingDays: 3, r2: 0.78 }, daysToDark: 3.3, lastCm: 9,
+        line: "Secchi: on your stick: dark ~4.2 cm, green ~8 cm, pale ~14 cm (8 readings) · the depth halves every ~3 d (8 readings, your fit) · today's 9 cm is ~3.3 d from dark" },
+    });
+    const panel = await culturesPanel(phytoConfig(), phytoSummary(jar));
+    const html = panel._culturesTab();
+    noPlaceholders(html, "phyto tile with a cone and a stick");
+    assert(html.includes('data-cultures-dest-cone="n1"') && html.includes("→ Rotifers A</span>") && html.includes('data-cultures-dest-cone-ml="n1"') && html.includes('value="170"'), "the cone share with one tint as its default");
+    assert(!html.includes("data-cultures-dest-cone-jar"), "one cone needs no picker");
+    assert(html.includes('data-culture-secchi="8"') && html.includes("the depth halves every ~3 d") && html.includes("9 cm is ~3.3 d from dark"), "the Secchi line");
+    assert(html.includes('data-action="cultures-print-secchi" data-id="n1"'), "the print button");
+    const svg = panel._culturesSecchiStickSvg(jar);
+    assert(svg.includes('width="40mm"') && svg.includes('data-cultures-secchi-stick="n1"') && (svg.match(/<line /g) || []).length === 41, "true-size stick with 5 mm ticks over 20 cm");
+    assert(svg.includes(">20</text>") && svg.includes(">0</text>"), "the cm numbers");
+    assert(svg.includes('fill="#1b5e20"') && svg.includes('fill="#43a047"') && svg.includes("your bands: dark ≤ 6.1 cm · green ≤ 11 cm (8 readings)"), "the keeper's bands drawn");
+    const blank = panel._culturesSecchiStickSvg(phytoJar({ secchi: { available: false, readings: 0, bands: {}, stick: null, fit: { available: false }, line: "" } }));
+    assert(!blank.includes('fill="#1b5e20"') && blank.includes("no bands yet — the readings draw them"), "no readings, no bands");
+    noPlaceholders(svg, "stick"); noPlaceholders(blank, "blank stick");
+    // Two cones: a picker, and the split sender names the jar.
+    const two = phytoJar({ cones: [{ id: "a", name: "Rotifers A", doseMl: 170, tint: "clear", stillGreen: false, feedDue: true }, { id: "b", name: "Rotifers B", doseMl: 170, tint: "green", stillGreen: true, feedDue: false }] });
+    const html2 = panel._culturesPhytoTile(two, phytoSummary(two), [two]);
+    assert(html2.includes('data-cultures-dest-cone-jar="n1"') && html2.includes(">Rotifers B · green</option>"), "the picker when two stand");
+    panel._cultures.summary = phytoSummary(two);
+    const boxes = { "data-cultures-split-ml": { value: "400" }, "data-cultures-dest-cone": { checked: true }, "data-cultures-dest-cone-ml": { value: "" }, "data-cultures-dest-cone-jar": { value: "b" }, "data-cultures-dest-bottle": { checked: true }, "data-cultures-dest-bottle-ml": { value: "" } };
+    panel.shadowRoot = { querySelector: (sel) => { const key = Object.keys(boxes).find((k) => sel.startsWith(`[${k}=`)); return key ? boxes[key] : null; } };
+    let sent = null;
+    panel._culturesCall = (msg) => { sent = msg; };
+    panel._culturesPhytoSplit("n1");
+    assert(sent && sent.ml === 400 && JSON.stringify(sent.to) === JSON.stringify([{ to: "bottle", ml: 400 }, { to: "cone", ml: 0, jarId: "b" }]), `the cone share names its jar and leaves the ml to the backend: ${JSON.stringify(sent.to)}`);
+    const empty = phytoJar({ secchi: { available: false, readings: 0, bands: {}, stick: null, fit: { available: false }, line: "" } });
+    assert(panel._culturesPhytoTile(empty, phytoSummary(empty), [empty]).includes('data-culture-secchi="0"'), "no readings: the tile says how to start");
+  } finally { restore(); }
+});
+
+test("Stage C report viewer: a vessel's splits and litres, an animal's home phyto", async () => {
+  const panel = await culturesPanel();
+  const c = { jars: [{ id: "n1", name: "Nanno A", kind: "phyto", feeds: 0, looks: 4, harvests: 2, skips: 0, signs: 0, restarts: 0, crashed: 0, harvestMl: 1500, yieldL: 1.5, dests: { bottle: 1100, tank: 230, cone: 170 }, signList: [] },
+                     { id: "r1", name: "Rotifers A", kind: "animal", feeds: 3, looks: 4, harvests: 1, skips: 0, signs: 0, restarts: 0, crashed: 0, harvestMl: 625, phytoFedMl: 340, signList: [] }], feeds: 3, looks: 8, harvests: 3, skips: 0, signs: 0, restarts: 0, crashed: 0, phytoYieldL: 1.5 };
+  const section = panel._reportLiving({ living: { cultures: c, hatches: {}, corals: {} } });
+  noPlaceholders(section, "report living section");
+  assert(section.includes("Nanno A") && section.includes("2 splits — 1.5 L (1100 ml bottle, 230 ml tank, 170 ml cone)"), `the vessel's line: ${section.match(/Nanno A[^<]*<\/strong>[^<]*/)}`);
+  assert(section.includes("1 harvest (625 ml) · 340 ml of home phyto"), `the animal's home phyto: ${section.match(/Rotifers A[^<]*<\/strong>[^<]*/)}`);
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

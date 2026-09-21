@@ -354,12 +354,18 @@ def cultures_section(jars: Any, start: datetime, end: datetime) -> dict[str, Any
     jars = jars if isinstance(jars, dict) else {}
     out: list[dict[str, Any]] = []
     totals = {"feeds": 0, "looks": 0, "harvests": 0, "skips": 0, "signs": 0, "restarts": 0, "crashed": 0}
+    phyto_yield_ml = 0.0
     for jid, jar in sorted(jars.items()):
         if not isinstance(jar, dict):
             continue
         counts = dict.fromkeys(totals, 0)
         harvest_ml = 0.0
         signs: list[str] = []
+        # The phyto vessel (phyto-culture §5.9, Stage C): its harvests are
+        # SPLITS — litres out, where they went — the rack's yield.
+        phyto = str(jar.get("species") or "") == "nanno" or str(jar.get("kind") or "") == "phyto"
+        dests: dict[str, float] = {}
+        phyto_fed_ml = 0.0
         for row in (jar.get("history") if isinstance(jar.get("history"), list) else []):
             if not isinstance(row, dict) or row.get("undoneAt"):
                 continue
@@ -369,11 +375,15 @@ def cultures_section(jars: Any, start: datetime, end: datetime) -> dict[str, Any
             event = str(row.get("event") or "")
             if row.get("fed") is True or event == "feed":
                 counts["feeds"] += 1
+                phyto_fed_ml += _f(row.get("phytoMl"))
             if row.get("tint"):
                 counts["looks"] += 1
             if row.get("harvested") is True or event == "harvest":
                 counts["harvests"] += 1
                 harvest_ml += _f(row.get("ml"))
+                for d in (row.get("dests") if isinstance(row.get("dests"), list) else []):
+                    if isinstance(d, dict):
+                        dests[str(d.get("to") or "")] = dests.get(str(d.get("to") or ""), 0.0) + _f(d.get("ml"))
             if row.get("skipped") is True or event == "skip_feed":
                 counts["skips"] += 1
             if row.get("sign"):
@@ -385,9 +395,15 @@ def cultures_section(jars: Any, start: datetime, end: datetime) -> dict[str, Any
                 counts["crashed"] += 1
         for key, n in counts.items():
             totals[key] += n
+        if phyto:
+            phyto_yield_ml += harvest_ml
         out.append({"id": str(jid), "name": str(jar.get("name") or jid), **counts,
-                    "harvestMl": _round(harvest_ml, 0) if harvest_ml else None, "signList": signs[:6]})
-    return {"jars": out, **totals}
+                    "harvestMl": _round(harvest_ml, 0) if harvest_ml else None, "signList": signs[:6],
+                    "kind": "phyto" if phyto else "animal",
+                    **({"yieldL": _round(harvest_ml / 1000.0, 2) if harvest_ml else None,
+                        "dests": {k: _round(v, 0) for k, v in sorted(dests.items()) if v > 0}} if phyto else {}),
+                    **({"phytoFedMl": _round(phyto_fed_ml, 0)} if phyto_fed_ml > 0 else {})})
+    return {"jars": out, **totals, "phytoYieldL": _round(phyto_yield_ml / 1000.0, 2) if phyto_yield_ml else None}
 
 
 def corals_section(corals: Any, checkins: Any, feeds: Any, states: Any,
@@ -1582,8 +1598,16 @@ def text_blocks(report: dict[str, Any]) -> list[tuple]:
                           + (f", ~{_fmt(h['avgActualHours'], 0)} h a hatch" if h.get("avgActualHours") else "")
                           + (f", {_fmt(h['avgLateHours'])} h past the clock on average" if (h.get("avgLateHours") or 0) > 0 else ""))
     for jar in c.get("jars") or []:
+        if jar.get("kind") == "phyto":
+            where = ", ".join(f"{_fmt(v / 1000.0, 2 if v < 1000 else 1)} L {k}" for k, v in (jar.get("dests") or {}).items())
+            live_lines.append(f"{jar.get('name')}: {jar.get('looks', 0)} looks, {jar.get('harvests', 0)} split{'s' if jar.get('harvests', 0) != 1 else ''}"
+                              + (f" — {_fmt(jar['yieldL'], 2 if jar['yieldL'] < 1 else 1)} L" + (f" ({where})" if where else "") if jar.get("yieldL") else "")
+                              + (f", {jar['signs']} sign{'s' if jar['signs'] != 1 else ''}" if jar.get("signs") else "")
+                              + (", crashed" if jar.get("crashed") else "") + (", a fresh vessel" if jar.get("restarts") else ""))
+            continue
         live_lines.append(f"{jar.get('name')}: {jar.get('feeds', 0)} feeds, {jar.get('looks', 0)} looks, {jar.get('harvests', 0)} harvests"
                           + (f", {jar['skips']} skipped" if jar.get("skips") else "") + (f", {jar['signs']} sign{'s' if jar['signs'] != 1 else ''}" if jar.get("signs") else "")
+                          + (f", {_fmt(jar['phytoFedMl'], 0)} ml of home phyto" if jar.get("phytoFedMl") else "")
                           + (", crashed" if jar.get("crashed") else "") + (", restarted" if jar.get("restarts") else ""))
     if co.get("colonies"):
         grades = ", ".join(f"{n} × {g}" for g, n in sorted((co.get("grades") or {}).items()))

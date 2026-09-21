@@ -2057,6 +2057,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-sign") this._culturesSign(id, target.dataset.sign || "");
       if (action === "cultures-apply-learned") this._culturesApplyLearned(id, target.dataset.field || "");
       if (action === "cultures-refresh-backup") this._culturesRefreshBackup(id);
+      if (action === "cultures-print-secchi") this._culturesPrintSecchiStick(id);
       if (action === "cultures-enrich-done") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: true }, "Enriched rotifers bottled — the boost clock runs from now.");
       if (action === "cultures-enrich-plain") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: false }, "Bottled plain — still live food.");
       if (action === "nps-cysts-opened") this._npsCystsOpened(target.dataset.id || "");
@@ -7691,7 +7692,7 @@ class OpenReefPanel extends HTMLElement {
           </article>
           <article class="report-card">
             <h4>Cultures</h4>
-            ${jars.length ? jars.map((j) => `<p><strong>${this._escape(j.name)}</strong> · ${j.feeds} feed${j.feeds === 1 ? "" : "s"} · ${j.looks} look${j.looks === 1 ? "" : "s"} · ${j.harvests} harvest${j.harvests === 1 ? "" : "s"}${j.harvestMl ? ` (${this._reportFmt(j.harvestMl, 0)} ml)` : ""}${j.skips ? ` · ${j.skips} skipped` : ""}${j.signs ? ` · <span class="pill warning">${j.signs} sign${j.signs === 1 ? "" : "s"}</span>` : ""}${j.crashed ? ` · <span class="pill critical">crashed</span>` : ""}${j.restarts ? ` · restarted` : ""}</p>`).join("") : `<p class="muted">No culture journal entries this period.</p>`}
+            ${jars.length ? jars.map((j) => j.kind === "phyto" ? `<p><strong>${this._escape(j.name)}</strong> · ${j.looks} look${j.looks === 1 ? "" : "s"} · ${j.harvests} split${j.harvests === 1 ? "" : "s"}${j.yieldL ? ` — ${this._reportFmt(j.yieldL, j.yieldL < 1 ? 2 : 1)} L${j.dests && Object.keys(j.dests).length ? ` (${Object.entries(j.dests).map(([k, v]) => `${this._reportFmt(v, 0)} ml ${this._escape(k)}`).join(", ")})` : ""}` : ""}${j.signs ? ` · <span class="pill warning">${j.signs} sign${j.signs === 1 ? "" : "s"}</span>` : ""}${j.crashed ? ` · <span class="pill critical">crashed</span>` : ""}${j.restarts ? ` · a fresh vessel` : ""}</p>` : `<p><strong>${this._escape(j.name)}</strong> · ${j.feeds} feed${j.feeds === 1 ? "" : "s"} · ${j.looks} look${j.looks === 1 ? "" : "s"} · ${j.harvests} harvest${j.harvests === 1 ? "" : "s"}${j.harvestMl ? ` (${this._reportFmt(j.harvestMl, 0)} ml)` : ""}${j.phytoFedMl ? ` · ${this._reportFmt(j.phytoFedMl, 0)} ml of home phyto` : ""}${j.skips ? ` · ${j.skips} skipped` : ""}${j.signs ? ` · <span class="pill warning">${j.signs} sign${j.signs === 1 ? "" : "s"}</span>` : ""}${j.crashed ? ` · <span class="pill critical">crashed</span>` : ""}${j.restarts ? ` · restarted` : ""}</p>`).join("") : `<p class="muted">No culture journal entries this period.</p>`}
           </article>
           <article class="report-card">
             <h4>Corals</h4>
@@ -13892,6 +13893,11 @@ const rigSteps = [
         aerationNote: "Air is never switched — a still culture settles and dies; only the lamp rides the plug." },
       backupOf: "", refresh: { isBackup: false, fromId: "", fromName: "", available: false, due: false, hoursUntil: null, everyDays: null, at: null, starterMl: null, freshMl: null, nutrientMl: null, workingL: null, backupId: "", backupName: "" },
       dailyOffer: { available: false, pct: null },
+      // Stage C: the cones this vessel can feed and the stick's calibration.
+      cones: [{ id: "a", name: "Rotifers A", doseMl: 170, tint: "clearing", stillGreen: false, feedDue: false }],
+      secchi: { available: true, readings: 6, bands: { pale: 14, green: 8, dark: 4.5 }, counts: { pale: 2, green: 2, dark: 2 }, stick: { darkMaxCm: 6.3, greenMaxCm: 11 },
+        fit: { available: true, points: 6, slopePerDay: -0.21, halvingDays: 3.3, r2: 0.8 }, daysToDark: 2.1, lastCm: 7,
+        line: "Secchi: on your stick: dark ~4.5 cm, green ~8 cm, pale ~14 cm (6 readings) · the depth halves every ~3.3 d (6 readings, your fit) · today's 7 cm is ~2.1 d from dark" },
       harvestGuide: { totalMl: 750, mixMl: 750, rodiMl: 0, targetPpt: 35 }, restartGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, fillGuide: { totalMl: 1250, mixMl: 1250, rodiMl: 0, targetPpt: 35 }, waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 35 },
       history: [row("tint", 9, { tint: "green", tempC: 25.4 }), row("tint", 33, { tint: "green", tempC: 25.1 }), row("tint", 57, { tint: "pale", tempC: 24.8 }),
         row("harvest", 6 * 24, { ml: 750, tint: "dark", tempC: 25.0, dests: [{ to: "bottle", ml: 620 }, { to: "tank", ml: 130 }], freshMl: 750, nutrientMl: 1.1 }),
@@ -14019,6 +14025,15 @@ const rigSteps = [
     const secchi = this.shadowRoot?.querySelector(`[data-cultures-secchi="${jarId}"]`);
     const secchiCm = secchi && secchi.value !== "" ? Number(secchi.value) : NaN;
     if (Number.isFinite(secchiCm) && secchiCm >= 0) msg.secchi_cm = Math.min(60, secchiCm);
+    // Refill with phyto (Stage C): the source picked on the tile rides a harvest;
+    // blank ml lets the backend size one tint of the jar.
+    const phytoFrom = this.shadowRoot?.querySelector(`[data-cultures-phyto-from="${jarId}"]`);
+    if (harvested && phytoFrom && phytoFrom.value) {
+      msg.phyto_from = String(phytoFrom.value);
+      const phytoBox = this.shadowRoot?.querySelector(`[data-cultures-phyto-ml="${jarId}"]`);
+      const phytoMl = phytoBox && phytoBox.value !== "" ? Number(phytoBox.value) : NaN;
+      if (Number.isFinite(phytoMl) && phytoMl > 0) msg.phyto_ml = phytoMl;
+    }
     const phyto = ((this._cultures?.summary?.jars || []).find((j) => j.id === jarId) || {}).kind === "phyto";
     if (!fed && !harvested && !msg.skip_feed && !tint && !("egg_ratio" in msg) && !("secchi_cm" in msg)) {
       this._cultures.message = phyto ? "Pick the colour you saw first — pale, green, dark or off." : "Pick the water you saw first — green, clearing or clear.";
@@ -14030,7 +14045,8 @@ const rigSteps = [
       return;
     }
     this._culturesCall(msg, harvested
-      ? (msg.destination === "tank" ? "Harvest logged — straight into the tank; the strip, the log and the reminders keep count."
+      ? (msg.phyto_from ? "Harvest logged — the refill carried the phyto, the cone is fed; the bottle, the vessel and the reminders keep count."
+        : msg.destination === "tank" ? "Harvest logged — straight into the tank; the strip, the log and the reminders keep count."
         : "Harvest logged — the bottle and the reminders keep count.")
       : fed ? "Feed logged — the phyto bottle keeps count. Wrong water? Undo it from the journal for a day."
         : msg.skip_feed ? "Feed skipped — the water is on the record; the reminder holds until the next slot. Wrong water? Undo it from the journal for a day."
@@ -14081,17 +14097,23 @@ const rigSteps = [
     }
     msg.ml = out;
     const shares = [];
-    for (const dest of ["bottle", "tank", "drip", "vessel"]) {
+    for (const dest of ["bottle", "tank", "drip", "vessel", "cone"]) {
       const tick = q(`data-cultures-dest-${dest}`);
       if (!tick || !tick.checked) continue;
       const box = q(`data-cultures-dest-${dest}-ml`);
       const ml = box && box.value !== "" ? Number(box.value) : 0;
-      shares.push({ to: dest, ml: Number.isFinite(ml) && ml > 0 ? ml : 0 });
+      const share = { to: dest, ml: Number.isFinite(ml) && ml > 0 ? ml : 0 };
+      if (dest === "cone") {
+        // The cone share (Stage C): which jar — the select when several stand.
+        const pick = q("data-cultures-dest-cone-jar");
+        share.jarId = pick && pick.value ? String(pick.value) : String((jar.cones || [])[0]?.id || "");
+      }
+      shares.push(share);
     }
     // One ticked share left blank takes whatever the others leave.
-    const blank = shares.filter((s) => !s.ml && !["drip", "vessel"].includes(s.to));
+    const blank = shares.filter((s) => !s.ml && !["drip", "vessel", "cone"].includes(s.to));
     if (blank.length === 1) blank[0].ml = Math.max(0, out - shares.reduce((n, s) => n + s.ml, 0));
-    if (shares.length) msg.to = shares.filter((s) => s.ml > 0 || ["drip", "vessel"].includes(s.to));
+    if (shares.length) msg.to = shares.filter((s) => s.ml > 0 || ["drip", "vessel", "cone"].includes(s.to));
     const afterBox = q("data-cultures-working-after");
     const after = afterBox && afterBox.value !== "" ? Number(afterBox.value) : NaN;
     const before = Number(jar.state?.workingL) || Number(jar.volumeL) || 0;
@@ -14136,6 +14158,58 @@ const rigSteps = [
         : "Cadence set from the journal — the reminder follows it.");
   }
 
+  // The printable Secchi stick (doc §6, Stage C): true size — one SVG unit is
+  // a millimetre, the page prints it at 100 % — cm marks up a 20 cm stick, a
+  // quartered disc at the foot, and the keeper's own colour bands once the
+  // readings accrue (secchi_fit's zones). Depth on the stick, never cells.
+  _culturesSecchiStickSvg(jar) {
+    const esc = (v) => this._escape(v == null ? "" : String(v));
+    const secchi = jar?.secchi || {};
+    const stick = secchi.stick || null;
+    const lengthCm = 20;
+    const w = 40, top = 30, scale = 10;                     // mm; 10 mm per cm on the scale
+    const h = top + lengthCm * scale + 40;
+    const y = (cm) => top + cm * scale;
+    const zone = (fromCm, toCm, fill, label) => `<rect x="8" y="${y(fromCm)}" width="24" height="${Math.max(0, (toCm - fromCm) * scale)}" fill="${fill}" opacity="0.28"></rect><text x="20" y="${y(fromCm) + Math.max(6, ((toCm - fromCm) * scale) / 2) + 2}" text-anchor="middle" font-size="5.5" fill="#333">${esc(label)}</text>`;
+    const bands = stick && Number(stick.darkMaxCm) > 0
+      ? zone(0, Math.min(lengthCm, stick.darkMaxCm), "#1b5e20", "dark") +
+        (Number(stick.greenMaxCm) > stick.darkMaxCm ? zone(stick.darkMaxCm, Math.min(lengthCm, stick.greenMaxCm), "#43a047", "green") + zone(Math.min(lengthCm, stick.greenMaxCm), lengthCm, "#c5e1a5", "pale") : zone(stick.darkMaxCm, lengthCm, "#c5e1a5", "pale"))
+      : "";
+    const ticks = [];
+    for (let mm = 0; mm <= lengthCm * 10; mm += 5) {
+      const cm = mm / 10;
+      const major = mm % 10 === 0;
+      ticks.push(`<line x1="${major ? 24 : 28}" y1="${y(cm)}" x2="32" y2="${y(cm)}" stroke="#111" stroke-width="${major ? 0.5 : 0.3}"></line>`);
+      if (major) ticks.push(`<text x="35" y="${y(cm) + 1.8}" font-size="4.5" fill="#111">${cm}</text>`);
+    }
+    const disc = `<circle cx="20" cy="${y(lengthCm) + 14}" r="8" fill="#fff" stroke="#111" stroke-width="0.5"></circle><path d="M 20 ${y(lengthCm) + 6} A 8 8 0 0 1 28 ${y(lengthCm) + 14} L 20 ${y(lengthCm) + 14} Z M 20 ${y(lengthCm) + 22} A 8 8 0 0 1 12 ${y(lengthCm) + 14} L 20 ${y(lengthCm) + 14} Z" fill="#111"></path>`;
+    const bandsWord = stick && Number(stick.darkMaxCm) > 0 ? `your bands: dark ≤ ${esc(stick.darkMaxCm)} cm${Number(stick.greenMaxCm) > 0 ? ` · green ≤ ${esc(stick.greenMaxCm)} cm` : ""} (${esc(secchi.readings || 0)} readings)` : "no bands yet — the readings draw them";
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}mm" height="${h}mm" viewBox="0 0 ${w} ${h}" data-cultures-secchi-stick="${esc(jar?.id || "")}" role="img" aria-label="Secchi stick — ${esc(jar?.name || "phyto vessel")}">
+      <rect x="0.5" y="0.5" width="${w - 1}" height="${h - 1}" fill="#fff" stroke="#999" stroke-width="0.3" stroke-dasharray="2 1.5"></rect>
+      <text x="20" y="8" text-anchor="middle" font-size="5" font-weight="700" fill="#111">SECCHI STICK</text>
+      <text x="20" y="14" text-anchor="middle" font-size="3.6" fill="#333">${esc(jar?.name || "phyto vessel")} · cm from the tip</text>
+      <text x="20" y="19" text-anchor="middle" font-size="3.2" fill="#555">${esc(bandsWord)}</text>
+      <rect x="8" y="${y(0)}" width="24" height="${lengthCm * scale}" fill="#fafafa" stroke="#111" stroke-width="0.5"></rect>
+      ${bands}${ticks.join("")}${disc}
+      <text x="20" y="${h - 4}" text-anchor="middle" font-size="3" fill="#555">print at 100 % · laminate · dip until the disc vanishes</text>
+    </svg>`;
+  }
+
+  _culturesPrintSecchiStick(jarId) {
+    const jar = (this._cultures?.summary?.jars || []).find((j) => j.id === jarId) || { id: jarId, name: "phyto vessel" };
+    const svg = this._culturesSecchiStickSvg(jar);
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Secchi stick — ${this._escape(jar.name || "phyto vessel")}</title><style>@page { margin: 12mm; } body { margin: 0; background: #fff; font: 12px/1.4 system-ui, sans-serif; color: #111; } svg { display: block; } p { margin: 6px 0 0; max-width: 60mm; color: #555; }</style></head><body>${svg}<p>Cut along the dashed line, laminate or tape to a ruler. Lower it into the vessel against the light until the black-and-white disc disappears; the cm at the surface is the reading. Type it in the Secchi box beside the colour — the tile learns your bands.</p><script>window.addEventListener("load", () => setTimeout(() => window.print(), 150));</script></body></html>`;
+    const win = window.open("", "_blank");
+    if (!win) {
+      this._cultures.message = "The browser blocked the print window — allow pop-ups for this page and try again.";
+      this._render();
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+  }
+
   // Refresh the backup (doc §5.8, Stage B): a small split of the main vessel
   // with the whole share into B — B's old litre to waste, seeded again 1:4.
   _culturesRefreshBackup(jarId) {
@@ -14150,8 +14224,19 @@ const rigSteps = [
   _culturesRestart(jarId) {
     const box = this.shadowRoot?.querySelector(`[data-cultures-split="${jarId}"]`);
     const split = !!(box && box.checked);
-    this._culturesCall({ type: "openreef/cultures_restart", jar_id: jarId, split },
-      split ? "Restart logged — check the rack for B and its restart dates." : "Restart logged — the fortnight clock rewinds.");
+    const msg = { type: "openreef/cultures_restart", jar_id: jarId, split };
+    // Phyto in the new water (Stage C): the tile's source and ml, if picked.
+    const phytoFrom = this.shadowRoot?.querySelector(`[data-cultures-phyto-from="${jarId}"]`);
+    if (phytoFrom && phytoFrom.value) {
+      msg.phyto_from = String(phytoFrom.value);
+      const phytoBox = this.shadowRoot?.querySelector(`[data-cultures-phyto-ml="${jarId}"]`);
+      const phytoMl = phytoBox && phytoBox.value !== "" ? Number(phytoBox.value) : NaN;
+      if (Number.isFinite(phytoMl) && phytoMl > 0) msg.phyto_ml = phytoMl;
+    }
+    this._culturesCall(msg,
+      split ? "Restart logged — check the rack for B and its restart dates."
+        : msg.phyto_from ? "Restart logged — the new water carried the phyto; the fortnight clock rewinds."
+          : "Restart logged — the fortnight clock rewinds.");
   }
 
   // The culture card (doc §8.8 #9): the jar as a thing with a history you
@@ -14954,6 +15039,18 @@ const rigSteps = [
           </select></label>
         <div class="culture-field"><span></span><label class="culture-tick" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done."><input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label></div>
         <label class="culture-field" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="${(j.harvestTo || "bottle") !== "tank" ? this._escape(String(j.harvestGuide?.totalMl || "")) : ""}" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : ""}` : "";
+      // Refill with phyto (Stage C, doc §5.5): a home bottle on the shelf or a
+      // vessel reading green or dark feeds the cone in its own refill — the jug
+      // goes three-way at the cone's salinity; blank ml = one tint of the jar.
+      const sources = Array.isArray(j.phytoSources) ? j.phytoSources : [];
+      const pr = j.phytoRefill || null;
+      const phytoRow = running && sources.length ? `
+        <label class="culture-field" title="Phyto in the refill — the harvest's fresh water carries it and the cone is fed without a separate tap. Refused while the water is still green: one big dose is the classic rotifer crash. The restart takes it too (FAO's batch method fills the tank with algae).">Phyto<span class="unit"><select data-cultures-phyto-from="${this._escape(j.id)}" style="width:auto;max-width:150px;"><option value="">none — plain water</option>
+            ${sources.map((src) => `<option value="${this._escape(src.id)}" ${!src.ready ? "disabled" : ""}>${this._escape(src.name)}${src.kind === "vessel" ? ` · ${this._escape(src.tint || "vessel")}` : ` · ${this._escape(String(src.ml))} ml`}${!src.ready ? " (not ready)" : ""}</option>`).join("")}
+          </select><input type="number" min="0" max="5000" step="10" placeholder="${this._escape(String(j.coneDoseMl || ""))}" style="width:70px;" data-cultures-phyto-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : "";
+      const phytoLine = running && pr && pr.available !== false
+        ? `<small class="muted" data-culture-phyto-refill title="One tint of this jar from a dark home culture is an estimate (~1 × 10⁶ cells/ml); raise or lower it by eye — leafy green, never pea soup">refill with phyto: ${this._escape(String(pr.phytoMl))} ml of ${this._escape(String(pr.phytoPpt))} ppt phyto + ${this._escape(String(pr.mixMl))} ml mix${Number(pr.rodiMl) > 0 ? ` + ${this._escape(String(pr.rodiMl))} ml RODI` : ""} → ${this._escape(String(pr.targetPpt))} ppt${pr.stillGreen ? ` · <span style="color:var(--warning-color,#f5a524)">still green — plain water this time</span>` : ""}</small>`
+        : running && pr && pr.available === false ? `<small style="color:var(--warning-color,#f5a524)" data-culture-phyto-refill>${this._escape(pr.reason || "")}</small>` : "";
       // Day 0 (and after a crash): the fill — the whole vessel at the jar's
       // salinity, cut from the mixing station's water with RODI. Backend maths.
       const fg = j.fillGuide || j.restartGuide || {};
@@ -15027,7 +15124,7 @@ const rigSteps = [
       // left-aligned blocks — the water and the crop, the notes, the
       // observations — and the actions. Same facts, one column, one rhythm.
       const withdrawalWarning = j.harvestGuide?.warning ? `<small style="color:var(--warning-color,#f5a524)">${this._escape(j.harvestGuide.warning)}</small>` : "";
-      const notes = [fillLine, advice, skippedLine, risk, guide, withdrawalWarning, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
+      const notes = [fillLine, advice, skippedLine, risk, guide, phytoLine, withdrawalWarning, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
       return `
         <div class="culture-tile" data-culture="${this._escape(j.id)}">
           <div class="culture-jar">${this._culturesJarSvg(j)}</div>
@@ -15037,7 +15134,7 @@ const rigSteps = [
             <small>${statusLine}</small>
             ${chips ? `<div class="pill-row">${chips}</div>` : ""}
           </div>
-          ${tintSelect ? `<div class="culture-form">${tintSelect}</div>` : ""}
+          ${tintSelect || phytoRow ? `<div class="culture-form">${tintSelect}${phytoRow}</div>` : ""}
           ${notes ? `<div class="culture-notes">${notes}</div>` : ""}
           ${signs || splitTick ? `<div class="culture-form">${signs}${splitTick}</div>` : ""}
           <div class="button-row">${buttons}</div>
@@ -15303,6 +15400,7 @@ const rigSteps = [
         <label class="culture-field" title="Optional: the depth at which a mark on a white stick disappears in the culture. Nothing is inferred from it yet — the readings accrue for the printable stick (Stage C).">Secchi<span class="unit"><input type="number" min="0" max="60" step="0.5" placeholder="cm" data-cultures-secchi="${esc(j.id)}"><small class="muted">cm · optional</small></span></label>` : "";
     const canSplit = running && !s.harvestBlocked;
     const drips = Array.isArray(j.drips) ? j.drips : [];
+    const cones = Array.isArray(j.cones) ? j.cones : [];
     const refresh = j.refresh || {};
     const canB = !!(sum.canAddJar || refresh.backupId || (sum.idleJars || []).some((id) => (jars.find((x) => x.id === id) || {}).species === j.species));
     const destRow = (dest, label, title, on, ml, extra = "", noMl = false) => `
@@ -15315,6 +15413,8 @@ const rigSteps = [
         ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
         ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
         ${drips.length ? destRow("drip", "→ drip", `Load the drip's jar (${drips.map((d) => d.name).join(", ")}) — its day clock restarts; the jar takes what fits.`, false, "", "the jar's fill", true) : ""}
+        ${cones.length ? destRow("cone", `→ ${esc(cones.length === 1 ? cones[0].name : "cone")}`, `Feed a rotifer or pod jar straight from the vessel — one tint of it (${cones.map((c) => `${c.name} ~${c.doseMl} ml`).join(", ")}) as the default; refused while that jar is still green (one big dose is the classic rotifer crash). Under 30 % of the working volume this is a draw: the vessel keeps its colour and its split clock.`, false, cones[0].doseMl, cones[0].stillGreen ? " (still green — it will refuse)" : "") : ""}
+        ${cones.length > 1 ? `<div class="culture-field"><span></span><select data-cultures-dest-cone-jar="${esc(j.id)}" style="width:auto;">${cones.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(c.tint || "no tint")}</option>`).join("")}</select></div>` : ""}
         ${canB ? (refresh.backupId
           ? destRow("vessel", `→ ${esc(refresh.backupName)}`, `Refresh ${refresh.backupName} from this vessel — its old culture to waste, this share of today's crop as the new seed (1:4 into fresh water + f/2).`, false, "", ` to refresh ${esc(refresh.backupName)}`)
           : destRow("vessel", "→ B", "Seed a second vessel from this one — a windowsill backup on its own light; a litre is plenty.", false, "", " for B")) : ""}
@@ -15361,6 +15461,11 @@ const rigSteps = [
     const learned = j.learned || {};
     const offer = j.dailyOffer || {};
     const learnedLine = running && learned.daysToDark?.available && learned.suggest?.splitIntervalDays == null ? `<small class="muted">Your vessel darkens in ~${esc(learned.daysToDark.days)} days (${esc(learned.daysToDark.samples)} cycles).</small>` : "";
+    // The stick (Stage C, doc §6): the keeper's own bands and log fit, from
+    // the Secchi box's accrued readings — depth, never cells.
+    const secchi = j.secchi || {};
+    const secchiLine = running && secchi.available && secchi.line ? `<small class="muted" data-culture-secchi="${esc(secchi.readings)}">${esc(secchi.line)}.</small>`
+      : running ? `<small class="muted" data-culture-secchi="0">Secchi: no readings yet — print the stick, dip it until the disc vanishes, type the cm beside the colour; the tile learns your bands.</small>` : "";
     const applyLines = running ? [
       learned.suggest?.splitIntervalDays != null && learned.daysToDark?.available
         ? `<small class="muted">Your vessel darkens in ~${esc(learned.daysToDark.days)} days (${esc(learned.daysToDark.samples)} cycles) — split every ${esc(learned.suggest.splitIntervalDays)}? <button class="secondary compact-button" style="font-size:11px;padding:2px 6px;" data-action="cultures-apply-learned" data-id="${esc(j.id)}" data-field="splitIntervalDays">Apply</button></small>` : "",
@@ -15384,8 +15489,9 @@ const rigSteps = [
       running && refresh.isBackup && refresh.available ? `<button class="${due.includes("refresh") ? "primary" : "secondary"} compact-button" data-action="cultures-refresh-backup" data-id="${esc(j.id)}" title="A small split of ${esc(refresh.fromName)}: ${esc(refresh.starterMl || 250)} ml of its crop into this bottle with fresh water and f/2 — the old culture to waste">Refresh from ${esc(refresh.fromName)}</button>` : "",
       running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${esc(j.id)}">Crashed</button>` : "",
       status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${esc(j.id)}" title="A picture of this vessel's story — the last 14 days of colour">Share card</button>` : "",
+      `<button class="secondary compact-button" data-action="cultures-print-secchi" data-id="${esc(j.id)}" title="A printable Secchi stick at true size — cm marks, a disc, and your own colour bands once the readings accrue">Print Secchi stick</button>`,
     ].filter(Boolean).join("");
-    const notes = [advice, risk, lightLine, jug, warn, sizing, seedLine, bottleLine, refreshLine, nutrient, starterLine, learnedLine, applyLines, lineageLine, tempLine].filter(Boolean).join("");
+    const notes = [advice, risk, lightLine, jug, warn, sizing, seedLine, bottleLine, refreshLine, nutrient, starterLine, learnedLine, applyLines, secchiLine, lineageLine, tempLine].filter(Boolean).join("");
     return `
         <div class="culture-tile" data-culture="${esc(j.id)}" data-culture-kind="phyto">
           <div class="culture-jar">${this._culturesPhytoSvg(j)}</div>
@@ -15439,7 +15545,7 @@ const rigSteps = [
               <option value="">Not linked</option>
               ${Object.entries(products).map(([pid, p]) => `<option value="${this._escape(pid)}" ${(jar?.feed?.productId || "") === pid ? "selected" : ""}>${this._escape(p?.name || pid)}</option>`).join("")}
             </select></label>
-            <label>Recorded feed dose (ml)<input type="number" min="0.5" max="200" step="0.5" data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="doseMl" value="${this._escape(String(jar?.feed?.doseMl ?? 5))}"></label>
+            <label title="A concentrate: a few ml. A home phyto bottle from the rack: one tint of the jar — ~170 ml for a 2.5 L cone as an estimate (linked automatically when a vessel stands; raise or lower it by eye).">Recorded feed dose (ml)<input type="number" min="0.5" max="1000" step="0.5" data-scope="nps-culture-feed" data-id="${this._escape(jid)}" data-field="doseMl" value="${this._escape(String(jar?.feed?.doseMl ?? 5))}"></label>
           </div>
           <small class="awc-hint">${preset.kind === "copepod"
             ? "Pods crawl — a flat tub, never a cone. 35 ppt is this setup’s target. Replace evaporation with RODI; replace harvested water with matched saltwater. Test water quality weekly."

@@ -2646,6 +2646,269 @@ def test_normaliser_keeps_the_light_block_and_the_stage_b_stamps():
     assert junk["jars"]["c1"]["light"]["mode"] == "sun" and junk["jars"]["c1"]["light"]["switchEntity"] == "" and junk["jars"]["c1"]["light"]["onAt"] == "07:00"
     assert "light" in integration._normalise_cultures({"jars": {"c1": {"species": "rotifer_L"}}})["jars"]["c1"], "every jar carries the block; only a vessel reads it"
 
+# --------------------------------------------------------------------------- #
+# 0.7.209 — the phyto vessel, Stage C: the rotifer coupling and the stick
+# (doc §4.2, §5.5, §6, §12)
+# --------------------------------------------------------------------------- #
+def test_three_way_jug_and_the_cone_dose():
+    # The brief's own numbers: a 27 ppt cone, 675 ml to replace, 350 ml of 35 ppt phyto.
+    g = cultures.refill_guide(0.675, 100, 27, 35, 350, 35)
+    assert (g["mixMl"], g["rodiMl"], g["phytoMl"], g["resultPpt"]) == (171, 154, 350, 27.0)
+    assert g["mixMl"] + g["rodiMl"] + g["phytoMl"] == g["totalMl"] == 675
+    assert round((171 * 35 + 350 * 35) / 675, 1) == 27.0, "the salt balances"
+    # Too much salty phyto for a brackish cone: refused with the most it could take.
+    g = cultures.refill_guide(0.675, 100, 27, 35, 600, 35)
+    assert g["available"] is False and "cut the phyto to 520 ml" in g["reason"] and g["resultPpt"] == 31.1
+    # Same salinity: the phyto simply replaces mix.
+    g = cultures.refill_guide(0.675, 100, 35, 35, 170, 35)
+    assert (g["mixMl"], g["rodiMl"]) == (505, 0)
+    # Brackish phyto into a full-strength jar: not reachable.
+    g = cultures.refill_guide(0.5, 100, 35, 35, 300, 27)
+    assert g["available"] is False and "stronger saltwater" in g["reason"]
+    # No phyto: the old two-way jug, byte for byte.
+    assert cultures.refill_guide(0.675, 100, 27, 35) == {"totalMl": 675, "mixMl": 521, "rodiMl": 154, "targetPpt": 27.0, "mixPpt": 35.0, "sg": cultures.sg_from_ppt(27)}
+    assert cultures.refill_guide(0.675, 100, 27, 35, 0, 35) == cultures.refill_guide(0.675, 100, 27, 35)
+    # One tint of the cone (doc §4.1): ~170 ml for 2.5 L, an estimate rounded to 10 ml.
+    assert cultures.cone_dose_ml(2.5) == 170 and cultures.cone_dose_ml(1.0) == 70 and cultures.cone_dose_ml(4) == 270
+    jar = {"species": "rotifer_L", "volumeL": 2.5, "salinityPpt": 27, "vesselKind": "cone", "purgeMl": 50, "cadence": {}}
+    hg = cultures.harvest_guide(jar, 35, None, 170, 35)
+    assert hg["refillMl"] == 675 and hg["phytoMl"] == 170 and hg["mixMl"] + hg["rodiMl"] + hg["phytoMl"] == 675 and hg["resultPpt"] == 27.0
+    assert cultures.harvest_guide(jar, 35)["mixMl"] == 521, "without phyto nothing changed"
+
+
+def test_secchi_fit_reads_the_keepers_own_stick():
+    def iso(d):
+        return _iso(NOW - timedelta(days=d))
+    hist = [{"event": "seeded", "at": iso(20)}, {"event": "tint", "at": iso(19), "tint": "pale", "secchiCm": 16},
+            {"event": "tint", "at": iso(17), "tint": "pale", "secchiCm": 12}, {"event": "tint", "at": iso(15), "tint": "green", "secchiCm": 8},
+            {"event": "tint", "at": iso(14), "tint": "dark", "secchiCm": 4}, {"event": "harvest", "at": iso(13), "ml": 750},
+            {"event": "tint", "at": iso(12), "tint": "pale", "secchiCm": 14}, {"event": "tint", "at": iso(10), "tint": "green", "secchiCm": 7},
+            {"event": "tint", "at": iso(8), "tint": "dark", "secchiCm": 4.5}, {"event": "harvest", "at": iso(7), "ml": 750},
+            {"event": "tint", "at": iso(5), "tint": "green", "secchiCm": 9}]
+    samples = cultures.secchi_samples(hist)
+    assert len(samples) == 8 and samples[0] == {"at": samples[0]["at"], "cm": 16.0, "tint": "pale", "days": 1.0}
+    assert samples[-1]["days"] == 2.0, "days since the LAST split"
+    fit = cultures.secchi_fit(hist, 9)
+    assert fit["available"] and fit["bands"] == {"pale": 14.0, "green": 8.0, "dark": 4.2} and fit["counts"]["dark"] == 2
+    assert fit["stick"] == {"darkMaxCm": 6.1, "greenMaxCm": 11.0}, "the zones between the medians"
+    assert fit["fit"]["available"] and fit["fit"]["halvingDays"] == 3.0 and fit["fit"]["points"] == 8 and fit["fit"]["slopePerDay"] < 0
+    assert fit["daysToDark"] == 3.3 and fit["lastCm"] == 9.0
+    assert fit["line"] == ("Secchi: on your stick: dark ~4.2 cm, green ~8 cm, pale ~14 cm (8 readings) · "
+                           "the depth halves every ~3 d (8 readings, your fit) · today's 9 cm is ~3.3 d from dark")
+    assert cultures.secchi_fit(hist, 4)["daysToDark"] == 0.0
+    # Two readings are bands at best; one is nothing; a rising depth is no fit.
+    two = [{"event": "seeded", "at": iso(6)}, {"event": "tint", "at": iso(5), "tint": "green", "secchiCm": 9}, {"event": "tint", "at": iso(4), "tint": "green", "secchiCm": 8}]
+    f2 = cultures.secchi_fit(two)
+    assert f2["available"] and f2["bands"] == {"green": 8.5} and f2["stick"] is None and f2["fit"]["available"] is False and f2["daysToDark"] is None
+    assert cultures.secchi_fit([{"event": "tint", "at": iso(1), "tint": "dark", "secchiCm": 4}])["available"] is False
+    rising = [{"event": "seeded", "at": iso(8)}] + [{"event": "tint", "at": iso(7 - d), "tint": "pale", "secchiCm": 5 + d * 2} for d in range(5)]
+    fr = cultures.secchi_fit(rising)
+    assert fr["fit"]["available"] is False and fr["fit"]["slopePerDay"] > 0, "a slope that is not downward is reported, never used"
+    # A crash ends the cycle: readings after it have no day.
+    crashed = [{"event": "seeded", "at": iso(9)}, {"event": "crashed", "at": iso(8)}, {"event": "tint", "at": iso(7), "tint": "pale", "secchiCm": 15}]
+    assert cultures.secchi_samples(crashed)[0]["days"] is None
+    # The journal's learned block carries it for a vessel.
+    jar = _phyto_jar(started_ago_days=20, now=NOW, lastTint="green", lastHarvestAt=iso(7))
+    jar["history"] = list(reversed(hist))
+    assert cultures.learned_cadences(jar, [jar["history"]], NOW)["secchi"]["daysToDark"] == 3.3
+
+
+def test_ws_rotifer_harvest_refills_with_phyto_from_the_home_bottle():
+    cone = _jar(started_ago_days=12, lastTint="clearing")
+    cone["salinityPpt"] = 27
+    cone["feed"] = {"productId": "home_phyto_c2", "doseMl": 170}
+    vessel = _phyto_jar(started_ago_days=12, lastTint="dark")
+    vessel["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=1)), "tint": "dark"}]
+    products = {**_phyto_products(),
+                "home_phyto_c2": {"name": "Home phyto (Nanno A)", "category": "phyto", "bottleMl": 1000, "remainingMl": 600, "refrigerated": True,
+                                  "stirDaily": True, "shelfLifeDaysOpened": 21, "openedAt": _iso(REAL - timedelta(days=2)), "history": [], "doseMl": 35, "doseEveryDays": 1}}
+    entry = _phyto_entry(jars={"c1": cone, "c2": vessel}, products=products,
+                         maintenance={"tasks": {"culture_c1_feed": {"label": "Feed", "enabled": True, "cadenceHours": 12}}, "completions": {}, "reminders": {"enabled": True}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+    j = next(x for x in conn.results[-1].payload["jars"] if x["id"] == "c1")
+    assert [s["id"] for s in j["phytoSources"]] == ["bottle:home_phyto_c2", "vessel:c2"] and j["coneDoseMl"] == 170
+    assert j["phytoSources"][0]["ml"] == 600 and j["phytoSources"][1]["ready"] and j["phytoSources"][1]["tint"] == "dark"
+    assert j["phytoRefill"]["sourceId"] == "bottle:home_phyto_c2" and j["phytoRefill"]["phytoMl"] == 170 and j["phytoRefill"]["refillMl"] == 675
+    assert j["phytoRefill"]["mixMl"] + j["phytoRefill"]["rodiMl"] + 170 == 675 and j["phytoRefill"]["stillGreen"] is False
+    v = next(x for x in conn.results[-1].payload["jars"] if x["id"] == "c2")
+    assert v["cones"] == [{"id": "c1", "name": "Rotifers A", "doseMl": 170, "tint": "clearing", "stillGreen": False, "feedDue": True}]
+    debits = []
+    real = integration._mixing_hatchery_debit
+    integration._mixing_hatchery_debit = lambda hass_, config_, litres, why: debits.append(round(litres * 1000))
+    try:
+        run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "tint": "clearing", "harvested": True,
+                                                            "phyto_from": "bottle:home_phyto_c2"}))
+        assert not conn.errors, conn.errors
+        cfg = _config(entry)
+        cone_after = cfg["nps"]["cultures"]["jars"]["c1"]
+        row = cone_after["history"][0]
+        assert row["event"] == "harvest" and row["fed"] is True and row["phytoMl"] == 170 and row["phytoFrom"] == "bottle:home_phyto_c2"
+        assert cone_after["state"]["lastTint"] == "green" and cone_after["state"]["lastFedAt"], "the refill IS the feed"
+        bottle = cfg["consumables"]["products"]["home_phyto_c2"]
+        assert bottle["remainingMl"] == 430 and bottle["history"][-1]["to"] == "jar" and bottle["history"][-1]["jarId"] == "c1"
+        # 675 ml refill at 27 ppt: 170 ml of 35 ppt phyto + 351 ml mix + 154 ml RODI.
+        assert debits == [351], debits
+        assert cfg["maintenance"]["completions"]["culture_c1_feed"][0]["notes"].startswith("Logged automatically — fed with the refill: 170 ml")
+        assert any("170 ml of phyto from Home phyto (Nanno A) in the refill (351 ml mix + 154 ml RODI → 27 ppt)" in a["message"] for a in cfg["activity"])
+        # Still green: refused before anything moves.
+        before = copy.deepcopy((cfg["nps"]["cultures"]["jars"]["c1"]["history"], cfg["consumables"]["products"]["home_phyto_c2"]["remainingMl"]))
+        run(integration.websocket_cultures_log(hass, conn, {"id": 3, "jar_id": "c1", "harvested": True, "phyto_ml": 100}))
+        assert conn.errors[-1].code == "still_green"
+        cfg = _config(entry)
+        assert (cfg["nps"]["cultures"]["jars"]["c1"]["history"], cfg["consumables"]["products"]["home_phyto_c2"]["remainingMl"]) == before
+        # A short bottle, a missing source, more phyto than the refill.
+        cfg["nps"]["cultures"]["jars"]["c1"]["state"]["lastTint"] = "clear"
+        cfg["consumables"]["products"]["home_phyto_c2"]["remainingMl"] = 50
+        entry.options = {**entry.options, CONF_SETTINGS: cfg}
+        run(integration.websocket_cultures_log(hass, conn, {"id": 4, "jar_id": "c1", "harvested": True, "phyto_ml": 100}))
+        assert conn.errors[-1].code == "phyto_short"
+        run(integration.websocket_cultures_log(hass, conn, {"id": 5, "jar_id": "c1", "harvested": True, "phyto_from": "bottle:nope", "phyto_ml": 20}))
+        assert conn.errors[-1].code == "no_phyto_source"
+        run(integration.websocket_cultures_log(hass, conn, {"id": 6, "jar_id": "c1", "harvested": True, "ml": 200, "phyto_from": "vessel:c2", "phyto_ml": 900}))
+        assert conn.errors[-1].code == "invalid_volume"
+    finally:
+        integration._mixing_hatchery_debit = real
+
+
+def test_ws_rotifer_harvest_and_restart_draw_from_a_dark_vessel():
+    cone = _jar(started_ago_days=12, lastTint="clear", lastRestartAt=_iso(REAL - timedelta(days=15)))
+    cone["salinityPpt"] = 27
+    vessel = _phyto_jar(started_ago_days=12, lastTint="dark", cyclesSinceFresh=1, lastHarvestAt=_iso(REAL - timedelta(days=5)))
+    vessel["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=1)), "tint": "dark"}]
+    entry = _phyto_entry(jars={"c1": cone, "c2": vessel})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "c1", "harvested": True, "phyto_from": "vessel:c2"}))
+    assert not conn.errors, conn.errors
+    cfg = _config(entry)
+    cone_after, v_after = cfg["nps"]["cultures"]["jars"]["c1"], cfg["nps"]["cultures"]["jars"]["c2"]
+    assert cone_after["history"][0]["phytoMl"] == 170 and cone_after["history"][0]["phytoFrom"] == "vessel:c2" and cone_after["state"]["lastTint"] == "green"
+    draw = v_after["history"][0]
+    assert draw["event"] == "harvest" and draw["draw"] is True and draw["ml"] == 170 and draw["dests"] == [{"to": "cone", "ml": 170, "jarId": "c1"}]
+    assert draw["freshMl"] == 0 and draw["nutrientMl"] == 0, "a draw: nothing in, no f/2"
+    assert v_after["state"]["workingL"] == 1.08 and v_after["state"]["lastTint"] == "dark", "the vessel stays dark, only the ledger moves"
+    assert v_after["state"]["lastHarvestAt"] == _iso(REAL - timedelta(days=5)) and v_after["state"]["cyclesSinceFresh"] == 1, "no clock, no counter"
+    assert not any(k.startswith("culture_c2_harvest") for k in (cfg.get("maintenance") or {}).get("completions") or {}), "a draw is not a split done"
+    assert len([r for r in cone_after["history"] if r["event"] == "feed"]) == 0, "the cone's own ceremony wrote the harvest row — no second feed row"
+    # The restart: FAO's batch method — the new water carries phyto; the linked feed product is NOT also debited.
+    cfg["nps"]["cultures"]["jars"]["c1"]["feed"] = {"productId": "phyto", "doseMl": 5}
+    cfg["consumables"]["products"]["phyto"] = {"name": "Live phyto", "bottleMl": 500.0, "remainingMl": 300.0, "history": [], "category": "phyto"}
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    debits = []
+    real = integration._mixing_hatchery_debit
+    integration._mixing_hatchery_debit = lambda hass_, config_, litres, why: debits.append(round(litres * 1000))
+    try:
+        run(integration.websocket_cultures_restart(hass, conn, {"id": 2, "jar_id": "c1", "phyto_from": "vessel:c2", "phyto_ml": 300}))
+        assert not conn.errors, conn.errors
+    finally:
+        integration._mixing_hatchery_debit = real
+    cfg = _config(entry)
+    cone_after, v_after = cfg["nps"]["cultures"]["jars"]["c1"], cfg["nps"]["cultures"]["jars"]["c2"]
+    row = cone_after["history"][0]
+    assert row["event"] == "restart" and row["phytoMl"] == 300 and row["fed"] is True and row["ml"] == 2500
+    # 2.5 L at 27 ppt with 300 ml of 35 ppt phyto: 1629 ml mix + 571 ml RODI (the vessel's draw moves no mix).
+    assert [d for d in debits if d] == [1629], debits
+    assert cfg["consumables"]["products"]["phyto"]["remainingMl"] == 300.0, "the phyto was the feed — the bottle is untouched"
+    assert v_after["history"][0]["draw"] is True and v_after["state"]["workingL"] == 0.78, "300 of 1080 ml is still a draw"
+    # A vessel that is not ready refuses; a restart never minds a green cone.
+    cfg["nps"]["cultures"]["jars"]["c2"]["state"]["lastTint"] = "pale"
+    cfg["nps"]["cultures"]["jars"]["c2"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "pale"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_restart(hass, conn, {"id": 3, "jar_id": "c1", "phyto_from": "vessel:c2"}))
+    assert conn.errors[-1].code == "vessel_not_ready"
+
+
+def test_ws_phyto_split_feeds_a_cone_and_refuses_a_green_one():
+    cone = _jar(started_ago_days=12, lastTint="clear")
+    vessel = _phyto_jar(started_ago_days=12, lastTint="dark", workingL=3.5)
+    vessel["history"] = [{"event": "tint", "at": _iso(REAL - timedelta(hours=1)), "tint": "dark"}]
+    entry = _phyto_entry(jars={"c1": cone, "c2": vessel},
+                         maintenance={"tasks": {"culture_c1_feed": {"label": "Feed", "enabled": True, "cadenceHours": 12}}, "completions": {}, "reminders": {"enabled": True}})
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_cultures_split(hass, conn, {"id": 1, "jar_id": "c2", "ml": 2100,
+                                                          "to": [{"to": "bottle", "ml": 1000}, {"to": "cone", "ml": 0, "jarId": "c1"}]}))
+    assert not conn.errors, conn.errors
+    cfg = _config(entry)
+    cone_after, v_after = cfg["nps"]["cultures"]["jars"]["c1"], cfg["nps"]["cultures"]["jars"]["c2"]
+    assert cone_after["history"][0]["event"] == "feed" and cone_after["history"][0]["phytoMl"] == 170 and cone_after["history"][0]["phytoFrom"] == "vessel:c2"
+    assert cone_after["state"]["lastTint"] == "green" and cfg["maintenance"]["completions"]["culture_c1_feed"][0]["notes"].startswith("Logged automatically — 170 ml of phyto from Nanno A")
+    row = v_after["history"][0]
+    assert {d["to"]: d["ml"] for d in row["dests"]} == {"bottle": 1000, "cone": 170, "waste": 930}, "a zero cone share became one tint; the rest is waste"
+    assert next(d for d in row["dests"] if d["to"] == "cone")["jarId"] == "c1"
+    assert not row.get("draw") and v_after["state"]["lastTint"] == "pale" and v_after["state"]["cyclesSinceFresh"] == 1, "a 60 % split is a split"
+    assert any("170 ml into Rotifers A" in a["message"] for a in cfg["activity"])
+    # The cone reads green now: a second cone share is refused before anything moves.
+    before = len(v_after["history"])
+    run(integration.websocket_cultures_split(hass, conn, {"id": 2, "jar_id": "c2", "ml": 100, "to": [{"to": "cone", "ml": 100, "jarId": "c1"}]}))
+    assert conn.errors[-1].code == "still_green" and len(_cultures(entry)["jars"]["c2"]["history"]) == before
+    run(integration.websocket_cultures_split(hass, conn, {"id": 3, "jar_id": "c2", "ml": 100, "to": [{"to": "cone", "ml": 100, "jarId": "c2"}]}))
+    assert conn.errors[-1].code == "unknown_destination"
+    # A small draw to the tank keeps the vessel's colour and clock.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c2"]["state"]["lastTint"] = "dark"
+    cfg["nps"]["cultures"]["jars"]["c2"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "dark"})
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    anchor = cfg["nps"]["cultures"]["jars"]["c2"]["state"]["lastHarvestAt"]
+    refused = len(conn.errors)
+    run(integration.websocket_cultures_split(hass, conn, {"id": 4, "jar_id": "c2", "ml": 60, "to": [{"to": "tank", "ml": 60}]}))
+    assert len(conn.errors) == refused, conn.errors[-1]
+    v_after = _cultures(entry)["jars"]["c2"]
+    assert v_after["history"][0]["draw"] is True and v_after["state"]["lastTint"] == "dark" and v_after["state"]["lastHarvestAt"] == anchor
+    assert v_after["history"][0]["dests"] == [{"to": "tank", "ml": 60}] and v_after["history"][0]["freshMl"] == 60
+    assert v_after["state"]["workingL"] == 3.5, "the tile's default is like for like — a draw topped up keeps its working volume"
+    # In daily mode every draw is the day's split: the clock re-anchors.
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c2"]["mode"] = "daily"
+    entry.options = {**entry.options, CONF_SETTINGS: cfg}
+    run(integration.websocket_cultures_split(hass, conn, {"id": 5, "jar_id": "c2", "ml": 60, "to": [{"to": "tank", "ml": 60}]}))
+    assert len(conn.errors) == refused, conn.errors[-1]
+    assert _cultures(entry)["jars"]["c2"]["state"]["lastHarvestAt"] != anchor and not _cultures(entry)["jars"]["c2"]["history"][0].get("draw")
+
+
+def test_cone_default_dose_from_the_home_bottle_and_the_report_yield():
+    # A rotifer jar with no feed product gets the rack's home bottle at one tint; a keeper's number stands.
+    entry = _phyto_entry(jars={"c1": _jar(started_ago_days=3), "c2": _phyto_jar(started_ago_days=5, lastTint="green"),
+                               "c3": {**_jar(started_ago_days=3), "name": "Pods", "species": "tigriopus", "volumeL": 4, "feed": {"productId": "home_phyto_c2", "doseMl": 5}},
+                               "c4": {**_jar(started_ago_days=3), "name": "Mine", "feed": {"productId": "home_phyto_c2", "doseMl": 50}}},
+                         products={**_phyto_products(), "home_phyto_c2": {"name": "Home phyto (Nanno A)", "category": "phyto", "bottleMl": 1000, "remainingMl": 300, "history": []}})
+    cfg = _config(entry)
+    cfg["nps"]["cultures"]["jars"]["c1"]["feed"] = {"productId": "", "doseMl": 5}
+    integration._cultures_ensure_home_bottles(cfg)
+    jars = cfg["nps"]["cultures"]["jars"]
+    assert jars["c1"]["feed"] == {"productId": "home_phyto_c2", "doseMl": 170}, "linked at one tint of a 2.5 L cone"
+    assert jars["c3"]["feed"]["doseMl"] == 270, "the untouched 5 ml default on a home bottle becomes one tint of the tub"
+    assert jars["c4"]["feed"]["doseMl"] == 50, "a keeper's own number is never moved"
+    assert any("Rotifers A will feed from Home phyto (Nanno A) — 170 ml a feed" in a["message"] for a in cfg["activity"])
+    # No home bottle on the shelf: nothing happens.
+    plain = _config(_entry(jars={"c1": _jar(started_ago_days=3)}))
+    plain["nps"]["cultures"]["jars"]["c1"]["feed"] = {"productId": "", "doseMl": 5}
+    integration._cultures_ensure_home_bottles(plain)
+    assert plain["nps"]["cultures"]["jars"]["c1"]["feed"]["productId"] == ""
+    # The Reef Report: the rack's yield beside the rotifer harvests.
+    from openreef import report
+    start, end = NOW - timedelta(days=7), NOW
+    jars_ctx = {"n1": {"name": "Nanno A", "species": "nanno", "history": [
+                    {"event": "harvest", "at": _iso(NOW - timedelta(days=1)), "ml": 750, "dests": [{"to": "bottle", "ml": 600}, {"to": "tank", "ml": 150}]},
+                    {"event": "harvest", "at": _iso(NOW - timedelta(days=5)), "ml": 750, "dests": [{"to": "bottle", "ml": 500}, {"to": "cone", "ml": 170, "jarId": "r1"}, {"to": "waste", "ml": 80}]},
+                    {"event": "harvest", "at": _iso(NOW - timedelta(days=2)), "ml": 60, "draw": True, "dests": [{"to": "tank", "ml": 60}]},
+                    {"event": "tint", "at": _iso(NOW - timedelta(days=3)), "tint": "green", "secchiCm": 8},
+                    {"event": "harvest", "at": _iso(NOW - timedelta(days=20)), "ml": 750}]},
+                "r1": {"name": "Rotifers A", "species": "rotifer_L", "history": [
+                    {"event": "harvest", "at": _iso(NOW - timedelta(days=1)), "ml": 625, "fed": True, "phytoMl": 170, "phytoFrom": "bottle:home_phyto_n1"},
+                    {"event": "feed", "at": _iso(NOW - timedelta(days=3)), "fed": True, "phytoMl": 170, "phytoFrom": "vessel:n1"}]}}
+    sec = report.cultures_section(jars_ctx, start, end)
+    nanno = next(j for j in sec["jars"] if j["id"] == "n1")
+    assert nanno["kind"] == "phyto" and nanno["harvests"] == 3 and nanno["yieldL"] == 1.56 and nanno["dests"] == {"bottle": 1100, "cone": 170, "tank": 210, "waste": 80}
+    assert sec["phytoYieldL"] == 1.56 and nanno["looks"] == 1
+    rots = next(j for j in sec["jars"] if j["id"] == "r1")
+    assert rots["kind"] == "animal" and rots["feeds"] == 2 and rots["phytoFedMl"] == 340
+    text = "\\n".join(str(b) for b in report.text_blocks({"living": {"cultures": sec, "hatches": {}, "corals": {}}, "period": {}, "score": {}, "water": {}, "maintenance": {}}))
+    assert "Nanno A: 1 looks, 3 splits — 1.6 L (1.1 L bottle, 0.17 L cone, 0.21 L tank, 0.08 L waste)" in text, text[:600]
+    assert "Rotifers A: 2 feeds, 0 looks, 1 harvests, 340 ml of home phyto" in text
+
 # Keep this LAST: a test defined below the runner is a test that never runs.
 if __name__ == "__main__":
     failures = 0
