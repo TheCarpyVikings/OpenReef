@@ -183,14 +183,20 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "bottleMl": 1000, "shelfLifeDaysOpened": 5, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 90, "particleUmMax": 360,
      "notes": "Harvested from the cone through the 50 µm net; enrich a portion for DHA. The "
-              "Cultures tab keeps this bottle's clock — add it here so the feed plans can pick it."},
+              "Cultures tab puts the real harvest bottle on the shelf itself, with its clock — add "
+              "this only for a bottle you keep by hand (bought, or a friend's harvest); it is not "
+              "linked to the rack and only moves when you log it."},
     {"name": "Live Tigriopus (from the tub)", "brand": "Home culture", "category": "zooLive",
      "bottleMl": 500, "shelfLifeDaysOpened": 3, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 120, "particleUmMax": 1200,
-     "notes": "Nauplii through 50 µm, adults on 300 µm; pour into the refugium after lights-out."},
+     "notes": "Nauplii through 50 µm, adults on 300 µm; pour into the refugium after lights-out. "
+              "The tub does not stock the shelf — this bottle is yours to log by hand."},
     {"name": "Live baby brine (rinsed, tank-salinity)", "brand": "Home hatchery", "category": "zooLive",
      "bottleMl": 1000, "shelfLifeDaysOpened": 2, "refrigerated": True, "stirDaily": False,
-     "particleUmMin": 400, "particleUmMax": 500},
+     "particleUmMin": 400, "particleUmMax": 500,
+     "notes": "The hatchery puts its container and fridge bottle on the shelf itself, with their "
+              "clocks — add this only for brine you keep by hand; it is not linked to the hatchery "
+              "and only moves when you log it."},
     {"name": "Waste-Away", "brand": "Dr Tim's", "category": "bacteria",
      "bottleMl": 473, "shelfLifeDaysOpened": 180, "refrigerated": False, "stirDaily": False,
      "particleUmMin": 0, "particleUmMax": 2},

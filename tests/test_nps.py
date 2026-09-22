@@ -5062,6 +5062,24 @@ def test_unstirred_jar_degrades_the_freshness_verdict_at_the_choke_point():
     channel["state"]["lastStirredAt"] = _iso(now - timedelta(hours=3))
     assert integration._dosing_food_freshness(channel, now, cfg)["status"] == "fresh"
 
+
+def test_the_home_presets_say_they_are_hand_kept():
+    """0.7.212: the presets under the rack's and the hatchery's own bylines are
+    for bottles the keeper logs by hand — the rack and the hatchery put their
+    real entries on the shelf themselves. Reece added the rotifer preset on
+    10/09 (renamed "harvest vessel") and later read it as the rack's; the
+    note now says the truth. The particle-window lookup still resolves the
+    rotifer preset by its brand and name."""
+    by_name = {item["name"]: item for item in nps.PRODUCT_LIBRARY}
+    for name in ("Live rotifers (fridge bottle)", "Live baby brine (rinsed, tank-salinity)"):
+        note = by_name[name]["notes"]
+        assert "not linked to the" in note and "by hand" in note and "only moves when you log it" in note, name
+    assert "does not stock the shelf" in by_name["Live Tigriopus (from the tub)"]["notes"]
+    lib = nps.live_library("rotifers")
+    assert lib["name"] == "Live rotifers (fridge bottle)" and lib["particleUmMin"] == 90 and lib["particleUmMax"] == 360
+    assert nps.live_library("brine")["particleUmMin"] == 400 and nps.live_library("brine")["particleUmMax"] == 500
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

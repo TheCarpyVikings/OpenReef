@@ -2675,5 +2675,35 @@ test("the drip's settings take the stirrer plug, the fridge sensor and the flush
   } finally { restore(); }
 });
 
+test("a hand-kept bottle under the rack's own byline says it is not linked (0.7.212)", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    const state = { bottleMl: 750, remainingMl: 650, percent: 86.7, usageMlPerDay: 8.3, daysUntilEmpty: 78.3,
+      low: false, empty: false, expiry: { status: "fresh", daysLeft: null }, categoryLabel: "Live zooplankton" };
+    const bottle = (name, brand, extra = {}) => ({ name, brand, category: "zooLive", bottleMl: 750, remainingMl: 650,
+      refrigerated: true, stirDaily: false, notes: "", history: [], doseMl: 0, doseEveryDays: 0, ...extra });
+    // Reece's own entry (2026-09-22): typed by hand under "Home culture", so it read as the rack's.
+    const hand = panel._npsProductCard("live_rotifers_harvest_vessel", bottle("Live rotifers (harvest vessel)", "Home culture"), state);
+    assert(hand.includes('data-shelf-hand-kept="live_rotifers_harvest_vessel"') && hand.includes("not linked to the rack"), `hand-kept note missing: ${hand}`);
+    assert(hand.includes("only moves when you log it") && hand.includes("the rotifer bottle when a harvest fills it"), "the note says what the rack stocks itself");
+    assert(hand.includes("650 of 750 ml") && hand.includes('data-action="nps-product-logdose"'), "the ledger and the taps stay");
+    // The brand is read loosely — case and stray spaces never hide the note.
+    assert(panel._npsProductCard("x", bottle("Rotifers", "  home  CULTURE "), state).includes("data-shelf-hand-kept"), "brand compared loosely");
+    // The hatchery's byline gets the hatchery's wording.
+    const brine = panel._npsProductCard("brine_hand", bottle("Live baby brine (rinsed, tank-salinity)", "Home hatchery"), state);
+    assert(brine.includes("not linked to the hatchery") && brine.includes("the brine container when a batch is loaded"), `hatchery wording: ${brine}`);
+    // The rack's own bottles stay quiet: the home phyto bottle by its id, and a jar's linked bottle from the cultures summary.
+    const phyto = { ...bottle("Home phyto (Nanno A)", "Home culture"), category: "phyto" };
+    assert(!panel._npsProductCard("home_phyto_nanno_a", phyto, { ...state, categoryLabel: "Phytoplankton" }).includes("data-shelf-hand-kept"), "the home phyto bottle is the rack's");
+    assert(panel._npsProductCard("nanno_bottle", phyto, state).includes("data-shelf-hand-kept"), "an unlinked id under the byline is hand-kept until a jar claims it");
+    panel._cultures = { summary: { jars: [{ id: "nanno_a", kind: "phyto", homeBottle: { productId: "nanno_bottle", exists: true } }] } };
+    assert(!panel._npsProductCard("nanno_bottle", phyto, state).includes("data-shelf-hand-kept"), "a jar's linked bottle is the rack's");
+    // A bought bottle under its maker's name never carries it.
+    assert(!panel._npsProductCard("pods", panel._config.consumables.products.pods, panel._nps.summary.shelf.products.pods).includes("data-shelf-hand-kept"), "a shop bottle has no note");
+    noPlaceholders(hand, "hand-kept card");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

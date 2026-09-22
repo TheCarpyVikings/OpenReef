@@ -1799,3 +1799,42 @@ species, the soon row; the summary setting the cone's feed aside),
 `test_panel_nps.mjs` 61 (1 new — rows, chips, mouth, verdicts, headline,
 the grid line; and the Settings tests now set `_settingsSections`, the
 field the panel reads, instead of bailing silently under the harness).
+
+### 14.6 A hand-kept bottle under the rack's byline says so (2026-09-22, 0.7.212)
+
+Reece's shelf showed *Live rotifers (harvest vessel) · Home culture — 650
+of 750 ml, ≈78 days, Dose due* while the rack stood at day 0 with an empty
+fridge bottle, and he asked whether he or the code had it wrong. Neither:
+the entry was his own, added by hand around the 10th (the *Live rotifers
+(fridge bottle)* preset, renamed and resized) with one 100 ml dose logged
+on the 10th at 19:20 — the runway averages that single dose over the
+twelve days since (~8.3 ml a day, 78 days left). The code never made it
+and never touches it. The rack's real entries only appear once there is
+something to show: the fridge bottle when a harvest fills it
+(`live_rotifer_bottle`, §14.4), a producing vessel set to feed the tank
+straight (0.7.161). But the preset's note still said *the Cultures tab
+keeps this bottle's clock — add it here so the feed plans can pick it*,
+true before 0.7.151 and a trap since, and the byline made the card look
+stocked.
+
+- **The card says it.** A config bottle whose brand is *Home culture* or
+  *Home hatchery* (read loosely — case, stray spaces) and that the rack
+  does not own carries a hint under its plan line: *Hand-kept — not
+  linked to the rack, so the ledger only moves when you log it. The rack
+  stocks the shelf itself: the rotifer bottle when a harvest fills it, a
+  vessel that feeds the tank straight, the home phyto bottle at the
+  split.* (the hatchery wording under its byline). Rack-owned means the
+  home phyto bottle — the `home_phyto_` ids, or a phyto jar's
+  `homeBottle.productId` from the cultures summary once it has loaded
+  (`_npsHandKeptNote`). The live cards never see it; a shop bottle under
+  its maker's name never carries it.
+- **The presets tell the truth.** The rotifer and brine presets now say
+  the rack and the hatchery put their real entries on the shelf
+  themselves, and to add the preset only for a bottle kept by hand; the
+  tub's says the tub does not stock the shelf, so its bottle is the
+  keeper's to log.
+
+Tests: `test_panel_nps.mjs` 71 (1 new — the note, the loose brand, the
+hatchery wording, the home phyto bottle and a linked bottle staying quiet,
+a shop bottle), `test_nps.py` 194 (1 new — the notes, the particle-window
+lookup still resolving).

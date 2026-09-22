@@ -12994,6 +12994,25 @@ class OpenReefPanel extends HTMLElement {
     };
   }
 
+  // A hand-kept bottle under the rack's own byline (0.7.212). "Home culture"
+  // and "Home hatchery" are the brands the rack and the hatchery stock the
+  // shelf under, so a bottle the keeper added by hand under either reads as
+  // theirs — while its ledger never moves by itself. The card says so. The
+  // rack's own bottles stay quiet: the home phyto bottles, by the code's own
+  // ids or a phyto jar's linked bottle once the cultures summary has loaded.
+  _npsHandKeptNote(pid, product) {
+    const brand = String((product && product.brand) || "").trim().replace(/\s+/g, " ").toLowerCase();
+    const who = brand === "home culture" ? "rack" : brand === "home hatchery" ? "hatchery" : "";
+    if (!who) return "";
+    const id = String(pid || "");
+    if (id.startsWith("home_phyto_")) return "";
+    const jars = Array.isArray(this._cultures?.summary?.jars) ? this._cultures.summary.jars : [];
+    if (jars.some((j) => j && j.homeBottle && String(j.homeBottle.productId || "") === id)) return "";
+    return who === "rack"
+      ? "Hand-kept — not linked to the rack, so the ledger only moves when you log it. The rack stocks the shelf itself: the rotifer bottle when a harvest fills it, a vessel that feeds the tank straight, the home phyto bottle at the split."
+      : "Hand-kept — not linked to the hatchery, so the ledger only moves when you log it. The hatchery stocks the shelf itself: the brine container when a batch is loaded, the fridge bottle when you fill it.";
+  }
+
   _npsProductCard(pid, product, state) {
     if (product && product.live) {
       return product.live.vessel === "cone" ? this._npsLiveConeCard(pid, product, state) : this._npsLiveBrineCard(pid, product, state);
@@ -13001,6 +13020,7 @@ class OpenReefPanel extends HTMLElement {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
     const s = state || {};
+    const handKept = this._npsHandKeptNote(pid, product);
     const pct = Number.isFinite(Number(s.percent)) ? Math.max(0, Math.min(100, Number(s.percent))) : null;
     const expiry = s.expiry || {};
     const chips = [];
@@ -13047,6 +13067,7 @@ class OpenReefPanel extends HTMLElement {
         ${bar}
         <small>${s.bottleMl ? `${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml` : "Set the bottle size in Settings to start the ledger"} · ${runway}</small>
         ${planLine}
+        ${handKept ? `<small class="awc-hint" data-shelf-hand-kept="${eid}">${esc(handKept)}</small>` : ""}
         ${s.splitNudge ? `<small style="color:var(--warning-color,#f5a524)" data-shelf-nudge="${eid}">${esc(s.splitNudge)}</small>` : ""}
         <div class="button-row">
           ${dosedButton}
