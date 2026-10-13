@@ -2613,13 +2613,13 @@ def test_shelf_nudge_says_what_the_vessel_is_doing_about_an_empty_bottle():
     state = conn.results[-1].payload["shelf"]["products"]["home_phyto_c1"]
     assert state["splitNudge"] == "empty — Nanno A reads dark: split into this bottle"
     assert "splitNudge" not in conn.results[-1].payload["shelf"]["products"]["f2"]
-    # Greening: the next split's clock; a full bottle: no nudge at all.
+    # Greening: wait for readiness, regardless of the calendar; a full bottle: no nudge.
     cfg = _config(entry)
     cfg["nps"]["cultures"]["jars"]["c1"]["state"].update({"lastTint": "green", "lastHarvestAt": _iso(REAL - timedelta(days=5))})
     cfg["nps"]["cultures"]["jars"]["c1"]["history"] = []
     entry.options = {**entry.options, CONF_SETTINGS: cfg}
     run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
-    assert conn.results[-1].payload["shelf"]["products"]["home_phyto_c1"]["splitNudge"] == "empty — Nanno A's next split is due in ~3 d"
+    assert conn.results[-1].payload["shelf"]["products"]["home_phyto_c1"]["splitNudge"] == "empty — Nanno A is still greening; wait until it is ready before harvesting into this bottle"
     cfg["consumables"]["products"]["home_phyto_c1"].update({"remainingMl": 800, "openedAt": _iso(REAL - timedelta(days=1))})
     entry.options = {**entry.options, CONF_SETTINGS: cfg}
     run(integration.websocket_nps_summary(hass, conn, {"id": 3}))
@@ -2629,7 +2629,7 @@ def test_shelf_nudge_says_what_the_vessel_is_doing_about_an_empty_bottle():
     assert nps_engine.home_bottle_nudge(low, {"status": "producing", "harvestBlocked": True}, "Nanno A").startswith("runs out in ~1.7 d — Nanno A is off-colour")
     assert nps_engine.home_bottle_nudge(low, {"status": "none"}, "Nanno A") == "runs out in ~1.7 d — Nanno A is not running; seed it and the bottle fills at the first split"
     early = nps_engine.home_bottle_nudge(low, {"status": "producing", "splitEligible": False, "harvest": {"hoursUntil": 96}}, "Nanno A", 6)
-    assert early == "runs out in ~1.7 d — Nanno A's next split is due in ~4 d (your record says ~6 d to dark) — a small early split tides it over"
+    assert early == "runs out in ~1.7 d — Nanno A is still greening; wait until it is ready before harvesting into this bottle"
 
 
 def test_normaliser_keeps_the_light_block_and_the_stage_b_stamps():

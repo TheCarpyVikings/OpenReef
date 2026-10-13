@@ -2538,6 +2538,8 @@ def test_next_hatch_chain_plans_on_the_plain_shelf():
 # --------------------------------------------------------------------------- #
 def _reef_juice(**over):
     product = _product(name="Reef Juice", brand="Reefphyto", bottleMl=250.0, remainingMl=200.0,
+                       # WS tests use the wall clock: keep their dose supply fresh.
+                       openedAt=_iso(datetime.now(timezone.utc) - timedelta(days=2)),
                        doseGuide={"light": 27, "medium": 18, "heavy": 9}, doseStocking="medium",
                        doseMl=0.0, doseEveryDays=1.0, doseNote="At dusk, skimmer off.", lastDosedAt="")
     product.update(over)

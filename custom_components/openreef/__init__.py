@@ -5377,6 +5377,9 @@ def _maintenance_due_items(
         if str(task_id).startswith(MAINTENANCE_CULTURE_TASK_PREFIX):
             clock = _cultures_task_clock(config, task_id, now)
             state = ("critical" if clock.get("reason") in ("sign", "slow") else "warning") if clock.get("due") else "ok"
+        elif str(task_id).startswith(MAINTENANCE_SHELF_TASK_PREFIX):
+            clock = _nps_shelf_task_clock(config, str(task_id), now)
+            state = clock["severity"]
         elif str(task_id).startswith(MAINTENANCE_HATCH_START_TASK_ID) or str(task_id).startswith(MAINTENANCE_HATCH_HARVEST_TASK_ID):
             # The hatchery's own clock when it has one (0.7.195); the cadence
             # above stays the answer when nothing is in play.
@@ -15425,6 +15428,18 @@ def _nps_shelf_task_id(product_id: str) -> str:
     return f"{MAINTENANCE_SHELF_TASK_PREFIX}{product_id}"
 
 
+def _nps_shelf_task_clock(config: dict[str, Any], task_id: str, now: datetime) -> dict[str, Any]:
+    """Maintenance follows the same stock-aware, shared clock as the shelf."""
+    products = (config.get("consumables") or {}).get("products") or {}
+    plans = nps_engine.hand_dose_plans(products, now, _awc_effective_tank_l(config), dt_util.as_local(now).tzinfo)
+    plan = plans.get(task_id[len(MAINTENANCE_SHELF_TASK_PREFIX):]) or {}
+    clock = plan.get("clock") or {"available": False, "due": False, "at": None}
+    task = ((config.get("maintenance") or {}).get("tasks") or {}).get(task_id) or {}
+    overdue_h = max(0.0, awc_engine._f(task.get("criticalAfterDays"), 3) - awc_engine._f(task.get("cadenceDays"), 1)) * 24
+    severity = ("critical" if awc_engine._f(clock.get("hoursOverdue")) > overdue_h else "warning") if clock.get("due") else "ok"
+    return {**clock, "severity": severity}
+
+
 def _rename_maintenance_task(config: dict[str, Any], old_id: str, new_id: str) -> None:
     """Move a task and its completions under a new id (the migration idiom):
     never clobbers a task the keeper already has under the new id."""
@@ -15538,11 +15553,15 @@ async def websocket_consumable_log_dose(
     now = datetime.now(timezone.utc)
     ml = msg.get("ml")
     if ml is None:
-        plan = nps_engine.hand_dose_state(product, now, _awc_effective_tank_l(config))
+        products = config["consumables"]["products"]
+        plan = nps_engine.hand_dose_plans(products, now, _awc_effective_tank_l(config))[msg["product_id"]]
         ml = plan["ml"]
         if not ml or float(ml) <= 0:
             connection.send_error(msg["id"], "no_dose_size",
                                   "Set this bottle's hand dose in Settings first")
+            return
+        if plan.get("pauseReason") and not msg.get("at"):
+            connection.send_error(msg["id"], "dose_unavailable", plan["pauseReason"])
             return
     ml = float(ml)
     # Late logging (doc §13.6): the dose happened earlier today — stamp it
@@ -17487,6 +17506,11 @@ def _maintenance_next_due_at(config: dict[str, Any], task_id: str, task: dict[st
         if not clock.get("available"):
             return None, "unknown"
         state = ("critical" if clock.get("reason") in ("sign", "slow") else "warning") if clock.get("due") else "ok"
+    elif tid.startswith(MAINTENANCE_SHELF_TASK_PREFIX):
+        clock = _nps_shelf_task_clock(config, tid, now)
+        if not clock.get("available"):
+            return None, "unknown"
+        state = clock["severity"]
     elif tid.startswith(MAINTENANCE_HATCH_START_TASK_ID) or tid.startswith(MAINTENANCE_HATCH_HARVEST_TASK_ID):
         clock = _nps_hatch_task_clock(config, tid, now)
         if clock and not clock.get("available"):
@@ -18433,8 +18457,7 @@ def _cultures_home_bottle(config: dict[str, Any], jar_id: str, jar: dict[str, An
         "createdAt": now.isoformat(), "history": [],
         "doseMl": dose_ml, "doseEveryDays": 1.0, "doseEveryHours": 0.0, "doseFirstAt": "",
         "doseTimesPerDay": 0, "doseWindowEnd": "", "doseStocking": "medium", "doseGuide": {},
-        "doseNote": (f"Into the flow at dusk, by tint — {dose_ml:g} ml is one faint tint of this tank as an "
-                     "estimate; raise or lower it against the glass."),
+        "doseNote": nps_engine.home_phyto_dose_note(dose_ml),
         "lastDosedAt": "", "doseSkippedAt": "", "lastShakenAt": "",
     }
     jar["bottleProductId"] = pid
@@ -18451,7 +18474,7 @@ def _cultures_home_bottle(config: dict[str, Any], jar_id: str, jar: dict[str, An
                     "cadenceDays": 1, "criticalAfterDays": 3,
                 }
     _append_activity(config, f"{jar.get('name') or jar_id}: a home phyto bottle joined the shelf — "
-                             f"its {dose_ml:g} ml hand dose is the tank's daily driver", "control")
+                             f"supply for the tank's shared {dose_ml:g} ml daily dose when stocked", "control")
     return products[pid]
 
 
@@ -18939,6 +18962,7 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
     tank_ml_day = 0.0
     if isinstance(bottle, dict):
         cs = nps_engine.consumable_state(bottle, now, tank_l)
+        cs["handDose"] = nps_engine.hand_dose_plans(products, now, tank_l)[bottle_id]
         plan = cs.get("handDose") or {}
         dose_ml = awc_engine._f(plan.get("ml"))
         if dose_ml > 0:

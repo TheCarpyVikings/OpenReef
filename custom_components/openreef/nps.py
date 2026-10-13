@@ -716,7 +716,8 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
     last logged hand dose — or the last skip, which holds the cadence without
     pretending a dose happened. With an anchor time the clock snaps forward to
     the next anchored slot, so the shelf reminder, the due pill and the strip
-    all read one function. A planned bottle never dosed is due now."""
+    all read one function. A stocked bottle never dosed is due now. Stock
+    pauses the reminder without changing the saved cadence or dose history."""
     guide = hand_dose_guide(product, tank_l)
     explicit = max(0.0, _f(product.get("doseMl")))
     cadence = hand_dose_slots(product)
@@ -748,6 +749,19 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
             delta_h = 0.0
         clock = {"available": True, "due": delta_h <= 0, "at": at.isoformat(),
                  "hoursUntil": round(max(0.0, delta_h), 1), "hoursOverdue": round(max(0.0, -delta_h), 1)}
+    pause_reason = ""
+    if "remainingMl" in product:
+        remaining = max(0.0, _f(product.get("remainingMl")))
+        if _f(product.get("bottleMl")) > 0:
+            remaining = min(remaining, _f(product["bottleMl"]))
+        if remaining <= 0:
+            pause_reason = "Bottle empty — waiting for a refill."
+        elif ml and remaining < ml:
+            pause_reason = f"Only {remaining:g} ml left — not enough for the planned {ml:g} ml dose."
+    if not pause_reason and expiry_state(product, now)["status"] == "expired":
+        pause_reason = "Bottle expired or opening date missing — replace or check it before dosing."
+    if pause_reason:
+        clock = {"available": False, "due": False, "at": None, "hoursUntil": None, "hoursOverdue": None}
     undo = hand_dose_undo(product, now)
     return {
         "planned": bool(cadence["unit"] or explicit > 0),
@@ -767,14 +781,63 @@ def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
         "lastAt": last_iso,
         "skippedAt": str(product.get("doseSkippedAt") or ""),
         "clock": clock,
+        "pauseReason": pause_reason,
     }
+
+
+def home_phyto_dose_note(ml: float) -> str:
+    """The original auto-plan wording also identifies existing default plans."""
+    return (f"Into the flow at dusk, by tint — {ml:g} ml is one faint tint of this tank as an "
+            "estimate; raise or lower it against the glass.")
+
+
+def hand_dose_plans(products: dict[str, Any], now: datetime, tank_l: Any = None,
+                    tz: Any = None) -> dict[str, dict[str, Any]]:
+    """One tank dose across interchangeable home-phyto default bottles.
+
+    Recognise the unchanged auto-created plans, including existing installs;
+    edited sizes, notes or schedules remain independent. Share only the clock,
+    never bottle stock or history. A dose/skip from either supply holds both.
+    """
+    plans = {pid: hand_dose_state(p, now, tank_l, tz)
+             for pid, p in products.items() if isinstance(p, dict)}
+    ids: list[str] = []
+    for pid, plan in plans.items():
+        p = products[pid]
+        if str(pid).startswith(HOME_PHYTO_PREFIX) and _f(p.get("remainingMl")) <= 0:
+            plan["pauseReason"] = "No harvested phyto available — fill this bottle from a ready culture."
+        ml = _f(p.get("doseMl"))
+        if (str(pid).startswith(HOME_PHYTO_PREFIX) and p.get("category") == "phyto" and ml > 0
+                and p.get("doseNote") == home_phyto_dose_note(ml)
+                and plan["everyDays"] == 1 and not plan["firstAt"]):
+            ids.append(pid)
+    if len(ids) > 1:
+        usable = sorted(pid for pid in ids if not plans[pid]["pauseReason"])
+        source = usable[0] if usable else sorted(ids)[0]
+        shared = dict(products[source])
+        for field in ("lastDosedAt", "doseSkippedAt"):
+            stamps = [at for pid in ids if (at := _parse_iso(products[pid].get(field))) is not None
+                      and at.tzinfo is not None and at <= now]
+            shared[field] = max(stamps).isoformat() if stamps else ""
+        clock = hand_dose_state(shared, now, tank_l, tz)["clock"]
+        for pid in ids:
+            plan = plans[pid]
+            plan.update({"shared": True, "sourceProductId": source, "skippedAt": shared["doseSkippedAt"]})
+            if not plan["pauseReason"]:
+                if pid == source:
+                    plan["clock"] = clock
+                else:
+                    plan["pauseReason"] = f"Alternative supply — the shared tank dose uses {products[source].get('name') or source}."
+                    plan["clock"] = {"available": False, "due": False, "at": None,
+                                     "hoursUntil": None, "hoursOverdue": None}
+    return plans
 
 
 def home_bottle_nudge(state: dict[str, Any], jar_state: Any, jar_name: str,
                       days_to_dark: Any = None) -> str:
     """The shelf's split nudge (phyto-culture §5.4, Stage B): a home phyto
     bottle running low or empty says what the VESSEL is doing about it —
-    dark and ready (split now), greening (the next split in ~N days), or
+    dark and ready (split now), greening (wait for readiness), or
     empty (seed it). One sentence, never a figure the vessel has not earned."""
     state = state if isinstance(state, dict) else {}
     st = jar_state if isinstance(jar_state, dict) else {}
@@ -788,19 +851,12 @@ def home_bottle_nudge(state: dict[str, Any], jar_state: Any, jar_name: str,
     lead = "empty" if empty else f"runs out in ~{days_left:g} d" if soon else "running low"
     if status not in ("establishing", "producing"):
         return f"{lead} — {name} is not running; seed it and the bottle fills at the first split"
-    harvest = st.get("harvest") if isinstance(st.get("harvest"), dict) else {}
-    if st.get("splitEligible") and (harvest.get("due") or str(st.get("lastTint") or "") == "dark"):
-        return f"{lead} — {name} reads dark: split into this bottle"
     if st.get("harvestBlocked"):
         return f"{lead} — {name} is off-colour or carries a sign: nothing goes into the bottle until a look says green or dark"
-    hours = harvest.get("hoursUntil")
-    expect = _f(days_to_dark) if _f(days_to_dark) > 0 else None
-    if isinstance(hours, (int, float)) and not isinstance(hours, bool) and hours > 0:
-        due_days = hours / 24.0
-        when = f"~{due_days:.0f} d" if due_days >= 1 else "under a day"
-        early = " — a small early split tides it over" if soon and isinstance(days_left, (int, float)) and days_left < due_days else ""
-        return f"{lead} — {name}'s next split is due in {when}" + (f" (your record says ~{expect:g} d to dark)" if expect else "") + early
-    return f"{lead} — {name} is greening; the next split fills it"
+    harvest = st.get("harvest") if isinstance(st.get("harvest"), dict) else {}
+    if st.get("splitEligible") and (st.get("lastTint") == "dark" or harvest.get("reason") == "dark"):
+        return f"{lead} — {name} reads dark: split into this bottle"
+    return f"{lead} — {name} is still greening; wait until it is ready before harvesting into this bottle"
 
 
 def consumable_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
@@ -2188,11 +2244,13 @@ def shelf_summary(products: dict[str, Any], now: datetime, tank_l: Any = None,
     """The whole food shelf: per-product states plus the attention counts the
     tab header and (later) notifications read."""
     states: dict[str, dict[str, Any]] = {}
+    plans = hand_dose_plans(products, now, tank_l, tz)
     low = expired = dose_due = live_n = 0
     for pid, product in products.items():
         if not isinstance(product, dict):
             continue
         state = consumable_state(product, now, tank_l, tz)
+        state["handDose"] = plans[pid]
         states[str(pid)] = state
         if state.get("live"):
             # The hatchery's own entries (doc §14): counted on the shelf, but
@@ -2486,11 +2544,12 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
 
     # --- The shelf: hand plans as slots (13.4), logged doses as done marks.
     hand_hint = False
+    hand_plans = hand_dose_plans(products, now_local, tank_l, tz)
     for pid in sorted(products):
         product = products[pid]
         if not isinstance(product, dict):
             continue
-        plan = hand_dose_state(product, now_local, tank_l, tz)
+        plan = hand_plans[pid]
         soak_bottle = str(product.get("category") or "") == ENRICHMENT_CATEGORY
         cad = (hand_dose_slots(product) if not soak_bottle
                else {"unit": "", "n": 0.0, "firstAt": "", "perDay": 0, "slots": [], "text": ""})
@@ -2506,14 +2565,14 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             if minute is not None:
                 done.append({"at": minute, "ml": round(_f(item.get("ml")), 2), "slot": _hhmm_min(item.get("slot")),
                              "stamp": str(item.get("at"))})
-        if not cad["unit"]:
-            # No cadence: anything logged today still shows — the strip is the day's truth.
+        if not cad["unit"] or plan["pauseReason"]:
+            # Paused plans add no feeds, but actual logged doses stay visible.
             events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
                              ml=d["ml"], actualMl=d["ml"], status="done", doneAt=d["at"], doneStamp=d.get("stamp"),
                              unplanned=True)
                           for i, d in enumerate(done))
             continue
-        skipped_min, skipped_day = _local_minute(product.get("doseSkippedAt"), today, tz)
+        skipped_min, skipped_day = _local_minute(plan.get("skippedAt"), today, tz)
         skipped_today = skipped_min is not None
         clock_at = _parse_iso(plan["clock"].get("at"))
         clock_day = clock_at.astimezone(tz).date() if clock_at is not None and tz is not None else (clock_at.date() if clock_at else today)

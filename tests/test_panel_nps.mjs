@@ -2705,5 +2705,41 @@ test("a hand-kept bottle under the rack's own byline says it is not linked (0.7.
   } finally { restore(); }
 });
 
+test("empty and alternative phyto bottles pause shelf actions and maintenance", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.at = Date.now();
+    panel._config.maintenance = { enabled: true, tasks: {}, completions: {} };
+    for (const [id, remaining, reason] of [
+      ["home_phyto_main", 0, "No harvested phyto available — fill this bottle from a ready culture."],
+      ["home_phyto_backup", 500, "Alternative supply — the shared tank dose uses Home phyto (Main)."],
+    ]) {
+      const product = { name: id, category: "phyto", bottleMl: 1000, remainingMl: remaining, doseMl: 35, doseEveryDays: 1 };
+      const state = { remainingMl: remaining, bottleMl: 1000, empty: remaining === 0, expiry: { status: "fresh" },
+        handDose: { planned: true, ml: 35, everyDays: 1, shared: true, pauseReason: reason,
+          clock: { available: false, due: false, at: null } } };
+      panel._config.consumables.products[id] = product;
+      panel._nps.summary.shelf.products[id] = state;
+      const task = `nps_dose_${id}`;
+      panel._config.maintenance.tasks[task] = { enabled: true, label: `Dose ${id}`, cadenceDays: 1, criticalAfterDays: 3 };
+      const html = panel._npsProductCard(id, product, state);
+      assert(html.includes(reason), "explain why the plan is paused");
+      assert(!html.includes("Dose due") && !html.includes('data-action="nps-product-dosed"'), "no quick dose for unavailable supply");
+      assert(html.includes('data-action="nps-product-logdose"'), "explicit historical logging remains available");
+      assert(panel._maintenanceDueState(task).status === "unknown", "maintenance must not revive the paused plan");
+      assert(panel._maintenanceNextDueMs(task) === Infinity, "no invented next date while stock is unavailable");
+    }
+    const state = panel._nps.summary.shelf.products.home_phyto_main;
+    state.empty = false;
+    state.remainingMl = 500;
+    state.handDose.pauseReason = "";
+    state.handDose.clock = { available: true, due: true, at: NOW };
+    const html = panel._npsProductCard("home_phyto_main", panel._config.consumables.products.home_phyto_main, state);
+    assert(html.includes("Shared tank dose") && html.includes("Dosed 35 ml"), "the stocked source offers the one shared dose");
+    assert(panel._maintenanceDueCount() === 1, "one source means one maintenance reminder");
+  } finally { restore(); }
+});
+
 // Keep this LAST: a test defined below the runner is a test that never runs.
 runTests();

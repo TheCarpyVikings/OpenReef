@@ -13030,7 +13030,8 @@ class OpenReefPanel extends HTMLElement {
     else if (expiry.status === "aging") chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">~${esc(expiry.daysLeft)}d left</span>`);
     const plan = s.handDose || {};
     const clock = plan.clock || {};
-    if (clock.due) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Dose due</span>`);
+    const pauseReason = plan.pauseReason || (s.empty ? "Bottle empty — waiting for a refill." : "");
+    if (clock.due && !pauseReason) chips.push(`<span class="pill" style="color:var(--warning-color,#f5a524)">Dose due</span>`);
     if (product.refrigerated) chips.push(`<span class="pill">Fridge</span>`);
     if (product.stirDaily) chips.push(`<span class="pill">Stir daily</span>`);
     // The Shaken tap (0.7.207): a settle-prone fridge bottle wants agitating
@@ -13043,12 +13044,14 @@ class OpenReefPanel extends HTMLElement {
     // would give, so the number is visible before Settings is opened.
     const guide = plan.guide || {};
     const everyDays = Number(plan.everyDays) || 0;
-    const planLine = plan.planned
-      ? `<small>Hand dose <strong>${plan.ml != null ? `${esc(plan.ml)} ml` : "— set the size in Settings"}</strong>${guide.available && !(Number(product.doseMl) > 0) ? ` (${esc(guide.stocking)} stocking: 1 ml per ${esc(guide.perLitres)} L)` : ""}${plan.cadenceText ? ` · ${esc(plan.cadenceText)}` : everyDays > 0 ? ` · every ${everyDays === 1 ? "day" : `${esc(everyDays)} days`}` : " · no reminder"}${plan.lastAt ? ` · last ${esc(this._formatActivityTime(plan.lastAt))}` : " · never dosed"}${plan.note ? `<br>${esc(plan.note)}` : ""}</small>`
+    const planLine = plan.planned && pauseReason
+      ? `<small data-dose-paused>${esc(pauseReason)}</small>`
+      : plan.planned
+      ? `<small>${plan.shared ? "Shared tank dose" : "Hand dose"} <strong>${plan.ml != null ? `${esc(plan.ml)} ml` : "— set the size in Settings"}</strong>${guide.available && !(Number(product.doseMl) > 0) ? ` (${esc(guide.stocking)} stocking: 1 ml per ${esc(guide.perLitres)} L)` : ""}${plan.cadenceText ? ` · ${esc(plan.cadenceText)}` : everyDays > 0 ? ` · every ${everyDays === 1 ? "day" : `${esc(everyDays)} days`}` : " · no reminder"}${plan.lastAt ? ` · last ${esc(this._formatActivityTime(plan.lastAt))}` : " · never dosed"}${plan.note ? `<br>${esc(plan.note)}` : ""}</small>`
       : guide.available
         ? `<small>Guide: <strong>${esc(guide.ml)} ml</strong> a day at ${esc(guide.stocking)} stocking (1 ml per ${esc(guide.perLitres)} L) — set a cadence in Settings and the shelf reminds you.</small>`
         : "";
-    const dosedButton = plan.planned && plan.ml != null
+    const dosedButton = plan.planned && plan.ml != null && !pauseReason
       ? `<button class="${clock.due ? "primary" : "secondary"} compact-button" data-action="nps-product-dosed" data-id="${eid}">${product.category === "enrichment" ? "Soak dose" : "Dosed"} ${esc(plan.ml)} ml</button>`
       : "";
     const runway = s.daysUntilEmpty != null
@@ -15693,7 +15696,7 @@ const rigSteps = [
     const bottleLine = hb.exists
       ? `<small class="muted" data-culture-home-bottle>fridge bottle: ${Number(hb.remainingMl) > 0
         ? `${esc(Math.round(hb.remainingMl))} of ${esc(Math.round(hb.bottleMl || 0))} ml · ${hb.expiry?.status === "expired" ? `<span style="color:var(--error-color,#e5484d)">past three weeks — tip it out</span>` : hb.expiry?.daysLeft != null ? `${esc(hb.expiry.daysLeft)} d left` : ""}${hb.daysUntilEmpty != null ? ` · ~${esc(hb.daysUntilEmpty)} d at the tank's rate` : ""}${hb.shake?.due ? ` · <span style="color:var(--warning-color,#f5a524)">shake it</span>` : ""}`
-        : "empty — fills at the first split"}${hb.handDose?.ml ? ` · tank dose ${esc(hb.handDose.ml)} ml${hb.handDose.cadenceText ? ` ${esc(hb.handDose.cadenceText)}` : " a day"} — the shelf's Dosed tap` : ""}</small>`
+        : "empty — fills at the first split"}${hb.handDose?.pauseReason ? ` · ${esc(hb.handDose.pauseReason)}` : hb.handDose?.ml ? ` · ${hb.handDose.shared ? "shared " : ""}tank dose ${esc(hb.handDose.ml)} ml${hb.handDose.cadenceText ? ` ${esc(hb.handDose.cadenceText)}` : " a day"} — the shelf's Dosed tap` : ""}</small>`
       : `<small class="muted">the home fridge bottle joins the food shelf when you seed</small>`;
     const nut = j.nutrient || {};
     const nutrient = `<small class="muted" data-culture-nutrient>${nut.productName
@@ -31723,6 +31726,7 @@ const rigSteps = [
   // When this task next becomes due (ms). Already-due tasks return now so they sort first.
   _maintenanceNextDueMs(id) {
     const state = this._maintenanceDueState(id);
+    if (String(id).startsWith("nps_dose_") && state.status === "unknown" && !state.dueAt) return Number.POSITIVE_INFINITY;
     if (state.status === "warning" || state.status === "critical") return Date.now();
     const task = this._maintenanceTask(id);
     const snoozeMs = Date.parse(task.snoozedUntil || "");
@@ -31763,6 +31767,19 @@ const rigSteps = [
     const snoozeMs = Date.parse(task.snoozedUntil || "");
     if (Number.isFinite(snoozeMs) && snoozeMs > Date.now()) {
       return { status: "ok", label: "snoozed", detail: `Snoozed until ${this._formatActivityTime(task.snoozedUntil)}.`, latest, snoozed: true };
+    }
+    if (String(id).startsWith("nps_dose_")) {
+      if (this._nps && !this._nps.demo && !this._nps.loading && (!this._nps.at || Date.now() - this._nps.at > 30000)) {
+        try { Promise.resolve(this._npsLoadSummary()).catch(() => {}); } catch { /* wait for the shelf */ }
+      }
+      const plan = this._nps?.summary?.shelf?.products?.[String(id).slice(9)]?.handDose;
+      if (!plan?.clock?.available) return { status: "unknown", label: "paused",
+        detail: plan?.pauseReason || "Waiting for the food shelf's dose clock.", latest };
+      const overdueHours = Math.max(0, (Number(task.criticalAfterDays) || 3) - (Number(task.cadenceDays) || 1)) * 24;
+      const critical = Number(plan.clock.hoursOverdue) > overdueHours;
+      return { status: plan.clock.due ? (critical ? "critical" : "warning") : "ok", label: plan.clock.due ? (critical ? "overdue" : "due") : "scheduled",
+        detail: plan.clock.due ? "Due on the food shelf's clock." : `Due ${this._formatActivityTime(plan.clock.at)}.`,
+        latest, dueAt: plan.clock.at };
     }
     const cultureTask = /^culture_(.+)_(feed|harvest|restart|water_change|look|refresh)$/.exec(id);
     if (cultureTask) {
