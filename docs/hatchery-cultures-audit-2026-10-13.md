@@ -68,7 +68,11 @@ The [interactive layout proposal](feeding-layout-proposal.html) uses illustrativ
 5. Move inactive cultures and the large rig illustration below everyday controls, while keeping them accessible.
 6. Keep shortages and blocking problems visible even when background explanations are collapsed.
 
-This larger layout is a proposal, separate from the dashboard accuracy fixes. The desktop and narrow-screen preview were rendered in Chrome for visual inspection.
+The approved layout is implemented for v0.7.216 in `custom_components/openreef/frontend/openreef-panel.js`. The HTML proposal remains an illustrative reference. Daily observation controls and available food come first; harvest/refill recipes, measurements, history and rig diagrams expand on demand. Explicit open/closed choices survive summary refreshes. Recipes that need attention initially open automatically, while shortages, heat warnings and blocked actions remain visible.
+
+The production layout uses three columns on wide screens, two on tablets and one on phones, preserving the configured accent colour. Growing phyto is labelled as growing; only usable harvested bottles contribute to the available-phyto total. Stock held in an unavailable brine container is labelled stored rather than available. Existing action handlers, live recipe previews and backend calculations are retained.
+
+Layout verification: all 139 culture/NPS dashboard cases pass (62 culture, 77 NPS), including four new regression cases. Across all 23 dashboard suites, 617 of 618 cases pass; the previously reported hand-logged-parameter trend assertion remains the sole failure. JavaScript syntax and whitespace checks pass. Chrome checks passed at 360, 390, 768 and 1440 px, including expanded forms, keyboard operation, refresh state, split/refill payloads and blocked enrichment stock, with no browser exceptions. Fixtures and stubbed requests were used; no live Home Assistant or hardware actions were performed. Logs are in `/tmp/openreef-layout-dashboard-tests` and `/tmp/openreef-layout-browser-checks.json`.
 
 ## Verification and remaining limits
 

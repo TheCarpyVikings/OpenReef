@@ -889,7 +889,7 @@ test("the rack tile is a tidy form: compact ticks, a labelled egg check, aligned
     const panel = await culturesPanel();
     const html = panel._culturesTab();
     noPlaceholders(html, "rack tiles");
-    assert(html.includes('<div class="culture-tile" data-culture="c1">'), "the tile carries the rack class");
+    assert(html.includes('<article class="culture-tile" data-culture="c1">'), "the tile carries the rack class");
     const c1 = html.slice(html.indexOf('data-culture="c1"'), html.indexOf('data-culture="c2"'));
     // Every control sits on a labelled row; the ticks are ticks, not 42 px boxes.
     assert(c1.includes('<label class="culture-field" title="Aim for leafy green — spinach, not pea soup">Water<select data-cultures-tint="c1">'), "the Water row");
@@ -899,8 +899,8 @@ test("the rack tile is a tidy form: compact ticks, a labelled egg check, aligned
     assert(c1.includes('>Egg ratio<span class="unit">') && c1.includes('placeholder="%" data-cultures-egg="c1"') && c1.includes("observe the trend") && !c1.includes("≥ 30 % is healthy"), "the egg check is labelled");
     assert(c1.includes('<span>Restart</span><label class="culture-tick"') && c1.includes('data-cultures-split="c1"'), "the split tick is a compact tick");
     assert(!c1.includes("width:64px") && !c1.includes("% eggs") && !c1.includes("Sign:"), "the clipped placeholder and the bare row are gone");
-    // Head, form, notes, observations, actions — in that order.
-    const order = ['class="culture-jar"', 'class="culture-head"', 'class="culture-form"', 'class="culture-notes"', "<span>Signs</span>", 'class="button-row"'];
+    // Observe and act before opening the harvest recipe or care details.
+    const order = ['class="culture-jar"', 'class="culture-head"', 'class="culture-form"', 'data-action="cultures-looked"', 'data-feeding-details="culture-c1-recipe"', 'data-cultures-harvest-to="c1"', 'data-feeding-details="culture-c1-care"', "<span>Signs</span>"];
     let last = -1;
     for (const needle of order) { const idx = c1.indexOf(needle); assert(idx > last, `tile out of order at ${needle}`); last = idx; }
     // The stylesheet sizes the ticks and the compact controls.
@@ -1173,7 +1173,7 @@ test("the phyto tile: the lit vessel, the colour + Secchi row, the split form wi
     noPlaceholders(html, "phyto tile");
     assert(html.includes('data-culture-kind="phyto"') && html.includes('data-culture-phyto-svg="n1"'), "the tile and its lit vessel");
     assert(html.includes("Phyto, on its own clock"), "a phyto-only rack changes the headline");
-    assert(html.includes("cycle day 8 of ~8") && html.includes("1.25 L working"), "the cycle ring and the working volume");
+    assert(html.includes("cycle day 8") && html.includes("<dd>1.25 / 4 L</dd>"), "the cycle ring and the working volume");
     assert(html.includes("split due · it reads dark") && html.includes("look due"), `the chips speak phyto: ${html.match(/<span class="pill warning"[^>]*>[^<]*/g)}`);
     assert(html.includes('data-cultures-tint="n1"') && html.includes('<option value="pale"') && html.includes('<option value="dark"'), "the colour select on the phyto scale");
     assert(!html.includes('<option value="clearing"'), "the rotifer scale must not leak onto the vessel");
@@ -1799,6 +1799,56 @@ test("culture temperature summary names the measured vessel and affected species
   jar.temp.status = "hot";
   html = panel._culturesTab();
   assert(html.includes("is over its heat limit — shade it or move it somewhere cooler"), "phyto heat advice does not prescribe animal feeding");
+});
+
+test("culture layout keeps observations and blocking advice above optional recipes", async () => {
+  const phyto = phytoJar({ tint: "green", due: [], densityAdvice: { action: "wait", reason: "Still growing" },
+    homeBottle: { exists: true, remainingMl: 0, expiry: { status: "fresh" } } });
+  const rotifer = jarSummary({ due: [], feed: { pauseReason: "No usable phyto" } });
+  const idle = jarSummary({ id: "idle", name: "Empty vessel", state: { status: "none" }, due: [] });
+  const panel = await culturesPanel({}, summaryFixture([phyto, rotifer, idle]));
+  const html = panel._culturesTab();
+  const tile = html.slice(html.indexOf('data-culture="n1"'), html.indexOf('data-culture="c1"'));
+  assert(tile.includes("<strong>growing</strong>") && !tile.includes("<strong>producing</strong>"), "a green established culture is labelled growing");
+  assert(tile.indexOf('data-action="cultures-looked"') < tile.indexOf('data-feeding-details="culture-n1-recipe"'), "observation is available above optional details");
+  assert(tile.includes('data-feeding-details="culture-n1-recipe">'), "a growing culture's recipe starts closed");
+  for (const attr of ["data-cultures-tint", "data-cultures-secchi", "data-cultures-split-ml", "data-cultures-working-after"]) {
+    assert(tile.split(`${attr}="n1"`).length === 2, `${attr} has a single input across disclosures`);
+  }
+  assert(html.indexOf("No harvested phyto available.") < html.indexOf('data-culture="n1"'), "food shortage stays visible above the rack");
+  const animal = html.slice(html.indexOf('data-culture="c1"'), html.indexOf('data-culture="idle"'));
+  assert(animal.indexOf("No usable phyto") < animal.indexOf('data-feeding-details="culture-c1-recipe"'), "feed refusal stays visible");
+  assert(!animal.includes('data-action="cultures-fed"') && animal.includes('data-action="cultures-harvested-only"'), "the layout preserves unavailable-food guards");
+  assert(html.indexOf('data-feeding-details="cultures-inactive"') < html.indexOf('data-culture="idle"'), "idle vessels live in the inactive section");
+  assert(html.includes('data-action="cultures-seed" data-id="idle"'), "seeding remains accessible");
+});
+
+test("phyto available summary counts usable harvested bottles only", async () => {
+  const jars = ["fresh", "aging", "expired", "unknown"].map((status, i) => phytoJar({ id: `n${i}`, due: [],
+    homeBottle: { exists: true, remainingMl: (i + 1) * 100, expiry: { status } } }));
+  const panel = await culturesPanel({}, summaryFixture(jars));
+  const html = panel._culturesTab();
+  const card = html.slice(html.indexOf("Phyto available"), html.indexOf("Care schedule"));
+  assert(card.includes("300 ml"), "100 fresh + 200 aging; growing vessels and expired/unknown bottles do not count");
+  assert(!html.includes("No harvested phyto available."), "usable bottles remove the no-stock alert");
+});
+
+test("feeding details preserve explicit open and closed choices through refresh", async () => {
+  const panel = await culturesPanel();
+  const details = [{ dataset: { feedingDetails: "culture-n1-recipe" }, open: false },
+    { dataset: { feedingDetails: "hatchery-forecast" }, open: true }];
+  panel.shadowRoot = { querySelectorAll: () => details };
+  panel._config = null;
+  panel._renderLoading = () => {};
+  // Run the real render entry: disclosure state is captured before the DOM is replaced.
+  Object.getPrototypeOf(panel)._render.call(panel);
+  assert(!panel._feedingDetails("culture-n1-recipe", "Recipe", "recipe", true).includes(' open'), "explicit close overrides a due recipe's default");
+  assert(panel._feedingDetails("hatchery-forecast", "Forecast", "forecast").includes(' open'), "opened forecast survives refresh");
+  let focused = false;
+  details[0].querySelector = () => ({ focus: () => { focused = true; } });
+  panel._feedingOpen("culture-n1-recipe");
+  assert(details[0].open && focused, "Review opens and focuses the existing recipe without rebuilding its inputs");
+  assert(panel._feedingDetails("culture-n1-recipe", "Recipe", "recipe").includes(' open'), "Review also persists its open state");
 });
 
 runTests();

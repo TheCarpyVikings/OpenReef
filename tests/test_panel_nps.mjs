@@ -2470,7 +2470,7 @@ test("a ripe hatchery joins a running soak — the tile says so, and a refusal l
     panel._nps.noticeScope = "hatchery";
     panel._nps.error = "The soak has only ~2 h left — too little for a fresh harvest to load.";
     html = panel._hatcheryTab();
-    const card = html.slice(html.indexOf(">Today<"), html.indexOf('data-vessel="v1"'));
+    const card = html.slice(html.indexOf("data-hatchery-panel"), html.indexOf('data-vessel="v1"'));
     assert(card.includes("too little for a fresh harvest"), "the refusal must render inside the hatchery card, above the tiles");
     assert((html.match(/too little for a fresh harvest/g) || []).length === 1, "the refusal must not also sit in the tab's top banner");
     const tab = panel._npsTab();
@@ -2478,7 +2478,7 @@ test("a ripe hatchery joins a running soak — the tile says so, and a refusal l
     assert((tab.match(/too little for a fresh harvest/g) || []).length === 1, "…once");
     panel._nps.noticeScope = "";
     html = panel._hatcheryTab();
-    assert(html.includes("too little for a fresh harvest") && html.indexOf("too little for a fresh harvest") < html.indexOf(">Today<"), "other NPS actions keep the top banner, above the card");
+    assert(html.includes("too little for a fresh harvest") && html.indexOf("too little for a fresh harvest") < html.indexOf("data-hatchery-panel"), "other NPS actions keep the top banner, above the card");
     panel._nps.error = "";
   } finally { restore(); }
 });
@@ -2510,7 +2510,7 @@ test("a refused tap outlives the summary reload — the loader clears only its o
   assert(renders.every((e) => e === REFUSAL), `every paint after the tap must carry the refusal: ${JSON.stringify(renders)}`);
   assert(panel._nps.error === REFUSAL, "the refusal must still be on state after the reload");
   const card = panel._hatcheryTab();
-  assert(card.slice(card.indexOf(">Today<"), card.indexOf('data-vessel="v1"')).includes("Feed or refrigerate the enriched batch"),
+  assert(card.slice(card.indexOf("data-hatchery-panel"), card.indexOf('data-vessel="v1"')).includes("Feed or refrigerate the enriched batch"),
     "…and drawn inside the hatchery card");
   // The loader's OWN failure still clears on the next good load.
   summaryFails = true;
@@ -2795,11 +2795,29 @@ test("hatchery summary names the primary vessel and uses its saved batch clock",
   hatch.nextHatch.assumption = "Assumes room for each harvest and a fresh container; topping up keeps the older expiry.";
   panel._nps.summary.hatchery = hatch;
   const html = panel._hatcheryTab();
-  const cards = html.match(/<div class="summary-grid">([\s\S]*?)<\/div>/)?.[1] || "";
+  const cards = html.slice(html.indexOf('class="summary-grid feeding-summary"'), html.indexOf("data-hatchery-panel"));
   assert(cards.includes("Batch · Hatchery 2") && cards.includes("92%"), "the batch headline identifies its vessel");
-  assert(cards.includes("Clock · Hatchery 2") && cards.includes("24 h") && cards.includes("this batch&#039;s saved clock"), "the saved 24 h batch clock takes precedence over changed 36 h settings");
+  const clockDetails = html.slice(html.indexOf('data-feeding-details="hatchery-journal"'));
+  assert(clockDetails.includes("Clock · Hatchery 2") && clockDetails.includes("24 h") && clockDetails.includes("this batch&#039;s saved clock"), "the saved 24 h batch clock takes precedence over changed 36 h settings");
   assert(cards.includes("Decapsulated") && !cards.includes("Standard cysts"), "the batch's cysts label matches its own stamp");
   assert(html.includes("<summary>Forecast assumptions</summary>") && html.includes("topping up keeps the older expiry"), "planning assumptions stay available in expandable detail");
+});
+
+test("hatchery layout keeps heat and stale stock visible while background details are closed", async () => {
+  const panel = await npsPanel();
+  const hatch = v2HatcherySummary();
+  hatch.temp = { available: true, warm: true, tempC: 32 };
+  hatch.vessels.forEach((v) => { v.temp = hatch.temp; });
+  hatch.reservoir = { volumeMl: 750, remainingMl: 250, mixedAt: NOW, freshness: { status: "stale", hoursLeft: 0 } };
+  panel._nps.summary.hatchery = hatch;
+  const html = panel._hatcheryTab();
+  assert(html.includes("Hatchery temperature needs attention") && html.indexOf("Hatchery temperature needs attention") < html.indexOf('data-vessel="v1"'), "heat warning stays outside disclosures");
+  const container = html.slice(html.indexOf('<article class="feeding-tile" data-brine-container'), html.indexOf('data-feeding-details="hatchery-forecast"'));
+  assert(container.includes("Stored / capacity") && !container.includes("Available / capacity"), "stale stock is stored but unavailable");
+  assert(container.includes('data-action="nps-discard-brine"') && !container.includes('data-action="nps-hand-feed"'), "discard stays visible and feeding stays blocked");
+  assert(container.indexOf('data-action="nps-discard-brine"') < container.indexOf('data-feeding-details="hatchery-container-care"'), "discard does not require opening background details");
+  assert(html.includes('data-feeding-details="hatchery-forecast">'), "forecast starts closed");
+  assert(html.includes('data-feeding-details="hatchery-rig">'), "rig starts closed");
 });
 
 runTests();

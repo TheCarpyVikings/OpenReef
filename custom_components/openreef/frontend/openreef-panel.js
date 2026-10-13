@@ -1213,6 +1213,7 @@ class OpenReefPanel extends HTMLElement {
       const target = event.target.closest("[data-action]");
       if (!target) return;
       const action = target.dataset.action;
+      if (action === "feeding-open") { this._feedingOpen(target.dataset.id); return; }
       const id = target.dataset.id;
       const field = target.dataset.field;
       // NPS notices land where the tap was (0.7.169): a refusal from the
@@ -8385,6 +8386,11 @@ class OpenReefPanel extends HTMLElement {
   }
 
   _render() {
+    // Remember disclosures before rebuilding the page on a summary refresh.
+    for (const detail of this.shadowRoot?.querySelectorAll?.("[data-feeding-details]") || []) {
+      this._feedingDetailsOpen ||= {};
+      this._feedingDetailsOpen[detail.dataset.feedingDetails] = detail.open;
+    }
     if (!this._config) {
       this._renderLoading();
       return;
@@ -11688,7 +11694,7 @@ class OpenReefPanel extends HTMLElement {
 
   // The brine dosing container beside the vessels: fill from the ledger,
   // stroke from the freshness clock (AWC-reservoir idiom), ❄ when fridged.
-  _npsBrineContainerSvg(reservoir) {
+  _npsBrineContainerSvg(reservoir, iconOnly = false) {
     const volume = Number(reservoir?.volumeMl) || 0;
     if (!(volume > 0)) return "";
     const remaining = Math.max(0, Math.min(volume, Number(reservoir?.remainingMl) || 0));
@@ -11699,15 +11705,14 @@ class OpenReefPanel extends HTMLElement {
         : status === "fresh" ? "#26a69a" : "#546e7a";
     const fillH = Math.round(74 * pct);
     return `
-      <div class="stack" style="gap:4px;align-items:center;" data-brine-container>
+      ${iconOnly ? "" : '<div class="stack" style="gap:4px;align-items:center;" data-brine-container>'}
         <svg viewBox="0 0 84 124" style="width:84px;flex:0 0 auto;" role="img" aria-label="Brine dosing container — ${this._escape(status || "empty")}">
           <rect x="14" y="16" width="56" height="90" rx="8" fill="#0d1f26" stroke="${stroke}" stroke-width="2.5"></rect>
           <rect x="17" y="${103 - fillH}" width="50" height="${fillH}" rx="5" fill="#8d6e63" opacity="0.85"></rect>
           <rect x="26" y="8" width="32" height="10" rx="3" fill="#37474f"></rect>
           <text x="42" y="120" text-anchor="middle" font-size="10" fill="#90a4ae">${this._escape(`${Math.round(remaining)} / ${Math.round(volume)} ml`)}</text>
         </svg>
-        <small><strong>Brine container</strong></small>
-      </div>`;
+        ${iconOnly ? "" : '<small><strong>Brine container</strong></small></div>'}`;
   }
 
   async _npsHatchLoaded(vesselId) {
@@ -13507,19 +13512,20 @@ class OpenReefPanel extends HTMLElement {
           ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}"${joinTitle ? ` title="${joinTitle.trim()}"` : ""}${joinBlocked ? " disabled" : ""}>Hatched &amp; loaded</button>` : "",
         vs.status === "incubating"
           ? `<button class="danger-text compact-button" data-action="nps-hatch-cancel" data-id="${this._escape(v.id)}">Cancel</button>` : "",
-      ].filter(Boolean).join("");
+      ].filter(Boolean);
       return `
-        <div class="stack" style="gap:4px;align-items:center;min-width:120px;" data-vessel="${this._escape(v.id)}">
-          ${this._npsHatchVesselSvg(vs)}
-          <small><strong>${this._escape(v.name)}</strong> · ${this._escape(String(v.volumeL))} L</small>
-          <small>${statusLine}${vs.status === "incubating" ? ` · ${this._escape(batchEggName)}` : ""}</small>
-          ${settingsLine}
-          ${clockNote}
-          ${guide}
-          ${joinLine}
-          ${this._npsPouchLine(v)}
-          <div class="button-row" style="flex-wrap:wrap;justify-content:center;">${buttons}</div>
-        </div>`;
+        <article class="feeding-tile" data-vessel="${this._escape(v.id)}">
+          <div class="feeding-card-head">${this._npsHatchVesselSvg(vs)}<div class="culture-head"><strong>${this._escape(v.name)}</strong>
+            <small>${this._escape(hasBatch ? batchEggName : vEggName)} · ${this._escape(String(v.volumeL))} L</small><small>${statusLine}</small></div></div>
+          ${this._feedingFacts([["Time remaining", hasBatch ? Number(vs.hoursLeft) > 0 ? `About ${vs.hoursLeft} h` : "Check hatch-out" : "Not started"], [hasBatch ? "This batch's clock" : "Next batch's clock", `${hasBatch ? batchClock : vClock} h`]])}
+          ${hasBatch ? `<div class="feeding-progress" role="img" aria-label="Timer progress ${this._escape(String(vs.percent || 0))}%"><span style="width:${Math.max(0, Math.min(100, Number(vs.percent) || 0))}%"></span></div>` : ""}
+          <div class="feeding-next"><p class="eyebrow">Next action</p><strong>${!hasBatch ? "Start the next hatch" : joinBlocked ? "Wait for the container" : vs.status === "incubating" ? "Keep incubating; check for hatch-out" : "Inspect before harvesting"}</strong>
+            <small>${hasBatch ? "The timer estimates hatch-out. Check for swimming nauplii before logging a harvest." : "Prepare the measured water and cysts, then log the start."}</small></div>
+          ${joinLine ? `<div class="feeding-alerts">${joinLine}</div>` : ""}
+          ${vs.status !== "incubating" ? this._feedingActions(buttons, ["nps-hatch-start", "nps-hatch-loaded"]) : ""}
+          ${this._feedingDetails(`hatchery-${v.id}-batch`, "Batch details & clock settings", `${settingsLine}${clockNote}${guide}${this._npsPouchLine(v)}`)}
+          ${vs.status === "incubating" ? this._feedingDetails(`hatchery-${v.id}-harvest`, "Record an early harvest or cancel", `<small>Inspect the batch before recording an early harvest.</small>${this._feedingActions(buttons, ["nps-hatch-loaded", "nps-hatch-cancel"])}`) : ""}
+        </article>`;
     }).join("");
     // Advisory lines: learned clock, temperature, structural vessel count.
     // Per hatchery (0.7.147): each vessel's own cysts have their own learned
@@ -13555,11 +13561,13 @@ class OpenReefPanel extends HTMLElement {
     // The stretch is measured against the RATED hours (0.7.115): a clock set
     // from the learned average already embodies this temperature, and
     // stretching it again said "expect 43.7 h" about batches that ran 36.
+    const temperatureAlert = grouped.some((t) => t.temp.warm)
+      ? `<aside class="feeding-attention"><strong>Hatchery temperature needs attention</strong>${grouped.filter((t) => t.temp.warm).map((t) => `<p>${who(t)}${this._escape(String(t.temp.tempC))} °C — above ~30 °C hatch quality drops; aim for 25–28 °C.</p>`).join("")}</aside>` : "";
     const tempLine = grouped.map((t) => {
       const tp = t.temp;
       const learned = t.learned;
       const ratedHours = Number(tp.ratedHours) || t.hours;
-      if (tp.warm) return `<span style="color:var(--warning-color,#f5a524)">🌡️ Hatchery runs ${this._escape(String(tp.tempC))} °C — above ~30 °C hatch quality drops; aim for 25–28 °C.</span>`;
+      if (tp.warm) return "";
       if (!tp.available) return "";
       if (!(Number(tp.factor) > 1.05)) return "";
       return `🌡️ ${who(t)}sensor reads ${this._escape(String(tp.tempC))} °C. The rough temperature model gives ~${this._escape(String(tp.expectedHours))} h from the ${this._escape(String(ratedHours))} h preset; this is not a supplier rating or a hatch measurement. Inspect hatch-out before changing the ${this._escape(String(t.hours))} h clock.`;
@@ -13606,7 +13614,7 @@ class OpenReefPanel extends HTMLElement {
       enrichIdle && !containerStale && !reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
         ? `<button class="secondary compact-button" data-action="nps-enrich" ${hatch.enrichment?.pauseReason ? "disabled" : ""} title="${this._escape(hatch.enrichment?.pauseReason || "The enrichment into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II), or dose now from the soak tile for a live-algae enrichment. The running hatch is untouched.")}">Enrich brine</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${this._npsHatchRemindersExist() ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
-    ].filter(Boolean).join("");
+    ].filter(Boolean);
     // The hatchery is core NPS — hatching happens whether or not the matched
     // drain is on. Hand-dosers get the same clocks from the container's stamp.
     // The same verdict, in the container's own line (0.7.169).
@@ -13622,11 +13630,11 @@ class OpenReefPanel extends HTMLElement {
     const soakAvailability = !enrichIdle
       ? `The container is in an enrichment cycle${enrichState.hoursLeft != null && Number(enrichState.hoursLeft) > 0 ? ` with ~${this._escape(String(enrichState.hoursLeft))} h left` : ""}. Finish and rinse before feeding; use another food source meanwhile.${joinCopy} The rack forecast assumes plain harvests and does not schedule this soak.`
       : "";
-    const hatchReservoirLine = `${soakAvailability || primeLine}${!soakAvailability && freshLine ? ` · ${freshLine}` : ""}${fridgeButton ? ` ${fridgeButton}` : ""}${fxCfg.channelId
+    const hatchReservoirLine = `${soakAvailability || primeLine}${!soakAvailability && freshLine ? ` · ${freshLine}` : ""}${fxCfg.channelId
       ? "" : ` · Hand-dosing mode — link a live-food pump in Settings to automate the dosing.`}`;
     // The enrichment vessel tile — only while a batch is soaking.
     const enrichTile = !enrichIdle ? `
-      <div class="stack" style="gap:4px;align-items:center;min-width:120px;" data-enrich-vessel>
+      <div class="feeding-tile" data-enrich-vessel>
         ${this._npsEnrichVesselSvg(enrichState)}
         <small><strong>Enrichment</strong> · ${enrichSum.productName ? this._escape(enrichSum.productName) : "no bottle linked — pick one in Settings"}</small>
         <small>${enrichState.status === "enriching"
@@ -13665,7 +13673,7 @@ class OpenReefPanel extends HTMLElement {
         ? `~${this._escape(String(bottle.freshness.hoursLeft))} h of life left`
         : "clock at the 48 h rate";
     const fridgeTile = bottleMl > 0 ? `
-      <div class="stack" style="gap:4px;align-items:center;min-width:130px;" data-fridge-tile>
+      <div class="feeding-tile" data-fridge-tile>
         ${this._npsFridgeTileSvg(bottle, Number(reservoirSum.volumeMl) || 0)}
         <small><strong>Feeding bottle</strong> · in the fridge</small>
         <small>${Math.round(bottleMl)} ml · ${bottleLife}${bottle.lastLoadEnriched ? " · enriched" : ""}</small>
@@ -13678,42 +13686,35 @@ class OpenReefPanel extends HTMLElement {
     const enrichedShelfLine = reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
       ? `🧪 Enriched load — feed it out within ${this._escape(String(reservoirSum.shelfHours ?? 12))} h at room temp; the HUFA boost halves within a day warm.`
       : "";
-    // The DIY rig blueprint (settle & slug) — collapsed by default; the page
-    // stays informative, the how-to unfolds on demand.
+    const gap = Number(hatch.nextHatch?.supplyGapHours) || 0;
+    const supplyAlert = gap > 0 ? `<aside class="feeding-attention"><strong>A supply gap of about ${this._escape(String(gap))} h is projected</strong><p>Keep another suitable food available. Open the supply forecast for the timing and assumptions.</p></aside>` : "";
+    const containerCard = `<article class="feeding-tile" data-brine-container>
+      <div class="feeding-card-head">${this._npsBrineContainerSvg(reservoirSum, true)}<div class="culture-head"><strong>Brine container</strong><small>${containerFeed.available ? "Available to feed" : !enrichIdle ? "Enrichment in progress" : Number(reservoirSum.remainingMl) > 0 ? "Food unavailable" : "Empty"}</small></div></div>
+      ${this._feedingFacts([[containerFeed.available ? "Available / capacity" : "Stored / capacity", `${Math.round(Number(reservoirSum.remainingMl) || 0)} / ${Math.round(Number(reservoirSum.volumeMl) || 0)} ml`], ["Handling window left", reservoirSum.freshness?.hoursLeft != null ? `About ${reservoirSum.freshness.hoursLeft} h` : "Check batch details"]])}
+      <div class="feeding-next"><p class="eyebrow">Next action</p><strong>${containerFeed.available ? "Feed from the container" : !enrichIdle ? "Finish the enrichment cycle" : containerStale ? "Discard the old batch" : "Wait for a usable harvest"}</strong>
+        <small>${this._escape(containerFeed.pauseReason || (containerFeed.available ? "Check activity before use. Log the amount actually fed." : "Feed only after loading a fresh, usable batch."))}</small></div>
+      ${staleGateLine ? `<div class="feeding-alerts"><small>${staleGateLine}</small></div>` : ""}
+      ${this._feedingActions(hatchButtons, ["nps-hand-feed"])}
+      ${this._feedingDetails("hatchery-container-care", "Refrigerate, enrich & batch details", `<small>${hatchReservoirLine}</small>${enrichedShelfLine ? `<small>${enrichedShelfLine}</small>` : ""}<div class="button-row">${fridgeButton}</div>${this._feedingActions(hatchButtons, ["nps-enrich"])}`)}
+    </article>`;
     return `
-      <article class="panel stack">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">${compact ? "Brine hatchery" : "Today"}</p>
-          <div class="button-row">
-            ${compact ? `<button class="secondary compact-button" data-action="tab" data-id="hatchery">Open Brine hatchery →</button>` : ""}
-            <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Hatch settings</button>
-          </div>
-        </div>
+      <section class="feeding-section feeding-page">
+        <div class="feeding-section-head" data-hatchery-panel><h3>${compact ? "Brine hatchery" : "Hatcheries & available food"}</h3><div class="button-row">
+          ${compact ? `<button class="secondary compact-button" data-action="tab" data-id="hatchery">Open Brine hatchery →</button>` : ""}
+          <button class="secondary compact-button" data-action="tab" data-id="settings" data-section="hatchery" data-scroll="or-section-hatchery">Hatch settings</button>
+        </div></div>
         ${st.noticeScope === "hatchery" && st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}
         ${st.noticeScope === "hatchery" && st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
-        <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;">
-          <div style="display:flex;gap:14px;flex-wrap:wrap;">${vesselTiles}${enrichTile}${fridgeTile}</div>
-          ${this._npsBrineContainerSvg(reservoirSum)}
-          <div class="stack" style="gap:6px;flex:1;min-width:220px;">
-            ${nextHatchLine ? `<small>${nextHatchLine}</small>` : ""}
-            ${hatch.nextHatch?.assumption ? `<details><summary>Forecast assumptions</summary><small>${this._escape(hatch.nextHatch.assumption)}</small></details>` : ""}
-            ${staleGateLine ? `<small>${staleGateLine}</small>` : ""}
-            ${enrichedShelfLine ? `<small>${enrichedShelfLine}</small>` : ""}
-            ${learnedLine ? `<small>${learnedLine}</small>` : ""}
-            ${tempLine ? `<small>${tempLine}</small>` : ""}
-            ${moltLine ? `<small>${moltLine}</small>` : ""}
-            ${neededLine ? `<small>${neededLine}</small>` : ""}
-            ${rhythmLine ? `<small>${rhythmLine}</small>` : ""}
-            ${reminderDriftLine ? `<small>${reminderDriftLine}</small>` : ""}
-            <small>${hatchReservoirLine}</small>
-            <div class="button-row" style="flex-wrap:wrap;">${hatchButtons}</div>
-          </div>
-        </div>
-      </article>`;
+        ${supplyAlert}
+        ${temperatureAlert}
+        ${neededLine || reminderDriftLine ? `<aside class="feeding-attention">${neededLine ? `<small>${neededLine}</small>` : ""}${reminderDriftLine ? `<small>${reminderDriftLine}</small>` : ""}</aside>` : ""}
+        <div class="feeding-grid">${vesselTiles}${containerCard}${enrichTile}${fridgeTile}</div>
+        ${this._feedingDetails("hatchery-forecast", `Supply forecast & suggested spacing${gap > 0 ? ` · ${gap} h gap` : ""}`, `${nextHatchLine ? `<small>${nextHatchLine}</small>` : ""}${rhythmLine ? `<small>${rhythmLine}</small>` : ""}${hatch.nextHatch?.assumption ? `<details><summary>Forecast assumptions</summary><small>${this._escape(hatch.nextHatch.assumption)}</small></details>` : ""}${this._feedingActions(hatchButtons, ["nps-add-hatch-reminders"])}`)}
+        ${this._feedingDetails("hatchery-guidance", "Temperature, enrichment & learned clocks", [learnedLine, tempLine, moltLine].filter(Boolean).map((line) => `<small>${line}</small>`).join(""))}
+      </section>`;
   }
 
-  // The rig, live — the hero of the Hatchery tab: always open, the
-  // walkthrough one tap away. (It left the NPS tab in 0.7.71.)
+  // The rig and its walkthrough stay available below everyday hatchery work.
   _hatcheryRigPanel() {
 const rigSteps = [
       ["Air off", "shells float in the hatch cone; cysts and crud sink to the tips (a few minutes)."],
@@ -15298,6 +15299,52 @@ const rigSteps = [
     return ({ feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look" })[key] || key;
   }
 
+  _feedingDetails(key, title, body, expanded = false) {
+    if (!body) return "";
+    const open = this._feedingDetailsOpen?.[key] ?? expanded;
+    return `<details class="feeding-details" data-feeding-details="${this._escape(key)}"${open ? " open" : ""}>
+      <summary>${this._escape(title)}</summary><div class="feeding-detail-body">${body}</div></details>`;
+  }
+
+  _feedingOpen(key) {
+    const detail = [...(this.shadowRoot?.querySelectorAll?.("[data-feeding-details]") || [])]
+      .find((item) => item.dataset.feedingDetails === key);
+    if (!detail) return;
+    detail.open = true;
+    this._feedingDetailsOpen ||= {};
+    this._feedingDetailsOpen[key] = true;
+    detail.querySelector("summary")?.focus();
+    detail.scrollIntoView?.({ block: "nearest" });
+  }
+
+  _feedingFacts(items) {
+    return `<dl class="feeding-facts">${items.map(([label, value]) => `<div><dt>${this._escape(label)}</dt><dd>${this._escape(String(value ?? "—"))}</dd></div>`).join("")}</dl>`;
+  }
+
+  _feedingActions(buttons, names, other = false) {
+    const selected = buttons.filter((button) => names.some((name) => button.includes(`data-action="${name}"`)) !== other);
+    return selected.length ? `<div class="button-row">${selected.join("")}</div>` : "";
+  }
+
+  _feedingReview(key, label) {
+    return `<button class="secondary compact-button" data-action="feeding-open" data-id="${this._escape(key)}">${this._escape(label)}</button>`;
+  }
+
+  _cultureNextTitle(jar) {
+    if (!["producing", "establishing"].includes(jar.state?.status)) return "Prepare a clean vessel to seed";
+    if (jar.risk?.level === "act" || jar.state?.harvestBlocked) return "Check this culture before harvesting";
+    if (jar.kind === "phyto") {
+      if (jar.densityAdvice?.action === "split_now") return "Review a split and refill";
+      if ((jar.due || []).includes("refresh")) return "Review the backup refresh";
+      return "Check the colour today";
+    }
+    if (jar.feed?.pauseReason) return "Check the feed supply";
+    if ((jar.due || []).includes("restart")) return "Review a clean-vessel restart";
+    if ((jar.due || []).includes("harvest")) return "Review the harvest and refill";
+    if (jar.feedAdvice?.action === "feed_now") return "Check the water, then log a feed";
+    return "Observe before the next feed";
+  }
+
   _culturesTab() {
     this._culturesLoadSummary();
     const st = this._cultures;
@@ -15314,8 +15361,8 @@ const rigSteps = [
           <p class="eyebrow" style="margin:0 0 2px;">Cultures</p>
           <h2 style="margin:0 0 4px;">${onlyPhyto ? "Phyto, on its own clock" : anyPhyto ? "Rotifers, pods and phyto, on their own clocks" : "Rotifers and pods, on their own clocks"}</h2>
           <p class="muted" style="margin:0;">${onlyPhyto
-            ? "A vessel is a standing culture, not a batch: look at its colour, split it when it reads dark, give it a fresh vessel every few splits. Every clock here is real."
-            : "A jar is a standing population, not a batch: look at the water, feed by its colour, harvest a measured jug, restart before it crashes. Every clock here is real."}${anyPhyto ? " The phyto vessel is looked at and split — never fed." : ""}</p>
+            ? "Check the colour before splitting. Recipes, light and measurements are below each vessel."
+            : "Observe each culture, then choose its next action. Recipes and care details are below each vessel."}</p>
         </div>
         <div class="button-row">
           <button class="secondary compact-button" data-action="cultures-demo-toggle">${st.demo ? "Exit demo" : "Demo view"}</button>
@@ -15397,7 +15444,21 @@ const rigSteps = [
       worstGuard && worstGuard.status === "warn" && (!worstTemp || ["ok", "cool"].includes(worstTemp.status)) ? "warning"
         : !worstTemp ? "unknown" : worstTemp.status === "critical" || worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
       "settings", { section: "cultures", scroll: "or-section-cultures" });
-    const summaryCards = `<div class="summary-grid">${dueCard}${bottleCard}${jarsCard}${tempCard}</div>`;
+    const phytoAvailable = phytoBottles.reduce((ml, j) => ml + (["fresh", "aging"].includes(j.homeBottle.expiry?.status)
+      ? Math.max(0, Number(j.homeBottle.remainingMl) || 0) : 0), 0);
+    const phytoCard = anyPhyto ? this._missionSummaryCard("Phyto available", `${Math.round(phytoAvailable)} ml`,
+      phytoAvailable > 0 ? "Harvested food in usable fridge bottles" : "No harvested phyto available — check the cultures below",
+      phytoAvailable > 0 ? "ok" : "warning", "nps") : dueCard;
+    const summaryCards = `<div class="summary-grid feeding-summary">${bottleCard}${phytoCard}${tempCard}</div>`;
+    const careOverview = this._feedingDetails("cultures-care-overview", "Care schedule & species backups", `<div class="summary-grid">${dueCard}${jarsCard}</div>`);
+    const alerts = [
+      ...actJars.map((j) => `${j.name}: ${j.risk.reason}`),
+      ...(anyPhyto && phytoAvailable <= 0 ? ["No harvested phyto available. Leave growing cultures to mature; fill a fridge bottle after a healthy harvest."] : []),
+      ...(unbacked.length ? [`Backup needed: ${unbacked.map((b) => b.speciesName).join(", ")}. Split only a healthy, mature culture.`] : []),
+      ...(crashed ? [`${crashed} crashed culture${crashed === 1 ? " needs" : "s need"} attention — reseeding options are below the active cultures.`] : []),
+    ];
+    const attention = alerts.length ? `<aside class="feeding-attention"><strong>Needs attention</strong>${alerts.map((line) => `<p>${this._escape(line)}</p>`).join("")}</aside>` : "";
+
 
     // --- The jar strip -------------------------------------------------------
     const tiles = jars.map((j) => {
@@ -15422,14 +15483,15 @@ const rigSteps = [
       const tintSelect = running ? `
         <label class="culture-field" title="${this._escape(j.tintTarget ? `Aim for ${j.tintTarget}` : "")}">Water<select data-cultures-tint="${this._escape(j.id)}"><option value="" ${!j.tint ? "selected" : ""}>Not checked</option>
             ${(sum.tints || ["green", "clearing", "clear"]).map((t) => `<option value="${this._escape(t)}" ${t === (j.tint || "") ? "selected" : ""}>${this._escape(t)}</option>`).join("")}
-          </select></label>${j.hasBottle && status === "producing" ? `
+          </select></label>` : "";
+      const harvestFields = j.hasBottle && status === "producing" ? `
         <label class="culture-field" title="Where this crop goes. The jar's default is set in Culture settings; the enrich tick sends it to the soak first.">Harvest to<select data-cultures-harvest-to="${this._escape(j.id)}">
             <option value="bottle" ${(j.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle</option>
             <option value="tank" ${j.harvestTo === "tank" ? "selected" : ""}>straight into the tank</option>
           </select></label>
         <div class="culture-field"><span></span><label class="culture-tick" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done."><input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.pauseReason || (sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none") ? "disabled" : ""}> enrich this crop</label></div>
         ${sum.enrichment?.pauseReason ? `<small class="awc-hint">${this._escape(sum.enrichment.pauseReason)}</small>` : ""}
-        <label class="culture-field" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="${(j.harvestTo || "bottle") !== "tank" ? this._escape(String(j.harvestGuide?.totalMl || "")) : ""}" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : ""}` : "";
+        <label class="culture-field" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="${(j.harvestTo || "bottle") !== "tank" ? this._escape(String(j.harvestGuide?.totalMl || "")) : ""}" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : "";
       // Refill with phyto (Stage C, doc §5.5): a home bottle on the shelf or a
       // vessel reading green or dark feeds the cone in its own refill — the jug
       // goes three-way at the cone's salinity; blank ml = one tint of the jar.
@@ -15499,7 +15561,7 @@ const rigSteps = [
       const buttons = [
         !running ? `<button class="secondary compact-button" data-action="cultures-seed" data-id="${this._escape(j.id)}">Seed from a starter</button>` : "",
         reseed,
-        running ? `<button class="secondary compact-button" data-action="cultures-looked" data-id="${this._escape(j.id)}" title="Logs the water you saw (and an egg count if you typed one) — nothing else moves: no feed, no phyto, the reminders stand">Looked</button>` : "",
+        running ? `<button class="primary compact-button" data-action="cultures-looked" data-id="${this._escape(j.id)}" title="Logs the water you saw (and an egg count if you typed one) — nothing else moves: no feed, no phyto, the reminders stand">Log observation</button>` : "",
         running && !j.feed?.pauseReason ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
         running && due.includes("feed") ? `<button class="secondary compact-button" data-action="cultures-skip-feed" data-id="${this._escape(j.id)}" title="Looked, not feeding: logs the water and skips this feed — the reminder holds until the next slot, no phyto moves, and the clearing time stays honest">Skip feed</button>` : "",
         status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="${j.feed?.pauseReason ? "cultures-harvested-only" : "cultures-harvested"}" data-id="${this._escape(j.id)}" title="Logs today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}${j.feed?.pauseReason ? "; the linked food is unavailable" : " and a feed"}">${j.feed?.pauseReason ? "Harvested" : "Harvested + fed"}</button>` : "",
@@ -15508,30 +15570,45 @@ const rigSteps = [
         status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a second culture; check the dates to stagger its restart">Split into B</button>` : "",
         running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${this._escape(j.id)}">Crashed</button>` : "",
         status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${this._escape(j.id)}" title="A picture of this jar's story — species, age, generation, the restart ring, the last 14 days of water">Share card</button>` : "",
-      ].filter(Boolean).join("");
-      // The tile (0.7.163): the jar and its name centred, then three
-      // left-aligned blocks — the water and the crop, the notes, the
-      // observations — and the actions. Same facts, one column, one rhythm.
+      ].filter(Boolean);
+      // Daily observations stay visible; recipes, care and history keep
+      // their original controls together in separate disclosures.
       const withdrawalWarning = j.harvestGuide?.warning ? `<small style="color:var(--warning-color,#f5a524)">${this._escape(j.harvestGuide.warning)}</small>` : "";
-      const notes = [fillLine, advice, skippedLine, risk, guide, phytoLine, withdrawalWarning, learnedLines, lineageLine, guardLine, tempLine].filter(Boolean).join("");
+      const everyday = ["cultures-looked", "cultures-fed", "cultures-skip-feed"];
+      const harvestActions = ["cultures-harvested", "cultures-harvested-only"];
+      const careActions = ["cultures-restart", "cultures-water-change", "cultures-split", "cultures-crash"];
+      const otherActions = [...everyday, ...harvestActions, ...careActions];
       return `
-        <div class="culture-tile" data-culture="${this._escape(j.id)}">
-          <div class="culture-jar">${this._culturesJarSvg(j)}</div>
-          <div class="culture-head">
-            <small><strong>${this._escape(j.name)}</strong> <span class="muted">· ${this._escape(String(j.volumeL))} L</span></small>
-            <small>${this._escape(j.speciesName)}${j.seededFrom ? ` · from ${this._escape((jars.find((x) => x.id === j.seededFrom) || {}).name || j.seededFrom)}` : ""}</small>
-            <small>${statusLine}</small>
-            ${chips ? `<div class="pill-row">${chips}</div>` : ""}
+        <article class="culture-tile" data-culture="${this._escape(j.id)}">
+          <div class="feeding-card-head">
+            <div class="culture-jar">${this._culturesJarSvg(j)}</div>
+            <div class="culture-head">
+              <strong>${this._escape(j.name)}</strong>
+              <small>${this._escape(j.speciesName)}</small>
+              <small>${statusLine}</small>
+              ${chips ? `<div class="pill-row">${chips}</div>` : ""}
+            </div>
           </div>
-          ${tintSelect || phytoRow ? `<div class="culture-form">${tintSelect}${phytoRow}</div>` : ""}
-          ${notes ? `<div class="culture-notes">${notes}</div>` : ""}
-          ${signs || splitTick ? `<div class="culture-form">${signs}${splitTick}</div>` : ""}
-          <div class="button-row">${buttons}</div>
-        </div>`;
-    }).join("");
+          ${this._feedingFacts([["Working volume", `${j.volumeL} L`], ["Last water reading", j.tint || "Not checked"]])}
+          <div class="feeding-next"><p class="eyebrow">Next action</p><strong>${this._escape(this._cultureNextTitle(j))}</strong>${advice}${skippedLine}</div>
+          <div class="feeding-alerts">${risk}${guardLine}${tempLine}${j.feed?.pauseReason ? `<small class="awc-hint">${this._escape(j.feed.pauseReason)}</small>` : ""}</div>
+          ${tintSelect ? `<div class="culture-form">${tintSelect}</div>` : ""}
+          ${this._feedingActions(buttons, everyday)}
+          ${status === "producing" ? `<div class="button-row">${this._feedingReview(`culture-${j.id}-recipe`, "Review harvest & refill")}</div>` : ""}
+          ${!running ? `<div class="culture-notes">${fillLine}</div>${this._feedingActions(buttons, otherActions, true)}` : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-recipe`, "Harvest & refill recipe",
+            `<div class="culture-notes">${guide}${withdrawalWarning}</div><div class="culture-form">${harvestFields}${phytoRow}</div>${phytoLine}${this._feedingActions(buttons, harvestActions)}`, due.includes("harvest")) : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-care`, "Signs, water care & backup",
+            `<div class="culture-form">${signs}${splitTick}</div>${this._feedingActions(buttons, careActions)}`, due.includes("restart") || due.includes("waterChange")) : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-history`, "Growth & culture history",
+            `<div class="culture-notes">${learnedLines}${lineageLine}</div>${this._feedingActions(buttons, otherActions, true)}`) : ""}
+        </article>`;
+    });
+    const activeTiles = tiles.filter((_, i) => ["producing", "establishing"].includes(jars[i].state?.status)).join("");
+    const inactiveTiles = tiles.filter((_, i) => !["producing", "establishing"].includes(jars[i].state?.status)).join("");
     const anyRotifers = jars.some((j) => j.hasBottle);
     const bottleTile = anyRotifers ? `
-      <div class="stack" style="gap:4px;align-items:center;min-width:150px;" data-culture-bottle>
+      <div class="feeding-stock-row" data-culture-bottle>
         <svg viewBox="0 0 104 124" style="width:96px;flex:0 0 auto;" role="img" aria-label="Rotifer bottle — ${this._escape(bottle.status || "empty")}">
           <rect x="40" y="6" width="24" height="12" rx="3" fill="#546e7a"></rect>
           <path d="M 36 18 H 68 V 30 Q 78 36 78 46 V 104 Q 78 112 70 112 H 34 Q 26 112 26 104 V 46 Q 26 36 36 30 Z" fill="rgba(255,255,255,0.04)"
@@ -15541,18 +15618,18 @@ const rigSteps = [
           <text x="52" y="70" text-anchor="middle" font-size="14">❄</text>
           <text x="52" y="122" text-anchor="middle" font-size="10" fill="#90a4ae">${this._escape(bottle.status === "empty" || !bottle.status ? "empty" : `${Math.round(bottle.remainingMl || 0)} ml`)}</text>
         </svg>
-        <small><strong>Rotifer bottle</strong> · fridge${bottle.enriched ? " · enriched" : ""}</small>
+        <div class="stack tight"><small><strong>Rotifer bottle</strong> · fridge${bottle.enriched ? " · enriched" : ""}</small>
         ${bottle.boost?.status === "gutloaded" ? `<small style="color:#7e57c2">enrichment estimate · ~${this._escape(String(bottle.boost.hoursLeft))} h remaining</small>`
           : bottle.boost?.status === "faded" ? `<small class="muted">estimated enrichment window passed — check viability; nutrient content is not measured</small>` : ""}
         <small>${bottle.status === "fresh" ? `fresh · ~${this._escape(String(bottle.hoursLeft))} h left` : bottle.status === "aging" ? `<span style="color:var(--warning-color,#f5a524)">aging · ~${this._escape(String(bottle.hoursLeft))} h</span>` : bottle.status === "stale" ? `<span style="color:var(--error-color,#e5484d)">stale — tip it out</span>` : `storage estimate: up to ${this._escape(String(bottle.shelfDays || 5))} days at about 4 °C; check activity before use`}</small>
-        <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
+        </div><div class="button-row">
           ${Number(bottle.remainingMl) > 0 && bottle.status !== "stale" ? `<button class="secondary compact-button" data-action="cultures-bottle-fed">Fed ${this._escape(String(Math.min(bottle.remainingMl, bottle.doseMl || 20)))} ml</button>` : ""}
           ${Number(bottle.remainingMl) > 0 ? `<button class="danger-text compact-button" data-action="cultures-bottle-empty">Empty</button>` : ""}
         </div>
       </div>` : "";
     const soak = sum.enrichment?.soak || {};
     const soakTile = soak.status && soak.status !== "none" ? `
-      <div class="stack" style="gap:4px;align-items:center;min-width:150px;" data-culture-soak>
+      <div class="feeding-tile" data-culture-soak>
         <svg viewBox="0 0 104 124" style="width:96px;flex:0 0 auto;" role="img" aria-label="Enrichment soak — ${this._escape(soak.status)}">
           <path d="M 34 14 H 70 V 40 L 90 104 Q 92 112 84 112 H 20 Q 12 112 14 104 L 34 40 Z" fill="rgba(126,87,194,0.12)" stroke="${soak.status === "fading" ? "#f5a524" : "#7e57c2"}" stroke-width="2.5"></path>
           <text x="52" y="82" text-anchor="middle" font-size="16" fill="#7e57c2">${soak.status === "soaking" ? `${this._escape(String(soak.percent ?? 0))}%` : "✓"}</text>
@@ -15568,25 +15645,13 @@ const rigSteps = [
         </div>
       </div>` : "";
     const strip = !st.summary ? `
-      <article class="panel stack">
-        <p class="eyebrow" style="margin:0;">The rack</p>
-        <p class="muted" style="margin:0;">${st.error ? "The rack could not be loaded — Refresh to try again." : "Reading the jars…"}</p>
-      </article>` : jars.length ? `
-      <article class="panel stack">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-          <p class="eyebrow" style="margin:0;">The rack</p>
-          <div class="button-row">
-            <button class="secondary compact-button" data-action="cultures-add-reminders" title="Per-jar reminders in Maintenance — feed / harvest / restart / water change for the animals, look / split / fresh vessel for the phyto — anchored on each jar's real stamps; and the daily question on your phone, with buttons">Sync culture reminders</button>
-          </div>
-        </div>
-        <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;justify-content:center;">${tiles}${soakTile}${bottleTile}</div>
-      </article>` : `
-      <article class="panel stack">
-        <p class="eyebrow" style="margin:0;">The rack</p>
-        <p class="muted" style="margin:0;">No jars yet. Add one in Culture settings — a 4 L rotifer jar at 2.5 L is the classic start; the pods can wait until the rotifers are steady. A phyto vessel stands on its own: the 4 L container, the starter at 1:4, a lamp or a window.</p>
-        <div class="button-row"><button class="secondary compact-button" data-action="cultures-add-jar">Add a rotifer jar</button><button class="secondary compact-button" data-action="cultures-add-phyto">Add a phyto vessel</button></div>
-      </article>`;
-
+      <article class="panel stack"><h3>The rack</h3><p class="muted">${st.error ? "The rack could not be loaded — Refresh to try again." : "Reading the jars…"}</p></article>`
+      : jars.length ? `<div class="feeding-section">
+        <div class="feeding-section-head"><h3>Active cultures</h3><button class="secondary compact-button" data-action="cultures-add-reminders">Sync culture reminders</button></div>
+        ${activeTiles ? `<div class="feeding-grid">${activeTiles}</div>` : `<p class="muted">No active cultures yet. Open an inactive vessel below to seed it.</p>`}
+        ${this._feedingDetails("cultures-inactive", `Inactive cultures · ${tiles.length - jars.filter((j) => ["producing", "establishing"].includes(j.state?.status)).length}${crashed ? ` · ${crashed} crashed` : ""}`, inactiveTiles ? `<div class="feeding-grid">${inactiveTiles}</div>` : "", !activeTiles)}
+      </div>` : `<article class="panel stack"><h3>The rack</h3><p class="muted">No jars yet. Add a culture to track observations, measured harvests and the food available to use.</p>
+        <div class="button-row"><button class="secondary compact-button" data-action="cultures-add-jar">Add a rotifer jar</button><button class="secondary compact-button" data-action="cultures-add-phyto">Add a phyto vessel</button></div></article>`;
     // --- The species notes + the journal --------------------------------------
     const speciesPresent = [...new Set(jars.map((j) => j.species))];
     const notes = speciesPresent.length ? `
@@ -15678,16 +15743,17 @@ const rigSteps = [
     const timelinePanel = st.summary && jars.length ? this._culturesTimelinePanel() : "";
 
     return `
-      <section class="stack">
+      <section class="stack feeding-page">
         ${head}
         ${notices}
         ${summaryCards}
+        ${attention}
         ${welcome}
         ${strip}
-        ${timelinePanel}
-        ${rigPanel}
-        ${notes}
-        ${journal}
+        ${bottleTile || soakTile ? `<section class="feeding-section"><div class="feeding-section-head"><h3>Food & enrichment</h3></div>${bottleTile}${soakTile ? `<div class="feeding-grid">${soakTile}</div>` : ""}</section>` : ""}
+        ${careOverview}
+        ${this._feedingDetails("cultures-journal", "Culture timeline & journal", timelinePanel + journal)}
+        ${this._feedingDetails("cultures-rig", "Rack diagram & care guides", rigPanel + notes)}
       </section>`;
   }
 
@@ -15772,8 +15838,8 @@ const rigSteps = [
     }).join(" ");
     const cycle = s.cycle || {};
     const statusLine = ({
-      producing: `<strong>producing</strong> · cycle day ${esc(Math.round(cycle.day || 0))} of ~${esc(Math.round(cycle.ofDays || 8))} · ${esc(s.workingL)} L working`,
-      establishing: `greening · day ${esc(Math.round(s.ageDays || 0))} of ~${esc(Math.round(j.firstHarvestDays || 7))} · ${esc(s.workingL)} L working`,
+      producing: `<strong>${s.harvestBlocked ? "check culture" : j.tint === "dark" ? "dark" : "growing"}</strong> · cycle day ${esc(Math.round(cycle.day || 0))}`,
+      establishing: `growing · day ${esc(Math.round(s.ageDays || 0))}`,
       crashed: `<span style="color:var(--error-color,#e5484d)">crashed</span> at day ${esc(Math.round(s.ageDays || 0))}`,
     })[status] || "empty — seed it when the starter lands";
     const hb = j.homeBottle || {};
@@ -15785,7 +15851,8 @@ const rigSteps = [
     const lookForm = running ? `
         <label class="culture-field" title="${esc(j.tintTarget ? `Against a white card — ${j.tintTarget}` : "Against a white card")}">Colour<select data-cultures-tint="${esc(j.id)}"><option value="" ${!j.tint ? "selected" : ""}>Not checked</option>
             ${tints.map((t) => `<option value="${esc(t)}" ${t === (j.tint || "") ? "selected" : ""}>${esc(t)}</option>`).join("")}
-          </select></label>
+          </select></label>` : "";
+    const secchiField = running ? `
         <label class="culture-field" title="Optional: the depth at which a mark on a white stick disappears in the culture. Nothing is inferred from it yet — the readings accrue for the printable stick (Stage C).">Secchi<span class="unit"><input type="number" min="0" max="60" step="0.5" placeholder="cm" data-cultures-secchi="${esc(j.id)}"><small class="muted">cm · optional</small></span></label>` : "";
     const canSplit = running && !s.harvestBlocked;
     const drips = Array.isArray(j.drips) ? j.drips : [];
@@ -15801,7 +15868,7 @@ const rigSteps = [
         <label class="culture-field" title="What comes out — the split percentage of the working volume by default (${esc(Math.round(guide.removalPct || 0))} %). More than 70 % leaves a thin seed.">Out<span class="unit"><input type="number" min="0" step="10" data-cultures-split-ml="${esc(j.id)}" value="${esc(Math.round(guide.outMl || 0))}"><small class="muted">ml</small></span></label>
         ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
         ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
-        ${drips.length ? destRow("drip", "→ drip", `Load the drip's jar (${drips.map((d) => d.name).join(", ")}) — its day clock restarts; the jar takes what fits.`, false, "", "the jar's fill", true) : ""}
+        ${drips.length ? destRow("drip", "→ drip", `Load the drip's jar (${drips.map((d) => d.name).join(", ")}) — the oldest remaining load keeps its clock; the jar takes what fits.`, false, "", "the jar's fill", true) : ""}
         ${cones.length ? destRow("cone", `→ ${esc(cones.length === 1 ? cones[0].name : "cone")}`, `Feed a rotifer or pod jar straight from the vessel — one tint of it (${cones.map((c) => `${c.name} ~${c.doseMl} ml`).join(", ")}) as the default; refused while that jar is still green (one big dose is the classic rotifer crash). Under 30 % of the working volume this is a draw: the vessel keeps its colour and its split clock.`, false, cones[0].doseMl, cones[0].stillGreen ? " (still green — it will refuse)" : "") : ""}
         ${cones.length > 1 ? `<div class="culture-field"><span></span><select data-cultures-dest-cone-jar="${esc(j.id)}" style="width:auto;">${cones.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(c.tint || "no tint")}</option>`).join("")}</select></div>` : ""}
         ${canB ? (refresh.backupId
@@ -15884,7 +15951,7 @@ const rigSteps = [
       !running ? `<button class="secondary compact-button" data-action="cultures-seed-phyto" data-id="${esc(j.id)}" data-recipe="kit" title="The kit's straight ${esc(kit.workingL || 3.5)} L">Seed at ${esc(kit.workingL || 3.5)} L</button>` : "",
       !running && j.reseedFromBottle ? `<button class="secondary compact-button" data-action="cultures-seed-bottle" data-id="${esc(j.id)}" title="The fridge bottle is under a week old — a legitimate starter">Seed from the fridge bottle</button>` : "",
       ...(!running ? (j.reseedFrom || []).map((from) => `<button class="secondary compact-button" data-action="cultures-seed" data-id="${esc(j.id)}" data-from="${esc(from)}">Seed from ${esc((jars.find((x) => x.id === from) || {}).name || from)}</button>`) : []),
-      running ? `<button class="${due.includes("look") ? "primary" : "secondary"} compact-button" data-action="cultures-looked" data-id="${esc(j.id)}" title="Logs the colour (and a Secchi reading if you typed one) — nothing else moves">Looked</button>` : "",
+      running ? `<button class="primary compact-button" data-action="cultures-looked" data-id="${esc(j.id)}" title="Logs the colour (and a Secchi reading if you typed one) — nothing else moves">Log observation</button>` : "",
       running ? `<button class="${due.includes("harvest") && canSplit ? "primary" : "secondary"} compact-button" data-action="cultures-split-phyto" data-id="${esc(j.id)}" title="${canSplit ? "The harvest: out to the places ticked, fresh water and f/2 in, the colour back to pale" : "Blocked — off-colour or a sign on the record; a look that says green or dark unblocks it, a fresh vessel is the way out"}" ${canSplit ? "" : "disabled"}>Split</button>` : "",
       running ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-fresh-vessel" data-id="${esc(j.id)}" title="The same split, the seed into a sterilised container of new water + f/2 — every ${esc(s.restartCycles || 4)} splits, or on a sign${s.harvestBlocked ? "; an off-colour crop goes to waste, never the bottle" : ""}">Fresh vessel</button>` : "",
       running && refresh.isBackup && refresh.available ? `<button class="${due.includes("refresh") ? "primary" : "secondary"} compact-button" data-action="cultures-refresh-backup" data-id="${esc(j.id)}" title="A small split of ${esc(refresh.fromName)}: ${esc(refresh.starterMl || 250)} ml of its crop into this bottle with fresh water and f/2 — the old culture to waste">Refresh from ${esc(refresh.fromName)}</button>` : "",
@@ -15894,22 +15961,33 @@ const rigSteps = [
       running ? `<button class="secondary compact-button" data-action="cultures-index-open" data-id="${esc(j.id)}" title="Photograph the vessel against a white card, tap the culture, tap the card — the index is the culture's density against the card in the same light">Photo index</button>` : "",
       running && hasCamera ? `<button class="secondary compact-button" data-action="cultures-index-camera" data-id="${esc(j.id)}" title="The same two taps on the camera's live frame">Camera index</button>` : "",
       running && idx.sensor?.bound ? `<button class="secondary compact-button" data-action="cultures-index-blank" data-id="${esc(j.id)}" title="With clean water (or the empty shroud) in front of the colour sensor: its channels now become the blank every daily reading is measured against${idx.sensor.baseline?.at ? ` — last set ${esc(this._formatActivityTime(idx.sensor.baseline.at))}` : ""}">Set blank</button>` : "",
-    ].filter(Boolean).join("");
-    const notes = [advice, risk, lightLine, jug, warn, sizing, seedLine, bottleLine, refreshLine, nutrient, starterLine, learnedLine, applyLines, secchiLine, indexLine, estimateLine, phLine, lineageLine, tempLine].filter(Boolean).join("");
+    ].filter(Boolean);
+    const dailyActions = ["cultures-looked"];
+    const recipeActions = ["cultures-split-phyto", "cultures-fresh-vessel", "cultures-refresh-backup"];
+    const measureActions = ["cultures-share-card", "cultures-print-secchi", "cultures-index-open", "cultures-index-camera", "cultures-index-blank"];
+    const careActions = ["cultures-crash"];
+    const knownActions = [...dailyActions, ...recipeActions, ...measureActions, ...careActions];
     return `
-        <div class="culture-tile" data-culture="${esc(j.id)}" data-culture-kind="phyto">
-          <div class="culture-jar">${this._culturesPhytoSvg(j)}</div>
-          <div class="culture-head">
-            <small><strong>${esc(j.name)}</strong> <span class="muted">· ${esc(j.volumeL)} L ${j.vesselKind === "reactor" ? "reactor" : "vessel"}</span></small>
-            <small>${esc(j.speciesName)}${j.seededFrom && j.seededFrom !== "bottle" ? ` · from ${esc((jars.find((x) => x.id === j.seededFrom) || {}).name || j.seededFrom)}` : j.seededFrom === "bottle" ? " · from the fridge bottle" : ""}</small>
-            <small>${statusLine}</small>
-            ${chips ? `<div class="pill-row">${chips}</div>` : ""}
+        <article class="culture-tile" data-culture="${esc(j.id)}" data-culture-kind="phyto">
+          <div class="feeding-card-head">
+            <div class="culture-jar">${this._culturesPhytoSvg(j)}</div>
+            <div class="culture-head"><strong>${esc(j.name)}</strong><small>${esc(j.speciesName)}</small><small>${statusLine}</small>
+              ${chips ? `<div class="pill-row">${chips}</div>` : ""}
+            </div>
           </div>
+          ${this._feedingFacts([["Working / capacity", `${s.workingL || 0} / ${j.volumeL} L`], ["Fridge bottle", Number(hb.remainingMl) > 0 ? `${Math.round(hb.remainingMl)} ml${hb.expiry?.status === "expired" ? " · expired" : ""}` : "Empty"]])}
+          <div class="feeding-next"><p class="eyebrow">Next action</p><strong>${esc(this._cultureNextTitle(j))}</strong>${advice}</div>
+          <div class="feeding-alerts">${risk}${tempLine}${light.status === "act" || light.status === "watch" ? lightLine : ""}</div>
           ${lookForm || seedCard ? `<div class="culture-form">${lookForm}${seedCard}</div>` : ""}
-          ${notes ? `<div class="culture-notes">${notes}</div>` : ""}
-          ${splitForm || signs ? `<div class="culture-form">${splitForm}${signs}</div>` : ""}
-          <div class="button-row">${buttons}</div>
-        </div>`;
+          ${this._feedingActions(buttons, dailyActions)}
+          ${!running ? `<div class="culture-notes">${seedLine}${nutrient}${bottleLine}</div>${this._feedingActions(buttons, knownActions, true)}` : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-recipe`, "Split & refill recipe",
+            `<div class="culture-notes">${jug}${warn}${refreshLine}${nutrient}</div><div class="culture-form">${splitForm}</div>${this._feedingActions(buttons, recipeActions)}`, due.some((d) => ["harvest", "restart", "refresh"].includes(d))) : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-growth`, "Light, growth & supply",
+            `<div class="culture-notes">${lightLine}${sizing}${bottleLine}${starterLine}${learnedLine}${applyLines}${phLine}</div>`) : ""}
+          ${this._feedingDetails(`culture-${j.id}-measurements`, "Measurements, signs & history",
+            `<div class="culture-form">${secchiField}${signs}</div><div class="culture-notes">${secchiLine}${indexLine}${estimateLine}${lineageLine}</div>${running ? this._feedingActions(buttons, dailyActions).replace('>Log observation</button>', '>Log measurement</button>') : ""}${this._feedingActions(buttons, measureActions)}${this._feedingActions(buttons, careActions)}`)}
+        </article>`;
   }
 
   _culturesSettings() {
@@ -16143,7 +16221,7 @@ const rigSteps = [
         : temp.available ? `${temp.tempC} °C → rough estimate ~${temp.expectedHours} h` : eggName}`,
       learned.available && Math.abs(Number(learned.hours) - batchHours) >= 2 ? "warning" : "ok",
       "settings", { section: "hatchery", scroll: "or-section-hatchery" });
-    const summaryCards = `<div class="summary-grid">${batchCard}${contCard}${nextCard}${clockCard}</div>`;
+    const summaryCards = `<div class="summary-grid feeding-summary">${contCard}${batchCard}${nextCard}</div>`;
 
     // --- The hatch journal: every batch's story, honestly ------------------
     const history = Array.isArray(hatch.history) ? hatch.history : [];
@@ -16234,7 +16312,7 @@ const rigSteps = [
         <div style="flex:1;min-width:260px;">
           <p class="eyebrow" style="margin:0 0 2px;">Brine hatchery</p>
           <h2 style="margin:0 0 4px;">Live brine, on schedule</h2>
-          <p class="muted" style="margin:0;">Hatch, harvest, hold, enrich — every clock on this page is real, and the pushes land at the hour that matters. No NPS corals required.</p>
+          <p class="muted" style="margin:0;">What is available, which batch needs you, and when to start the next hatch. No NPS corals required.</p>
         </div>
         <div class="button-row">
           <button class="secondary compact-button" data-action="nps-refresh">Refresh</button>
@@ -16246,7 +16324,9 @@ const rigSteps = [
       ${st.message && st.noticeScope !== "hatchery" ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
       ${st.error && st.noticeScope !== "hatchery" ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
-    return `<section class="stack">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}${this._hatcheryRigPanel()}${journal}${reminders}</section>`;
+    return `<section class="stack feeding-page">${head}${notices}${welcome}${summaryCards}${this._hatcheryPanel(false)}
+      ${this._feedingDetails("hatchery-rig", "Live rig diagram & harvest walk-through", this._hatcheryRigPanel())}
+      ${this._feedingDetails("hatchery-journal", "Hatch journal, clock & reminders", clockCard + journal + reminders)}</section>`;
   }
 
   _npsTab() {
@@ -35575,6 +35655,62 @@ ${parts.buttons}
         .culture-notes { display: grid; gap: 3px; padding: 6px 0; border-top: 1px solid #1f2f42; border-bottom: 1px solid #1f2f42; }
         .culture-notes small { line-height: 1.3; }
         .culture-tile .button-row { justify-content: flex-start; gap: 6px; flex-wrap: wrap; }
+        /* Live food: everyday observations first, recipes and background on demand. */
+        .feeding-page { gap: 22px; }
+        .feeding-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
+        .feeding-grid > *, .feeding-card-head > *, .feeding-facts > div { min-width: 0; }
+        .feeding-tile, .feeding-page .culture-tile { width: auto; max-width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 20px; border: 1px solid #304453; border-radius: 14px; background: #182735; }
+        .feeding-card-head { display: flex; align-items: center; gap: 14px; }
+        .feeding-card-head > svg, .feeding-card-head .culture-jar { width: 72px; flex: 0 0 72px; }
+        .feeding-card-head svg { max-width: 100%; height: auto; }
+        .feeding-card-head .culture-head { text-align: left; gap: 4px; }
+        .feeding-card-head .culture-head strong { font-size: 18px; color: #e4eef6; }
+        .feeding-card-head .pill-row { justify-content: flex-start; }
+        .feeding-page small, .feeding-detail-body small { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+        .feeding-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+        .feeding-facts dt { color: #adc0d0; font-size: 12px; margin-bottom: 4px; }
+        .feeding-facts dd { font-size: 15px; font-weight: 700; margin: 0; overflow-wrap: anywhere; }
+        .feeding-next { display: grid; gap: 5px; padding: 14px; background: #101e29; border-radius: 9px; }
+        .feeding-next .eyebrow { margin: 0; font-size: 11px; }
+        .feeding-next > strong { font-size: 16px; }
+        .feeding-next small { color: #b0c0cd; }
+        .feeding-attention { display: grid; gap: 8px; border: 1px solid #73613d; background: #302a20; padding: 16px 20px; border-radius: 12px; }
+        .feeding-attention p, .feeding-attention small { color: #ffcf83; }
+        .feeding-alerts { display: grid; gap: 6px; }
+        .feeding-alerts:empty { display: none; }
+        .feeding-details { border-top: 1px solid #304453; min-width: 0; }
+        .feeding-details > summary { cursor: pointer; padding: 13px 0; min-height: 44px; font-size: 14px; font-weight: 700; color: #dcecff; overflow-wrap: anywhere; }
+        .feeding-details > summary:focus-visible, .feeding-page button:focus-visible { outline: 2px solid #67dcef; outline-offset: 3px; border-radius: 4px; }
+        .feeding-detail-body { display: grid; gap: 14px; padding: 3px 0 6px; min-width: 0; }
+        .feeding-detail-body > .panel { background: transparent; border: 0; padding: 0; min-width: 0; }
+        .feeding-page > .feeding-details, .feeding-section > .feeding-details { border: 1px solid #304453; border-radius: 12px; padding: 0 20px; background: #182735; }
+        .feeding-page > .feeding-details > .feeding-detail-body, .feeding-section > .feeding-details > .feeding-detail-body { padding-bottom: 18px; }
+        .feeding-section { display: grid; gap: 16px; min-width: 0; }
+        .feeding-section-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+        .feeding-section-head h3 { margin: 0; font-size: 20px; }
+        .feeding-summary.summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .feeding-page .summary-card { border-radius: 12px; }
+        .feeding-page .summary-card strong { font-size: clamp(22px, 2.2vw, 30px); overflow-wrap: anywhere; }
+        .feeding-page .culture-form { gap: 10px; }
+        .feeding-page .culture-field { grid-template-columns: 82px minmax(0, 1fr); font-size: 14px; }
+        .feeding-page .culture-field select, .feeding-page .culture-field input[type="number"] { min-height: 40px; font-size: 14px; max-width: 100%; }
+        .feeding-page .culture-field .unit, .feeding-page .culture-tick { flex-wrap: wrap; }
+        .feeding-page .culture-notes { border: 0; padding: 0; gap: 12px; }
+        .feeding-page .compact-button { min-height: 40px; font-size: 13px; }
+        .feeding-page .culture-signs .compact-button { min-height: 36px; }
+        .feeding-progress { height: 6px; border-radius: 8px; background: #314552; overflow: hidden; }
+        .feeding-progress > span { display: block; height: 100%; background: #67dcef; }
+        .feeding-stock-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; padding: 18px 20px; border: 1px solid #304453; border-radius: 12px; background: #182735; }
+        .feeding-stock-row > svg { width: 60px; flex: 0 0 60px; }
+        .feeding-stock-row > .stack { flex: 1; min-width: 180px; }
+        @media (max-width: 1150px) { .feeding-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 700px) {
+          .feeding-grid, .feeding-summary.summary-grid { grid-template-columns: minmax(0, 1fr); }
+          .feeding-tile, .feeding-page .culture-tile { padding: 16px; }
+          .feeding-page .summary-grid { grid-template-columns: minmax(0, 1fr); }
+          .feeding-page .compact-button, .feeding-page .culture-signs .compact-button { min-height: 44px; }
+          .feeding-page .culture-field select, .feeding-page .culture-field input[type="number"] { min-height: 44px; }
+        }
         .culture-tl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 2px 10px; align-items: center; }
         .culture-tl svg { width: 100%; height: auto; display: block; }
         .culture-tl-name { font-size: 12px; line-height: 1.3; min-width: 0; }
