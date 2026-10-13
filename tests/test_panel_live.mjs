@@ -749,7 +749,7 @@ test("the modal's 'What moves it' names the daily cycle, every coupling aimed at
     const bare = await live(config(), states(), {}, { tank_temp: ramp(25.0, 25.3, 24 * 60, 48) });
     bare._trend = { sensorId: "tank_temp", entityId: "sensor.tank_temp", range: "24h", loading: false, error: "", points: bare._liveSparks.tank_temp };
     const b = bare._trendModal();
-    assert(b.includes("gathering a typical day") && b.includes("<b>Room temperature</b> · waiting for a typical day"), "honest while gathering");
+    assert(b.includes("typical-day history has not loaded") && b.includes("<b>Room temperature</b> · comparison needs this sensor's typical day"), "honest while gathering");
     // Hand-logged parameters get no drivers section.
     bare._trend = { source: "manual", sensorId: "alkalinity", entityId: "", range: "30d", loading: false, error: "", points: [], manualMeta: { label: "Alkalinity", unit: "dKH", min: 7, max: 11 }, digits: 2 };
     assert(!bare._trendModal().includes("What moves it"));

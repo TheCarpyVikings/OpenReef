@@ -445,3 +445,21 @@ with per-sensor floors as the coarse layer under it.
   hour, while a real reversal still does; the floors by sensor kind and a perfect line's zero error.
 - **Consequence**: fewer arrows on a noisy probe — the honest count. If a probe is so noisy that
   real moves never clear the gate, the fix is the probe's own smoothing in HA, not a looser gate.
+
+## 15. Typical-day loading investigation — v0.7.217 (2026-10-13)
+
+The pH trend could keep saying “gathering a typical day — four days of history needed” despite weeks of ordinary chart history. Reece opens it through Watch / Live Stats.
+
+Confirmed in the code and reproduced with delayed Home Assistant responses:
+
+- The modal loaded its chart but relied on the Live Stats page to load the separate seven-day hourly-statistics baseline. Opening a trend from another page did not request that baseline at all.
+- If the modal opened before statistics arrived, only the background cards were updated. Home Assistant pushes deliberately do not rebuild an open modal, so the message stayed unchanged.
+- The modal's Refresh button fetched the chart again but did not retry the hourly statistics. Empty responses and request failures both appeared as an invitation to wait for more days.
+
+The modal now requests its own baseline and relevant comparison sensors, shares pending requests with Live Stats, and repaints when those requests finish. Refresh retries the statistics immediately. Cached baselines are tied to the mapped entity, so a replacement sensor cannot inherit the previous sensor's typical day. Closing or replacing the modal while a request is in flight does not reopen it.
+
+The status now distinguishes loading, a failed request, no returned statistics, too few returned dates and too few matching clock hours. Missing CO₂ history is identified as unavailable data; it is not presented as evidence that CO₂ has no relationship with pH. The existing requirement remains four distinct days per hour, with at least twelve clock hours covered across the last seven days.
+
+Ordinary history and hourly statistics are separate data sources. Home Assistant documents that a sensor without a state class has no long-term statistics: [sensor state classes](https://www.home-assistant.io/integrations/sensor/#state-class). No live response or attributes for Reece's `sensor.tank_ph` were inspected, so missing statistics, retention/configuration and request failure remain possible installation-specific contributors. This patch does not change Home Assistant's Recorder configuration or manufacture a baseline from the current reading.
+
+Validation: eight new regression tests pass in `tests/test_panel_typical_day.mjs`. Across all 24 dashboard suites, 625 of 626 cases pass; the previously known hand-logged-parameter trend assertion remains the only failure. Chrome reproduced delayed loading from Live Stats, the modal updating automatically, shared requests, actual Refresh-button retries, distinct empty/error messages, and phone-sized wrapping. JavaScript syntax and whitespace checks pass. Tests use synthetic data and stubbed requests; no live device or Home Assistant configuration was changed. Logs are in `/tmp/openreef-typical-day-checks`.

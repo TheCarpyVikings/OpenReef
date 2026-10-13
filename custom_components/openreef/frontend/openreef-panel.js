@@ -867,7 +867,7 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
-  async _loadTrend(sensorId, range = this._trend?.range || "24h") {
+  async _loadTrend(sensorId, range = this._trend?.range || "24h", refreshDrivers = false) {
     const sensor = this._config?.sensors?.[sensorId];
     const entityId = sensor?.entity_id || "";
     const requestId = `${sensorId}:${range}:${Date.now()}`;
@@ -896,6 +896,9 @@ class OpenReefPanel extends HTMLElement {
       return;
     }
 
+    // The modal can open from any page, or before Live Stats finishes loading.
+    // Fetch its own typical day and comparison sensors without delaying the chart.
+    const drivers = this._loadLiveDriverHistory(sensorId, refreshDrivers);
     try {
       const points = await this._fetchTrendPoints(entityId, range);
       if (this._trendRequest !== requestId) return;
@@ -919,6 +922,8 @@ class OpenReefPanel extends HTMLElement {
       };
     }
     this._render();
+    await drivers;
+    if (this._trendRequest === requestId) this._render();
   }
 
   _loadManualTrend(parameterId, range = this._trend?.source === "manual" ? this._trend.range : "all") {
@@ -1027,7 +1032,7 @@ class OpenReefPanel extends HTMLElement {
     return [...indexes].sort((a, b) => a - b).map((index) => points[index]).filter(Boolean);
   }
 
-  async _fetchStatisticTrendPoints(entityId, start, end, range) {
+  async _fetchStatisticTrendPoints(entityId, start, end, range, options = {}) {
     try {
       const raw = await this._callWS({
         type: "recorder/statistics_during_period",
@@ -1038,7 +1043,8 @@ class OpenReefPanel extends HTMLElement {
         types: ["mean", "state", "min", "max"],
       });
       return this._statisticsPoints(raw, entityId);
-    } catch {
+    } catch (err) {
+      if (options.throwOnError) throw err;
       return [];
     }
   }
@@ -1860,7 +1866,7 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "refresh-trend") {
         if (this._trend?.source === "manual") this._loadManualTrend(id, this._trend?.range || "all");
-        else this._loadTrend(id, this._trend?.range || "24h");
+        else this._loadTrend(id, this._trend?.range || "24h", true);
       }
       if (action === "mixing-start") this._mixingAction({ type: "openreef/mixing_start_mix" });
       if (action === "mixing-salt-set") { const kg = parseFloat(this.shadowRoot.getElementById("or-salt-kg")?.value); if (Number.isFinite(kg) && kg >= 0) this._mixingAction({ type: "openreef/mixing_salt_stock", action: "set", kg }); }
@@ -27569,6 +27575,62 @@ const rigSteps = [
   // mean of that hour-of-day across the days that have it, null until at least
   // LIVE_GHOST_MIN_DAYS days do. Drawn faint and dashed behind today's line so
   // "is today unusual?" is answered by whether the two lines part company.
+  async _loadLiveDriverHistory(id, force = false) {
+    const ids = new Set([id, ...this._liveCouplingPairs().filter((pair) => pair.yId === id).map((pair) => pair.xId)]);
+    for (const sensorId of ids) await this._loadLiveGhost(sensorId, force);
+  }
+
+  async _loadLiveGhost(id, force = false) {
+    const sensor = this._config?.sensors?.[id];
+    const entityId = sensor?.entity_id;
+    if (!entityId || this._sensorKind(sensor, id) === "binary") return;
+    this._liveGhosts ||= {};
+    this._liveGhostLoads ||= {};
+    const pending = this._liveGhostLoads[id];
+    if (pending?.entityId === entityId) return pending.promise;
+    const cached = this._liveGhosts[id];
+    const ttl = cached?.status === "error" ? 4 * 60 * 1000 : LIVE_GHOST_TTL_MS;
+    if (!force && cached?.entityId === entityId && Date.now() - cached.at < ttl) return cached;
+    this._liveGhosts[id] = { entityId, status: "loading", hours: [], days: 0, covered: 0 };
+    const request = { entityId };
+    this._liveGhostLoads[id] = request;
+    request.promise = (async () => {
+      let result;
+      try {
+        const end = new Date();
+        const start = new Date(end.getTime() - 7 * 24 * 3600000);
+        const points = await this._fetchStatisticTrendPoints(entityId, start, end, "7d", { throwOnError: true });
+        result = { ...this._liveGhostHours(points), points, status: points.length ? "loaded" : "unavailable" };
+      } catch {
+        result = { hours: [], days: 0, covered: 0, points: [], status: "error" };
+      }
+      result = { ...result, entityId, at: Date.now() };
+      // A settings change can remap a slot while its previous request is in flight.
+      if (this._liveGhostLoads[id] === request) {
+        if (this._config?.sensors?.[id]?.entity_id === entityId) this._liveGhosts[id] = result;
+        delete this._liveGhostLoads[id];
+      }
+      return result;
+    })();
+    return request.promise;
+  }
+
+  _liveGhostMessage(id) {
+    const ghost = this._liveGhosts?.[id];
+    if (!ghost || (ghost.entityId && ghost.entityId !== this._config?.sensors?.[id]?.entity_id)) {
+      return "typical-day history has not loaded — use Refresh to retry";
+    }
+    if (ghost.status === "loading") return "loading the last seven days of hourly statistics…";
+    if (ghost.status === "error") return "could not load hourly statistics from Home Assistant — use Refresh to retry";
+    if (ghost.status === "unavailable" || !ghost.days) {
+      return "no hourly statistics returned — check this sensor's long-term statistics and Recorder settings in Home Assistant";
+    }
+    if (ghost.days < LIVE_GHOST_MIN_DAYS) {
+      return `only ${ghost.days} day${ghost.days === 1 ? "" : "s"} of hourly statistics returned — at least ${LIVE_GHOST_MIN_DAYS} days with matching hours are needed`;
+    }
+    return `only ${ghost.covered} of 24 clock hours have readings on at least ${LIVE_GHOST_MIN_DAYS} days — 12 covered hours are needed`;
+  }
+
   _liveGhostHours(points) {
     const slots = Array.from({ length: 24 }, () => ({ total: 0, n: 0, days: new Set() }));
     const allDays = new Set();
@@ -27602,6 +27664,7 @@ const rigSteps = [
 
   _liveGhost(id) {
     const g = this._liveGhosts?.[id];
+    if (g?.entityId && g.entityId !== this._config?.sensors?.[id]?.entity_id) return null;
     return g && g.days >= LIVE_GHOST_MIN_DAYS && g.covered >= 12 ? g.hours : null;
   }
 
@@ -27859,7 +27922,7 @@ const rigSteps = [
     const row = (glyph, label, text, cls = "") => `<div class="live-driver ${cls}"><span class="live-couple-glyph">${glyph}</span><span><b>${label}</b> · ${text}</span></div>`;
     const rows = [];
     if (!hours) {
-      rows.push(row("☀", "Daily cycle", "gathering a typical day — four days of history needed"));
+      rows.push(row("☀", "Daily cycle", this._escape(this._liveGhostMessage(id))));
     } else {
       let lo = Infinity, hi = -Infinity, loH = 0, hiH = 0;
       hours.forEach((v, h) => { if (v === null) return; if (v < lo) { lo = v; loH = h; } if (v > hi) { hi = v; hiH = h; } });
@@ -27869,7 +27932,8 @@ const rigSteps = [
     this._liveCouplingPairs().filter((p) => p.yId === id).forEach((pair) => {
       const xLabel = this._escape(this._config.sensors?.[pair.xId]?.label || pair.xId);
       const c = this._liveCouplingFor(pair);
-      if (!c) rows.push(row("↔", xLabel, hours ? "no convincing link in the data so far" : "waiting for a typical day"));
+      if (!c) rows.push(row("↔", xLabel, !hours ? "comparison needs this sensor's typical day"
+        : !this._liveGhost(pair.xId) ? this._escape(this._liveGhostMessage(pair.xId)) : "no convincing link in the data so far"));
       else rows.push(row("↔", xLabel, this._escape(this._liveCouplingText(pair, c)), c.none ? "none" : ""));
     });
     if (hours) {
@@ -28363,19 +28427,10 @@ const rigSteps = [
         } catch {
           // Keep whatever we had; the card says "gathering" until it lands.
         }
-        // The typical day: seven days of hourly statistics, refetched hourly.
-        const ghost = this._liveGhosts[id];
-        if (!ghost || Date.now() - (ghost.at || 0) > LIVE_GHOST_TTL_MS) {
-          try {
-            const end = new Date();
-            const start = new Date(end.getTime() - 7 * 24 * 3600000);
-            const points = await this._fetchStatisticTrendPoints(sensor.entity_id, start, end, "7d");
-            this._liveGhosts[id] = { ...this._liveGhostHours(points), points, at: Date.now() };
-          } catch {
-            this._liveGhosts[id] = { hours: [], days: 0, covered: 0, at: Date.now() };
-          }
-        }
+        await this._loadLiveGhost(id, force);
         this._liveRefreshCard(id);
+        // A comparison can become available when its second sensor finishes.
+        this._liveCouplingPairs().filter((pair) => pair.xId === id).forEach((pair) => this._liveRefreshCard(pair.yId));
       }
       this._liveSparksAt = Date.now();
     } finally {
