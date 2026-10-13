@@ -15826,36 +15826,15 @@ def _nps_container_credit(config: dict[str, Any]) -> float:
 
 def _nps_batch_shelf_hours(loaded_iso: Any, stamps: dict[str, Any], now: datetime,
                            room_h: float = nps_engine.BRINE_SHELF_H_ROOM) -> float:
-    """Hours-from-load a batch stays feedable, from ITS stamps (doc §12):
-    the two-rate clock (room until ``refrigeratedAt``, fridge after, plus
-    ``fridgeSavedH`` banked), and the boost window instead of the yolk
-    window for an enriched batch. Shared by the container and the bottle."""
-    fridged_at = str(stamps.get("refrigeratedAt") or "")
-    saved_h = _awc_num(stamps.get("fridgeSavedH"), 0, 0, 240)
+    return nps_engine.brine_batch_shelf_hours(loaded_iso, stamps, now, room_h)
 
-    def _window(iso: Any, r_h: float, f_h: float) -> float:
-        return nps_engine.brine_window_hours(iso, now, r_h, f_h, fridged_at, saved_h)
 
-    shelf_h = _window(loaded_iso, room_h, max(nps_engine.BRINE_SHELF_H_FRIDGE, room_h))
-    if not stamps.get("lastLoadEnriched"):
-        return shelf_h
-    # The HUFA boost is transient (doc §10.5): 12 h warm / 48 h fridged — and
-    # it decays from when the SOAK FINISHED (enrichedAt), not from the load,
-    # so an evening enrich of a morning batch keeps an honest clock. Legacy
-    # states without the stamp fall back to capping from the load.
-    enriched_dt = _parse_datetime(stamps.get("enrichedAt"))
-    loaded_dt = _parse_datetime(loaded_iso)
-    if enriched_dt is None or loaded_dt is None:
-        return min(shelf_h, _window(loaded_iso, nps_engine.ENRICH_SHELF_H_ROOM,
-                                    nps_engine.ENRICH_SHELF_H_FRIDGE))
-    soak_offset_h = max(0.0, (enriched_dt - loaded_dt).total_seconds() / 3600.0)
-    # NOT min()'d against the plain shelf (0.7.89): that 24 h exists because
-    # unfed nauplii burn their yolk down, and a gut-loaded batch is the one
-    # case where the premise is false. Capping here made the container go
-    # "stale" a few hours after the soak the app itself asked for.
-    boost_h = _window(stamps.get("enrichedAt"), nps_engine.ENRICH_SHELF_H_ROOM,
-                      nps_engine.ENRICH_SHELF_H_FRIDGE)
-    return min(nps_engine.ENRICH_SHELF_MAX_H, soak_offset_h + boost_h)
+def _nps_feed_hatchery(config: dict[str, Any]) -> dict[str, Any]:
+    """A read view using the actual container ledger, including a linked pump bottle."""
+    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    reservoir = _nps_canonical_reservoir(config)
+    return {**hatchery, "reservoir": {**(hatchery.get("reservoir") or {}),
+            **{key: reservoir.get(key) for key in ("remainingMl", "volumeMl", "mixedAt")}}}
 
 
 def _nps_fridge_bottle_state(config: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -15991,14 +15970,17 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
         if str(jar.get("harvestTo") or "") != "tank":
             continue
         st = cultures_engine.culture_state(jar, now)
-        if st["status"] != "producing":
+        if (st["status"] != "producing" or st["restart"].get("reason") in ("sign", "slow")
+                or st["waterChange"].get("reason") == "sign"):
             continue
         guide = cultures_engine.harvest_guide(jar, mix_ppt)
         products[f"{nps_engine.LIVE_ROTIFER_CONE_PREFIX}{jid}"] = nps_engine.live_cone_product(
             jid, str(jar.get("name") or jid), st["harvest"], guide.get("harvestMl", guide.get("totalMl")),
             str((jar.get("state") or {}).get("lastHarvestAt") or ""), jar.get("history") or [],
             vessel_word={"reactor": "reactor", "tub": "tub", "jar": "jar"}.get(str(jar.get("vesselKind") or ""), "cone"))
-        cone_sources += 1
+        ready = cultures_engine.harvest_ready(st)
+        products[f"{nps_engine.LIVE_ROTIFER_CONE_PREFIX}{jid}"]["live"]["feedAvailability"] = {"available": ready}
+        cone_sources += int(ready)
     rot_note = ""
     enrich = cultures["enrichment"]
     soak_st = cultures_engine.soak_state(enrich["state"].get("startedAt"), enrich["soakH"],
@@ -16016,21 +15998,31 @@ def _nps_live_shelf(config: dict[str, Any], now: datetime
                 continue
             st = cultures_engine.culture_state(jar, now)
             name = str(jar.get("name") or jid)
-            if st["status"] == "producing":
+            if cultures_engine.harvest_ready(st):
                 producing.append(name)
+            elif st["status"] == "producing" and not st["harvest"].get("due"):
+                establishing.append((max(0.0, _awc_num(st["harvest"].get("hoursUntil"), 0, 0, 1e6) / 24), name, "next"))
             elif st["status"] == "establishing":
                 first = max(1.0, _awc_num(rot_preset.get("firstHarvestDays"), 6, 1, 60))
-                establishing.append((max(0.0, first - _awc_num(st.get("ageDays"), 0, 0, 1000)), name))
+                establishing.append((max(0.0, first - _awc_num(st.get("ageDays"), 0, 0, 1000)), name, "first"))
         if producing:
             rot_note = f"{producing[0]} is producing — harvest into the bottle"
         elif establishing:
-            days, name = min(establishing)
-            rot_note = f"{name}'s first harvest in ~{days:.1f} d"
+            days, name, when = min(establishing)
+            rot_note = f"{name}'s {when} harvest in ~{days:.1f} d"
     if rot_note:
         rlib = nps_engine.live_library("rotifers")
         pending.append({"name": "live rotifers from the cone", "category": "zooLive",
                         "particleUmMin": rlib.get("particleUmMin", 90),
                         "particleUmMax": rlib.get("particleUmMax", 360), "note": rot_note})
+    feed_sources = nps_engine.brine_feed_sources(_nps_feed_hatchery(config), now)
+    for product in products.values():
+        live = product.get("live") or {}
+        if live.get("kind") == "brine":
+            live["feedAvailability"] = feed_sources[live["vessel"]]
+            live["defaultDoseMl"] = hatchery["handFeed"]["defaultDoseMl"]
+        elif live.get("vessel") == "rotifers":
+            live["defaultDoseMl"] = cultures["bottle"]["doseMl"]
     return products, pending
 
 
@@ -16465,6 +16457,14 @@ def _nps_journal_mark_enriched(
     target["enriched"] = True
     target["enrichedHours"] = enriched_h
     return target
+
+
+def _nps_enrich_pause_reason(config: dict[str, Any], enrichment: dict[str, Any], now: datetime) -> str:
+    pid = str(enrichment.get("productId") or "")
+    if not pid:
+        return ""
+    product = ((config.get("consumables") or {}).get("products") or {}).get(pid)
+    return nps_engine.food_stock_pause_reason(product, _awc_num(enrichment.get("doseMl"), 1, 0.5, 50), now)
 
 
 def _nps_enrich_debit(config: dict[str, Any], enrichment: dict[str, Any]) -> None:
@@ -16980,6 +16980,10 @@ async def websocket_nps_hatch_enrich(
     batch_age_h = ((now - loaded_dt).total_seconds() / 3600.0
                    if loaded_dt is not None else 0.0)
     dose_now = delay_h <= 0 or batch_age_h >= delay_h
+    pause_reason = _nps_enrich_pause_reason(config, enrichment, now)
+    if pause_reason:
+        connection.send_error(msg["id"], "food_unavailable", pause_reason)
+        return
     enrichment["state"] = {
         "startedAt": now.isoformat(),
         "sourceVesselId": "",
@@ -17084,6 +17088,9 @@ def _nps_enrich_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, 
         return "batch_changed", "The soaking batch is no longer in the container; cancel the soak."
     if _nps_batch_is_stale(reservoir.get("mixedAt"), hatchery["reservoir"], now):
         return "stale_brine", "The waiting batch has expired; cancel the soak and discard it."
+    pause_reason = _nps_enrich_pause_reason(config, hatchery["enrichment"], now)
+    if pause_reason:
+        return "food_unavailable", pause_reason
     _nps_enrich_debit(config, hatchery["enrichment"])
     state["firstDoseAt"] = now.isoformat()
     # Ahead of the planned hour (0.7.168): say so, and that the clock runs
@@ -17115,6 +17122,9 @@ def _nps_enrich_second_dose_apply(config: dict[str, Any], now: datetime) -> tupl
         return "no_first_dose", "Add the first dose before the top-up"
     if state.get("secondDoseAt"):
         return "already_dosed", "The top-up is already logged"
+    pause_reason = _nps_enrich_pause_reason(config, hatchery["enrichment"], now)
+    if pause_reason:
+        return "food_unavailable", pause_reason
     _nps_enrich_debit(config, hatchery["enrichment"])
     state["secondDoseAt"] = now.isoformat()
     _append_activity(config, "Enrichment top-up dosed", "control")
@@ -17242,10 +17252,7 @@ def _nps_log_hand_feed(config: dict[str, Any], now: datetime, ml: float, where: 
 
 
 def _nps_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) -> bool:
-    loaded_dt = _parse_datetime(loaded_iso)
-    if loaded_dt is None:
-        return True
-    return (now - loaded_dt).total_seconds() / 3600.0 >= _nps_batch_shelf_hours(loaded_iso, stamps, now)
+    return nps_engine.brine_batch_is_stale(loaded_iso, stamps, now)
 
 
 @websocket_api.websocket_command({
@@ -17340,6 +17347,10 @@ async def websocket_nps_fridge_bottle(
     elif action == "feed":
         if not bottle_loaded:
             connection.send_error(msg["id"], "bottle_empty", "The feeding bottle is empty")
+            return
+        availability = nps_engine.brine_feed_sources(_nps_feed_hatchery(config), now)["bottle"]
+        if not availability["available"]:
+            connection.send_error(msg["id"], "bottle_unavailable", availability["pauseReason"])
             return
         ml = _awc_num(msg.get("ml"), hatchery["handFeed"]["defaultDoseMl"], 0.5, 1000)
         ml = min(ml, bottle_ml)
@@ -17451,9 +17462,13 @@ async def websocket_nps_hand_feed(
     if remaining <= 0:
         connection.send_error(msg["id"], "no_brine", "The brine container is empty.")
         return
+    now = datetime.now(timezone.utc)
+    availability = nps_engine.brine_feed_sources(_nps_feed_hatchery(config), now)["container"]
+    if not availability["available"]:
+        connection.send_error(msg["id"], "brine_unavailable", availability["pauseReason"])
+        return
     ml = min(ml, remaining)
     reservoir["remainingMl"] = round(max(0.0, remaining - ml), 1)
-    now = datetime.now(timezone.utc)
     _nps_log_hand_feed(config, now, ml, "", slot=_normalise_schedule_time(msg.get("slot")))
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -17879,6 +17894,15 @@ def _cultures_bottle_history(bottle: dict[str, Any], event: str, now: datetime, 
         row["slot"] = slot
     history.insert(0, row)
     del history[600:]
+
+
+def _cultures_enrich_pause_reason(config: dict[str, Any], cultures: dict[str, Any], now: datetime) -> str:
+    enrichment = cultures.get("enrichment") or {}
+    fallback = (((config.get("nps") or {}).get("hatchery") or {}).get("enrichment") or {})
+    if not (enrichment.get("productId") or fallback.get("productId")):
+        return ""
+    return nps_engine.food_stock_pause_reason(_cultures_enrich_product(config, cultures),
+        round(_awc_num(enrichment.get("drops"), 3, 0, 100) * cultures_engine.ENRICH_DROP_ML, 2), now)
 
 
 def _cultures_enrich_product(config: dict[str, Any], cultures: dict[str, Any]) -> dict[str, Any] | None:
@@ -18372,6 +18396,17 @@ async def _async_cultures_light_tick(hass: HomeAssistant, entry: OpenReefConfigE
         await _async_save_config(hass, entry, config)
 
 
+def _cultures_feed_pause_reason(config: dict[str, Any], jar: dict[str, Any], now: datetime) -> str:
+    """A linked culture feed must exist in usable stock before its clock moves."""
+    feed = jar.get("feed") or {}
+    pid = str(feed.get("productId") or "")
+    if not pid:
+        return ""  # An untracked feed remains a manual observation.
+    product = ((config.get("consumables") or {}).get("products") or {}).get(pid)
+    ml = _awc_num(feed.get("doseMl"), 5, 0.5, 1000)
+    return nps_engine.food_stock_pause_reason(product, ml, now)
+
+
 def _cultures_feed_debit(config: dict[str, Any], jar: dict[str, Any], jar_id: str = "",
                          at: datetime | None = None) -> None:
     """One feed = one dose off the linked phyto bottle (the shelf keeps count).
@@ -18738,6 +18773,9 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             if st["restart"].get("reason") in ("sign", "slow") or st["waterChange"].get("reason") == "sign":
                 feed_advice = {"action": "check", "reason": "warning signs recorded — check activity, aeration and water quality before feeding or harvesting"}
         product = products.get(jar["feed"]["productId"]) if jar["feed"]["productId"] else None
+        feed_pause = _cultures_feed_pause_reason(config, jar, now) if not phyto else ""
+        if feed_pause:
+            feed_advice = {"action": "check", "reason": feed_advice["reason"] + " · " + feed_pause}
         parent = cultures["jars"].get(jar["state"].get("seededFrom") or "")
         generation = int(_awc_num(jar["state"].get("generation"), 0, 0, 999))
         if generation <= 0 and jar["state"].get("startedAt"):
@@ -18780,6 +18818,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
                 "productId": jar["feed"]["productId"],
                 "productName": product.get("name") if isinstance(product, dict) else None,
                 "doseMl": jar["feed"]["doseMl"],
+                "pauseReason": feed_pause,
             },
             "cadence": cad,
             "state": {k: v for k, v in st.items() if k != "cadence"},
@@ -18832,6 +18871,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     soak_jar = cultures["jars"].get(str(enrichment["state"].get("jarId") or ""))
     enrichment_payload = {
         "productId": enrichment["productId"],
+        "pauseReason": _cultures_enrich_pause_reason(config, cultures, now),
         "productName": enrich_product.get("name") if isinstance(enrich_product, dict) else None,
         "drops": enrichment["drops"], "soakH": enrichment["soakH"],
         "boostWarmH": enrichment["boostWarmH"], "boostColdH": enrichment["boostColdH"],
@@ -19333,6 +19373,10 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
             return "establishing", f"{jar['name']} is still establishing — first harvest in ~{st['harvest']['hoursUntil']} h"
         if enrich and has_bottle and enrichment["state"]["startedAt"]:
             return "enrich_busy", "A portion is already soaking — rinse and bottle it first"
+        if enrich and has_bottle:
+            pause_reason = _cultures_enrich_pause_reason(config, cultures, now)
+            if pause_reason:
+                return "food_unavailable", pause_reason
         if ml is not None and (isinstance(ml, bool) or not 0 < awc_engine._f(ml, -1) <= jar["volumeL"] * 1000):
             return "invalid_volume", "Enter a finite, positive harvest volume"
         plain = cultures_engine.harvest_guide(jar, _cultures_mix_ppt(config), ml)
@@ -19351,6 +19395,10 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
             return "salinity_unavailable", refill["reason"]
         if bottle_ml is not None and (isinstance(bottle_ml, bool) or not 0 < awc_engine._f(bottle_ml, -1) <= 20000):
             return "invalid_volume", "Enter the measured rinse volume, between 0 and 20000 ml"
+    if fed and phyto is None:
+        feed_pause = _cultures_feed_pause_reason(config, jar, now)
+        if feed_pause:
+            return "feed_unavailable", feed_pause
     notes = []
     if tint in cultures_engine.TINTS:
         state["lastTint"] = tint
@@ -19362,7 +19410,7 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         notes.append(cultures_engine.SIGN_WORDS.get(sign, sign))
     if egg is not None:
         notes.append(f"{egg:g} % carrying eggs")
-    if fed:
+    if fed and phyto is None:
         state["lastFedAt"] = now.isoformat()
         _cultures_feed_debit(config, jar, jar_id, at=now)
         _cultures_log_completion(config, jar_id, "feed", now, f"Logged automatically — fed from {source}")
@@ -21038,8 +21086,8 @@ async def websocket_nps_summary(
                       if awc_engine._f(cultures_engine.species_preset(sid).get("bottleShelfDays")) > 0}
     timeline = nps_engine.feed_timeline(
         now_local, products=products, channels=channels,
-        awc=_awc_cfg(config) or {}, cultures=cultures_cfg if cultures_cfg.get("enabled") else None,
-        hatchery=hatchery_cfg if hatchery_cfg.get("enabled") else None, brine_feeds=brine_feeds,
+        awc=_awc_cfg(config) or {}, cultures=cultures_cfg,
+        hatchery=_nps_feed_hatchery(config), brine_feeds=brine_feeds,
         lighting=spawning.lighting_window_summary(_effective_lighting_cfg(config) or {}, now_local),
         tank_l=_awc_effective_tank_l(config),
         fx_channel_id=str(fx.get("channelId") or ""), fx_enabled=bool(fx.get("enabled")),
@@ -21118,6 +21166,7 @@ async def websocket_nps_summary(
             "fridgeBottle": fridge_bottle,
             "enrichment": {
                 "hours": hatchery_cfg["enrichment"]["hours"],
+                "pauseReason": _nps_enrich_pause_reason(config, hatchery_cfg["enrichment"], now_utc),
                 "doseMl": hatchery_cfg["enrichment"]["doseMl"],
                 "doseDelayH": hatchery_cfg["enrichment"]["doseDelayH"],
                 "batchDoseDelayH": hatchery_cfg["enrichment"]["state"]["doseDelayH"],
@@ -21139,7 +21188,8 @@ async def websocket_nps_summary(
                     hatchery_cfg["enrichment"]["state"]["doseDelayH"],
                     hatchery_cfg["enrichment"]["state"]["batchLoadedAt"]),
             },
-            "handFeed": dict(hatchery_cfg["handFeed"]),
+            "handFeed": {**hatchery_cfg["handFeed"],
+                         "sources": nps_engine.brine_feed_sources(_nps_feed_hatchery(config), now_utc)},
             # Legacy single-pouch/learned/temp fields: the primary vessel's.
             "cysts": _nps_cysts_payload(primary_cfg or hatchery_cfg, now_utc),
             "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], primary_egg, primary_vessel),
@@ -21159,7 +21209,7 @@ async def websocket_nps_summary(
         # not the tank: they cover no mouth and drive no pump (0.7.162).
         "speciesPlan": nps_engine.compile_feed_plan(
             list((config.get("nps") or {}).get("species") or []), shelf_products, channels,
-            pending=live_pending, quiet_product_ids=quiet_products),
+            pending=live_pending, quiet_product_ids=quiet_products, now=now_utc),
         "budget": nps_engine.nutrient_budget(
             shelf_products, now_utc, _awc_effective_tank_l(config),
             awc_engine.daily_equivalent_litres(

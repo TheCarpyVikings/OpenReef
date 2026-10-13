@@ -2089,6 +2089,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-undo") this._culturesUndo(id, target.dataset.at || "");
       if (action === "cultures-timeline-days") { this._cultures.timelineDays = Number(target.dataset.days) || 14; this._render(); }
       if (action === "cultures-harvested") this._culturesLog(id, true, true);
+      if (action === "cultures-harvested-only") this._culturesLog(id, false, true);
       if (action === "cultures-harvest-tank") this._culturesLog(id, false, true, "tank");
       if (action === "cultures-harvest-bottle") this._culturesLog(id, false, true, "bottle");
       if (action === "cultures-restart") this._culturesRestart(id);
@@ -12675,13 +12676,17 @@ class OpenReefPanel extends HTMLElement {
     // fridge bottle, or both when both hold brine — the hatchery card's own
     // commands, so the ledger, the reminder and this mark all move together.
     if (ev.source === "brine" && ev.status !== "done") {
-      const hatch = this._nps?.summary?.hatchery || {};
-      const inContainer = Number(hatch.reservoir?.remainingMl) > 0;
-      const inBottle = Number(hatch.fridgeBottle?.remainingMl) > 0;
+      const usable = (vessel) => {
+        const stock = this._npsBrineFeedSource(vessel);
+        return stock.available && Number(stock.remainingMl) >= Number(ev.ml || 0)
+          && (!ev.feedVessels || ev.feedVessels.includes(vessel));
+      };
+      const inContainer = usable("container");
+      const inBottle = usable("bottle");
       const dose = ev.ml != null ? `${esc(ev.ml)} ml` : "the dose";
       if (inContainer) actions.push(`<button class="primary compact-button" data-action="nps-hand-feed"${slotAttr} title="Debits the brine container and fills this mark">Fed ${dose}${inBottle ? " from the container" : ""}${filed}</button>`);
       if (inBottle) actions.push(`<button class="${inContainer ? "secondary" : "primary"} compact-button" data-action="nps-fridge-feed"${slotAttr} title="Debits the fridge bottle and fills this mark">Fed ${dose} from the fridge bottle${filed}</button>`);
-      if (!inContainer && !inBottle) lines.push("No brine on hand — harvest and load the container first.");
+      if (!inContainer && !inBottle) lines.push("No usable brine for this portion — check the hatchery supply.");
     }
     if (ev.source === "cultures-bottle" && ev.status !== "done" && ev.kind === "dose") {
       actions.push(`<button class="primary compact-button" data-action="cultures-bottle-fed"${slotAttr} title="Debits the rotifer bottle and fills this mark">Fed ${ev.ml != null ? `${esc(ev.ml)} ml` : "rotifers"}${filed}</button>`);
@@ -13107,8 +13112,10 @@ class OpenReefPanel extends HTMLElement {
         <small>A standing culture, not a bottle — feeding does not empty it. ${live.harvestMl ? `About ${esc(live.harvestMl)} ml a day through the net, ` : ""}${nextLine} · ${last}${usage}.</small>
         <small>🫧 Stocked by ${esc(live.stockedBy || "the Cultures tab")} — the clock is the cone's own harvest clock.</small>
         <div class="button-row">
+          ${live.feedAvailability?.available !== false ? `
           <button class="${live.harvestDue ? "primary" : "secondary"} compact-button" data-action="cultures-harvest-tank" data-id="${jid}" title="Logs the harvest as fed straight into the tank: the strip, the log and the hand-feed reminder all keep count">Harvested → straight into the tank</button>
           <input type="number" min="1" max="5000" step="10" placeholder="ml rinsed in" style="width:110px;" data-cultures-bottle-ml="${jid}" title="Optional: what you rinsed the net into. Blank = a harvest with no volume.">
+          ` : ""}
           <button class="secondary compact-button" data-action="tab" data-id="cultures">Open Live cultures →</button>
         </div>
       </article>`;
@@ -13118,6 +13125,17 @@ class OpenReefPanel extends HTMLElement {
   // the container or the fridge bottle, on its batch's nutritional clock. No
   // "New bottle", no editing — the ledger IS the bottle; feeding from it here
   // is the same tap as on the hatchery card.
+  _npsBrineFeedSource(vessel) {
+    const hatch = this._nps?.summary?.hatchery || {};
+    const served = hatch.handFeed?.sources?.[vessel];
+    if (served) return served;
+    const batch = (vessel === "bottle" ? hatch.fridgeBottle : hatch.reservoir) || {};
+    const freshness = batch.freshness || (vessel === "container" ? this._nps?.summary?.feedExchange?.freshness : null);
+    const soaking = vessel === "container" && hatch.enrichment?.state?.status && hatch.enrichment.state.status !== "none";
+    return { remainingMl: Number(batch.remainingMl) || 0,
+      available: Number(batch.remainingMl) > 0 && ["fresh", "aging"].includes(freshness?.status) && !soaking };
+  }
+
   _npsLiveBrineCard(pid, product, state) {
     const esc = (v) => this._escape(v == null ? "" : String(v));
     const eid = esc(pid);
@@ -13175,9 +13193,14 @@ class OpenReefPanel extends HTMLElement {
         <div style="height:100%;width:${pct}%;background:${live.expired ? "var(--error-color,#e5484d)" : "var(--primary-color,#03a9f4)"};"></div>
       </div>`;
     const hatch = this._nps.summary?.hatchery || {};
-    const dose = isRotifers
+    const configuredDose = Number(live.defaultDoseMl) || (isRotifers
       ? (Number(this._cultures?.summary?.bottle?.doseMl) || 20)
-      : (Number(hatch.handFeed?.defaultDoseMl) || 30);
+      : (Number(hatch.handFeed?.defaultDoseMl) || 30));
+    const remaining = Math.max(0, Number(s.remainingMl ?? product.remainingMl) || 0);
+    const dose = Math.min(configuredDose, remaining);
+    const canFeed = remaining > 0 && !live.expired && live.status !== "enriching"
+      && live.feedAvailability?.available !== false;
+    const pauseReason = live.feedAvailability?.pauseReason || (remaining <= 0 ? "No food available — this vessel is empty." : "");
     const feedAction = isRotifers ? "cultures-bottle-fed" : isBottle ? "nps-fridge-feed" : "nps-hand-feed";
     const openTab = isRotifers
       ? `<button class="secondary compact-button" data-action="tab" data-id="cultures">Open Live cultures →</button>`
@@ -13191,10 +13214,13 @@ class OpenReefPanel extends HTMLElement {
         ${bar}
         <small>${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml in ${esc(live.where || "the brine container")} · ${runway}</small>
         <small>${isRotifers ? "🫧" : "🦐"} ${clockLine} Stocked by ${esc(live.stockedBy || "the hatchery")} — the amount and the clock follow the ledger.</small>
+        ${!canFeed && pauseReason ? `<small class="awc-hint">${esc(pauseReason)}</small>` : ""}
         <div class="button-row">
+          ${canFeed ? `
           <button class="secondary compact-button" data-action="${feedAction}" title="Debits ${esc(live.where || "the container")}, stamps the feed on the strip">Fed ${esc(dose)} ml</button>
           <input type="number" min="0.1" step="0.1" placeholder="ml" style="width:72px;" data-nps-log="${eid}">
           <button class="secondary compact-button" data-action="nps-live-feed" data-id="${eid}" data-vessel="${esc(live.vessel || "container")}">Log feed</button>
+          ` : ""}
           ${openTab}
         </div>
       </article>`;
@@ -13559,8 +13585,9 @@ class OpenReefPanel extends HTMLElement {
     const staleGateLine = containerStale
       ? `<span style="color:var(--error-color,#e5484d)">🛑 The container still holds brine past its shelf life — discard it before loading a fresh batch.</span> <button class="danger-text compact-button" data-action="nps-discard-brine">Discard old brine</button>`
       : "";
-    const handFeedBtn = Number(reservoirSum.volumeMl) > 0
-      ? `<button class="secondary compact-button" data-action="nps-hand-feed" title="Debits the container, stamps the feed on the strip, and logs the hand-feed reminder done if you have one">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>`
+    const containerFeed = this._npsBrineFeedSource("container");
+    const handFeedBtn = containerFeed.available
+      ? `<button class="secondary compact-button" data-action="nps-hand-feed" title="Debits the container, stamps the feed on the strip, and logs the hand-feed reminder done if you have one">Fed ${this._escape(String(Math.min(hatch.handFeed?.defaultDoseMl ?? 30, containerFeed.remainingMl)))} ml</button>`
       : "";
     const hatchButtons = [
       handFeedBtn,
@@ -13568,7 +13595,7 @@ class OpenReefPanel extends HTMLElement {
       // Selcon goes into the holding vessel; the dose reminder anchors on the
       // loaded batch's age (instar II).
       enrichIdle && !containerStale && !reservoirSum.lastLoadEnriched && Number(reservoirSum.remainingMl) > 0
-        ? `<button class="secondary compact-button" data-action="nps-enrich" title="The enrichment into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II), or dose now from the soak tile for a live-algae enrichment. The running hatch is untouched.">Enrich brine</button>` : "",
+        ? `<button class="secondary compact-button" data-action="nps-enrich" ${hatch.enrichment?.pauseReason ? "disabled" : ""} title="${this._escape(hatch.enrichment?.pauseReason || "The enrichment into the holding vessel — the dose reminder fires when THIS batch has mouths (instar II), or dose now from the soak tile for a live-algae enrichment. The running hatch is untouched.")}">Enrich brine</button>` : "",
       `<button class="secondary compact-button" data-action="nps-add-hatch-reminders">${this._npsHatchRemindersExist() ? "Sync hatchery reminders" : "Add hatchery reminders"}</button>`,
     ].filter(Boolean).join("");
     // The hatchery is core NPS — hatching happens whether or not the matched
@@ -13603,15 +13630,16 @@ class OpenReefPanel extends HTMLElement {
             ? `<span style="color:var(--warning-color,#f5a524)">load now — the boost is draining</span>`
             : "<strong>done</strong> — rinse &amp; load"}</small>
         ${enrichState.secondDoseDue ? `<small><span style="color:var(--warning-color,#f5a524)">Top-up due</span></small>` : ""}
+        ${enrichSum.pauseReason ? `<small class="awc-hint">${this._escape(enrichSum.pauseReason)}</small>` : ""}
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          ${enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>`
+          ${!enrichSum.pauseReason && enrichState.firstDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-dose">Add dose</button>`
             // The hold is advice, not a lock (0.7.168): a live-algae enrichment
             // goes in with freshly hatched nauplii. Same core as "Add dose";
             // the soak clock runs from the dose.
-            : enrichState.status === "enriching" && enrichState.hoursLeft == null
+            : !enrichSum.pauseReason && enrichState.status === "enriching" && enrichState.hoursLeft == null
               ? `<button class="secondary compact-button" data-action="nps-enrich-dose" title="Start the soak before the planned +${this._escape(String(enrichSum.batchDoseDelayH ?? enrichSum.doseDelayH ?? 8))} h. ReefPhyto's Rotifer &amp; Artemia Enrichment is live algae: their page says to add it to freshly hatched nauplii and allow 6–12 h (12 h loads the most DHA). An oil emulsion such as Selcon should wait for instar II — dosed before the molt it only fouls the water. The soak clock runs from the dose.">Dose now</button>`
               : ""}
-          ${enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
+          ${!enrichSum.pauseReason && enrichState.secondDoseDue ? `<button class="secondary compact-button" data-action="nps-enrich-second-dose">Log top-up</button>` : ""}
           <button class="secondary compact-button" data-action="nps-enrich-loaded" ${enrichState.status === "enriching" ? "disabled" : ""} title="Confirm the completed soak. The boost window starts at the planned soak end. Rinse before feeding.">Soak done</button>
           <button class="danger-text compact-button" data-action="nps-enrich-cancel">Cancel</button>
         </div>
@@ -13633,7 +13661,7 @@ class OpenReefPanel extends HTMLElement {
         <small><strong>Feeding bottle</strong> · in the fridge</small>
         <small>${Math.round(bottleMl)} ml · ${bottleLife}${bottle.lastLoadEnriched ? " · enriched" : ""}</small>
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          <button class="secondary compact-button" data-action="nps-fridge-feed" title="Debits the bottle, stamps the feed on the strip, and logs the hand-feed reminder done if you have one">Fed ${this._escape(String(hatch.handFeed?.defaultDoseMl ?? 30))} ml</button>
+          ${this._npsBrineFeedSource("bottle").available ? `<button class="secondary compact-button" data-action="nps-fridge-feed" title="Debits the bottle, stamps the feed on the strip, and logs the hand-feed reminder done if you have one">Fed ${this._escape(String(Math.min(hatch.handFeed?.defaultDoseMl ?? 30, bottleMl)))} ml</button>` : ""}
           <button class="secondary compact-button" data-action="nps-fridge-return" title="Pour the bottle back into the container — the cold hours stay banked, the clock returns to the room rate from now.">Back in container</button>
           <button class="danger-text compact-button" data-action="nps-fridge-empty">Empty</button>
         </div>
@@ -15295,7 +15323,8 @@ const rigSteps = [
             <option value="bottle" ${(j.harvestTo || "bottle") !== "tank" ? "selected" : ""}>the fridge bottle</option>
             <option value="tank" ${j.harvestTo === "tank" ? "selected" : ""}>straight into the tank</option>
           </select></label>
-        <div class="culture-field"><span></span><label class="culture-tick" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done."><input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none" ? "disabled" : ""}> enrich this crop</label></div>
+        <div class="culture-field"><span></span><label class="culture-tick" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done."><input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.pauseReason || (sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none") ? "disabled" : ""}> enrich this crop</label></div>
+        ${sum.enrichment?.pauseReason ? `<small class="awc-hint">${this._escape(sum.enrichment.pauseReason)}</small>` : ""}
         <label class="culture-field" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="${(j.harvestTo || "bottle") !== "tank" ? this._escape(String(j.harvestGuide?.totalMl || "")) : ""}" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : ""}` : "";
       // Refill with phyto (Stage C, doc §5.5): a home bottle on the shelf or a
       // vessel reading green or dark feeds the cone in its own refill — the jug
@@ -15369,9 +15398,9 @@ const rigSteps = [
         !running ? `<button class="secondary compact-button" data-action="cultures-seed" data-id="${this._escape(j.id)}">Seed from a starter</button>` : "",
         reseed,
         running ? `<button class="secondary compact-button" data-action="cultures-looked" data-id="${this._escape(j.id)}" title="Logs the water you saw (and an egg count if you typed one) — nothing else moves: no feed, no phyto, the reminders stand">Looked</button>` : "",
-        running ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
+        running && !j.feed?.pauseReason ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
         running && due.includes("feed") ? `<button class="secondary compact-button" data-action="cultures-skip-feed" data-id="${this._escape(j.id)}" title="Looked, not feeding: logs the water and skips this feed — the reminder holds until the next slot, no phyto moves, and the clearing time stays honest">Skip feed</button>` : "",
-        status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="cultures-harvested" data-id="${this._escape(j.id)}" title="Logs the tint, a feed and today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}">Harvested + fed</button>` : "",
+        status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="${j.feed?.pauseReason ? "cultures-harvested-only" : "cultures-harvested"}" data-id="${this._escape(j.id)}" title="Logs today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}${j.feed?.pauseReason ? "; the linked food is unavailable" : " and a feed"}">${j.feed?.pauseReason ? "Harvested" : "Harvested + fed"}</button>` : "",
         running && s.restart?.available ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Sieve the whole jar into a clean one with fresh water">Restarted</button>` : "",
         running && (s.waterChange?.available || s.waterChangeOnDemand) ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? `On a sign — drift, any ammonia, cloudy water: ${this._escape(String(j.waterChangeGuide?.totalMl || 0))} ml out, fresh in` : "The scheduled change"}">Water changed</button>` : "",
         status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a second culture; check the dates to stagger its restart">Split into B</button>` : "",
@@ -15415,7 +15444,7 @@ const rigSteps = [
           : bottle.boost?.status === "faded" ? `<small class="muted">estimated enrichment window passed — check viability; nutrient content is not measured</small>` : ""}
         <small>${bottle.status === "fresh" ? `fresh · ~${this._escape(String(bottle.hoursLeft))} h left` : bottle.status === "aging" ? `<span style="color:var(--warning-color,#f5a524)">aging · ~${this._escape(String(bottle.hoursLeft))} h</span>` : bottle.status === "stale" ? `<span style="color:var(--error-color,#e5484d)">stale — tip it out</span>` : `storage estimate: up to ${this._escape(String(bottle.shelfDays || 5))} days at about 4 °C; check activity before use`}</small>
         <div class="button-row" style="flex-wrap:wrap;justify-content:center;">
-          ${Number(bottle.remainingMl) > 0 && bottle.status !== "stale" ? `<button class="secondary compact-button" data-action="cultures-bottle-fed">Fed ${this._escape(String(Math.round(bottle.doseMl || 20)))} ml</button>` : ""}
+          ${Number(bottle.remainingMl) > 0 && bottle.status !== "stale" ? `<button class="secondary compact-button" data-action="cultures-bottle-fed">Fed ${this._escape(String(Math.min(bottle.remainingMl, bottle.doseMl || 20)))} ml</button>` : ""}
           ${Number(bottle.remainingMl) > 0 ? `<button class="danger-text compact-button" data-action="cultures-bottle-empty">Empty</button>` : ""}
         </div>
       </div>` : "";

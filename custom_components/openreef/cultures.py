@@ -343,6 +343,16 @@ def _due(last_iso: Any, anchor_iso: Any, interval: timedelta, now: datetime) -> 
     }
 
 
+def harvest_ready(state: dict[str, Any], *, phyto: bool = False) -> bool:
+    """Whether a harvest can be recommended as food now, beyond its calendar."""
+    harvest = state.get("harvest") or {}
+    return bool(state.get("status") == "producing" and harvest.get("due")
+                and not state.get("harvestBlocked")
+                and (state.get("restart") or {}).get("reason") not in ("sign", "slow")
+                and (state.get("waterChange") or {}).get("reason") != "sign"
+                and (not phyto or harvest.get("reason") == "dark"))
+
+
 def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     """Where a jar sits: ``none`` (not seeded), ``crashed``, ``establishing``
     (seeded, first harvest not yet sensible), ``producing`` — plus every chore

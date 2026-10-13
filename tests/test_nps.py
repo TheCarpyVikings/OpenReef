@@ -1558,7 +1558,8 @@ def _enrich_entry(dose_delay_h=0, remaining=300, mixed_hours_ago=10):
         "doseDelayH": dose_delay_h,
     }
     cfg["consumables"] = {"products": {"selcon": _product(
-        name="Selcon", category="other", bottleMl=60, remainingMl=50)}}
+        name="Selcon", category="other", bottleMl=60, remainingMl=50,
+        openedAt=_iso(datetime.now(timezone.utc) - timedelta(days=1)))}}
     return entry
 
 
@@ -2942,7 +2943,7 @@ def test_feed_timeline_cultures_and_hand_brine():
                  "cadence": {"harvestIntervalDays": 1},
                  "history": [{"event": "harvest", "at": _iso(datetime(2026, 8, 13, 9, 0, tzinfo=tz)), "ml": 500}]},
     }, "bottle": {"history": [{"event": "fed_tank", "at": _iso(datetime(2026, 8, 13, 12, 0, tzinfo=tz)), "ml": 40}]}}
-    hatchery = {"enabled": True, "reservoir": {"remainingMl": 400}, "fridgeBottle": {"remainingMl": 0},
+    hatchery = {"enabled": True, "reservoir": {"remainingMl": 600, "mixedAt": _iso(now - timedelta(hours=1))}, "fridgeBottle": {"remainingMl": 0},
                 "handFeed": {"defaultDoseMl": 30, "feedsPerDay": 2}}
     feeds = [{"at": _iso(datetime(2026, 8, 13, 8, 0, tzinfo=tz)), "ml": 30}]
     tl = _tl(now, cultures=cultures, hatchery=hatchery, brine_feeds=feeds,
@@ -2955,9 +2956,9 @@ def test_feed_timeline_cultures_and_hand_brine():
     brine = _by_id(tl, "brine:")
     assert sorted(e["status"] for e in brine) == ["done", "due"] and [e["ml"] for e in brine] == [30.0, 30.0]
     assert tl["counts"]["hand"] == 4 and tl["counts"]["done"] == 3
-    # With the exchange pump doing the brine, no hand chips.
+    # With the exchange pump doing the brine, retain completed hand feeds only.
     auto = _tl(now, hatchery=hatchery, brine_feeds=feeds, fx_enabled=True)
-    assert not _by_id(auto, "brine:")
+    assert [e["status"] for e in _by_id(auto, "brine:")] == ["done"]
     # Empty container, no chips either — nothing to feed.
     dry = _tl(now, hatchery={**hatchery, "reservoir": {"remainingMl": 0}})
     assert not _by_id(dry, "brine:")
@@ -3267,10 +3268,10 @@ def test_feed_timeline_windows_for_the_shelf_the_brine_and_the_bottle():
                                history=[{"at": _iso(datetime(2026, 8, 13, 11, 8, tzinfo=tz)), "ml": 3, "kind": "dose"}],
                                lastDosedAt=_iso(datetime(2026, 8, 13, 11, 8, tzinfo=tz)))}
     # Brine: 3 feeds 11–21 with one fed 11:02; the bottle: 2 a day 10–18, nothing fed yet, plus an unplanned pour at 07:00.
-    hatchery = {"enabled": True, "reservoir": {"remainingMl": 400}, "fridgeBottle": {"remainingMl": 0},
+    hatchery = {"enabled": True, "reservoir": {"remainingMl": 600, "mixedAt": _iso(now - timedelta(hours=1))}, "fridgeBottle": {"remainingMl": 0},
                 "handFeed": {"defaultDoseMl": 250, "feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "21:00"}}
     feeds = [{"at": _iso(datetime(2026, 8, 13, 11, 2, tzinfo=tz)), "ml": 250}]
-    cultures = {"enabled": True, "jars": {}, "bottle": {"remainingMl": 300, "doseMl": 40, "feedsPerDay": 2, "windowStart": "10:00", "windowEnd": "18:00",
+    cultures = {"enabled": True, "jars": {}, "bottle": {"remainingMl": 300, "filledAt": _iso(now - timedelta(hours=1)), "doseMl": 40, "feedsPerDay": 2, "windowStart": "10:00", "windowEnd": "18:00",
                                                        "history": [{"event": "fed_tank", "at": _iso(datetime(2026, 8, 13, 7, 0, tzinfo=tz)), "ml": 40}]}}
     tl = _tl(now, products=products, hatchery=hatchery, brine_feeds=feeds, cultures=cultures, culture_bottle_species={"rotifer_L"})
     rj = _by_id(tl, "shelf:rj:")
@@ -3289,7 +3290,7 @@ def test_feed_timeline_windows_for_the_shelf_the_brine_and_the_bottle():
     assert [e["at"] for e in _by_id(plain, "brine:")] == [None, None] and sorted(e["status"] for e in _by_id(plain, "brine:")) == ["done", "due"]
     # An empty bottle plans nothing, its pours still show.
     empty = _tl(now, cultures={**cultures, "bottle": {**cultures["bottle"], "remainingMl": 0}})
-    assert [e["unplanned"] for e in empty["events"] if e["source"] == "cultures-bottle"] == [True]
+    assert [(e["status"], e["actualMl"]) for e in empty["events"] if e["source"] == "cultures-bottle"] == [("done", 40)]
 
 
 def test_a_feed_that_names_its_slot_fills_that_slot():
@@ -3298,7 +3299,7 @@ def test_a_feed_that_names_its_slot_fills_that_slot():
     against the slot it was made from."""
     tz = timezone.utc
     now = datetime(2026, 8, 13, 17, 20, tzinfo=tz)
-    hatchery = {"enabled": True, "reservoir": {"remainingMl": 400}, "fridgeBottle": {"remainingMl": 0},
+    hatchery = {"enabled": True, "reservoir": {"remainingMl": 600, "mixedAt": _iso(now - timedelta(hours=1))}, "fridgeBottle": {"remainingMl": 0},
                 "handFeed": {"defaultDoseMl": 250, "feedsPerDay": 3, "windowStart": "11:00", "windowEnd": "21:00"}}
     fed = [{"at": _iso(datetime(2026, 8, 13, 17, 11, tzinfo=tz)), "ml": 250, "slot": "11:00"}]
     tl = _tl(now, hatchery=hatchery, brine_feeds=fed)
@@ -4140,7 +4141,7 @@ def test_ws_summary_stocks_the_shelf_with_the_hatcherys_brine():
     soaking = payload["shelf"]["products"]["live_brine_container"]
     assert soaking["live"]["status"] == "enriching" and soaking["expiry"]["status"] == "fresh", soaking["live"]
     assert 7.9 <= soaking["live"]["hoursLeft"] <= 8.1
-    assert payload["speciesPlan"]["soon"] == []   # the container covers it already
+    assert len(payload["speciesPlan"]["soon"]) == 1, "a running soak is future food, not available food"
 
 
 def test_ws_summary_live_shelf_defers_to_a_linked_pump_bottle():
@@ -4646,7 +4647,8 @@ def test_ws_summary_species_report_sets_the_cones_feed_aside():
     assert lib["dendronephthya"]["particle"] == "1–20 µm" and lib["dendronephthya"]["foodWords"] == ["live phyto"]
     assert lib["gorgonian_hard"]["mouth"]["fits"] == ["rotifers", "oyster eggs"]
     # A tank phyto on the shelf: fed by that one alone, the cone's still set aside.
-    cfg["consumables"]["products"]["rj"] = _product(name="Reef Juice", particleUmMin=1, particleUmMax=20)
+    cfg["consumables"]["products"]["rj"] = _product(name="Reef Juice", particleUmMin=1, particleUmMax=20,
+                                                   openedAt=_iso(now - timedelta(days=1)))
     run(integration.websocket_nps_summary(hass, conn, {"id": 2}))
     row = conn.results[-1].payload["speciesPlan"]["species"][0]
     assert row["status"] == "covered" and [f["name"] for f in row["fedBy"]] == ["Reef Juice"]

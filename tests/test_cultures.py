@@ -2738,7 +2738,7 @@ def test_ws_rotifer_harvest_refills_with_phyto_from_the_home_bottle():
     real = integration._mixing_hatchery_debit
     integration._mixing_hatchery_debit = lambda hass_, config_, litres, why: debits.append(round(litres * 1000))
     try:
-        run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "tint": "clearing", "harvested": True,
+        run(integration.websocket_cultures_log(hass, conn, {"id": 2, "jar_id": "c1", "tint": "clearing", "harvested": True, "fed": True,
                                                             "phyto_from": "bottle:home_phyto_c2"}))
         assert not conn.errors, conn.errors
         cfg = _config(entry)
@@ -2747,6 +2747,7 @@ def test_ws_rotifer_harvest_refills_with_phyto_from_the_home_bottle():
         assert row["event"] == "harvest" and row["fed"] is True and row["phytoMl"] == 170 and row["phytoFrom"] == "bottle:home_phyto_c2"
         assert cone_after["state"]["lastTint"] == "green" and cone_after["state"]["lastFedAt"], "the refill IS the feed"
         bottle = cfg["consumables"]["products"]["home_phyto_c2"]
+        assert len(bottle["history"]) == 1, "the refill is the feed; the combined tap must not debit it twice"
         assert bottle["remainingMl"] == 430 and bottle["history"][-1]["to"] == "jar" and bottle["history"][-1]["jarId"] == "c1"
         # 675 ml refill at 27 ppt: 170 ml of 35 ppt phyto + 351 ml mix + 154 ml RODI.
         assert debits == [351], debits

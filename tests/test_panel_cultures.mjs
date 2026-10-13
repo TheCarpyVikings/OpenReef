@@ -1691,4 +1691,17 @@ test("a column reactor on an animal jar: the settings kind, the drain-off-the-ta
 });
 
 // Keep this LAST: a test defined below the runner is a test that never runs.
+test("an unavailable linked feed leaves the culture care controls without a false fed action", async () => {
+  const panel = await culturesPanel();
+  const jar = panel._cultures.summary.jars[0];
+  jar.feed.pauseReason = "Linked food is empty — refill it";
+  jar.feedAdvice = { action: "check", reason: jar.feed.pauseReason };
+  panel._cultures.summary.enrichment.pauseReason = "Enrichment bottle is empty";
+  const html = panel._culturesTab();
+  assert(html.includes(jar.feed.pauseReason), "the missing supply is explained");
+  assert(!html.includes('data-action="cultures-fed" data-id="c1"'), "no feed from an empty bottle");
+  assert(html.includes('data-action="cultures-harvested-only"'), "a harvest remains loggable without inventing a feed");
+  assert(html.includes('data-cultures-enrich="c1" disabled'), "empty enrichment is unavailable");
+});
+
 runTests();

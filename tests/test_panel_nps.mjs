@@ -335,7 +335,7 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     // A brine chip logs its own feed — from whatever holds brine.
     panel._nps.summary.timeline.events.push({ id: "brine:0", at: null, how: "hand", source: "brine", name: "Live brine", productId: "", ml: 250,
       actualMl: null, status: "due", doneAt: null, note: "", kind: "dose", band: null, unplanned: false, nextDate: null });
-    panel._nps.summary.hatchery = { reservoir: { remainingMl: 400 }, fridgeBottle: { remainingMl: 0 } };
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 400, freshness: { status: "fresh" } }, fridgeBottle: { remainingMl: 0 } };
     panel._nps.timelineOpen = "brine:0";
     html = panel._npsTimelineSvg();
     assert(html.includes('class="primary compact-button" data-action="nps-hand-feed"') && html.includes("Fed 250 ml</button>") && !html.includes("nps-fridge-feed") && !html.includes("data-slot"), `brine card: ${html}`);
@@ -354,15 +354,15 @@ test("tapping a mark opens its dose card with the right actions, and the actions
     assert(html.includes(`<circle cx="${x16}" cy="54" r="5.5" fill="#ef6c00"`) && html.includes("Done at 17:11 (planned 16:00) · 250 ml"), `matched dose sits on its slot: ${html}`);
     panel._nps.timelineOpen = "brine:0";
     html = panel._npsTimelineSvg();
-    panel._nps.summary.hatchery = { reservoir: { remainingMl: 0 }, fridgeBottle: { remainingMl: 120 } };
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 0 }, fridgeBottle: { remainingMl: 300, freshness: { status: "fresh" } } };
     html = panel._npsTimelineSvg();
     assert(html.includes('class="primary compact-button" data-action="nps-fridge-feed"') && html.includes("from the fridge bottle") && !html.includes("nps-hand-feed"), "bottle only");
-    panel._nps.summary.hatchery = { reservoir: { remainingMl: 400 }, fridgeBottle: { remainingMl: 120 } };
+    panel._nps.summary.hatchery = { reservoir: { remainingMl: 400, freshness: { status: "fresh" } }, fridgeBottle: { remainingMl: 300, freshness: { status: "fresh" } } };
     html = panel._npsTimelineSvg();
     assert(html.includes("Fed 250 ml from the container") && html.includes("Fed 250 ml from the fridge bottle"), "both");
     panel._nps.summary.hatchery = { reservoir: { remainingMl: 0 }, fridgeBottle: { remainingMl: 0 } };
     html = panel._npsTimelineSvg();
-    assert(html.includes("No brine on hand") && !html.includes("nps-hand-feed"), "nothing to feed from");
+    assert(html.includes("No usable brine") && !html.includes("nps-hand-feed"), "nothing to feed from");
     // The water change: a deep link.
     panel._nps.timelineOpen = "awc:1";
     assert(panel._npsTimelineSvg().includes('data-action="tab" data-id="awc"'), "awc card links out");
@@ -2739,6 +2739,47 @@ test("empty and alternative phyto bottles pause shelf actions and maintenance", 
     assert(html.includes("Shared tank dose") && html.includes("Dosed 35 ml"), "the stocked source offers the one shared dose");
     assert(panel._maintenanceDueCount() === 1, "one source means one maintenance reminder");
   } finally { restore(); }
+});
+
+test("live shelf feeds require available food and never label more than the stock", async () => {
+  const panel = await npsPanel();
+  const product = { name: "Live food", remainingMl: 10, live: {
+    kind: "brine", vessel: "container", status: "prime", defaultDoseMl: 250,
+    feedAvailability: { available: true },
+  } };
+  let html = panel._npsLiveBrineCard("live_brine_container", product, { remainingMl: 10 });
+  assert(html.includes("Fed 10 ml") && !html.includes("Fed 250 ml"), "the label matches the actual debit");
+  for (const patch of [{ expired: true }, { status: "enriching" }, { feedAvailability: { available: false, pauseReason: "Wait for fresh brine" } }]) {
+    html = panel._npsLiveBrineCard("live_brine_container", { ...product, live: { ...product.live, ...patch } }, { remainingMl: 10 });
+    assert(!html.includes('data-action="nps-hand-feed"') && !html.includes('data-action="nps-live-feed"'), "unavailable food has no feed buttons");
+  }
+  html = panel._npsLiveBrineCard("live_rotifer_bottle", { ...product, live: { kind: "rotifers", vessel: "rotifers", expired: true } }, { remainingMl: 10 });
+  assert(html.includes("Past shelf life") && !html.includes('data-action="cultures-bottle-fed"'), "expired rotifers cannot be offered as food");
+  html = panel._npsLiveBrineCard("live_rotifer_bottle", { ...product, live: { kind: "rotifers", vessel: "rotifers", defaultDoseMl: 250 } }, { remainingMl: 300 });
+  assert(html.includes("Fed 250 ml"), "the NPS shelf uses the served rotifer dose even before the Cultures tab loads");
+});
+
+test("the hatchery hides unavailable container and fridge feeds", async () => {
+  const panel = await npsPanel();
+  panel._nps.summary.hatchery = { reservoir: { volumeMl: 750, remainingMl: 0 },
+    fridgeBottle: { remainingMl: 100, freshness: { status: "stale" } },
+    handFeed: { defaultDoseMl: 250, sources: {
+      container: { remainingMl: 0, available: false }, bottle: { remainingMl: 100, available: false },
+    } } };
+  let html = panel._hatcheryPanel();
+  assert(!html.includes('data-action="nps-hand-feed"') && !html.includes('data-action="nps-fridge-feed"'), "capacity is not available food");
+  panel._nps.summary.hatchery.handFeed.sources.bottle = { remainingMl: 100, available: true };
+  panel._nps.summary.hatchery.fridgeBottle.freshness.status = "fresh";
+  html = panel._hatcheryPanel();
+  assert(html.includes('data-action="nps-fridge-feed"') && html.includes("Fed 100 ml"), "fresh stock offers the available portion");
+});
+
+test("a recovering cone shows its clock without offering a tank harvest", async () => {
+  const panel = await npsPanel();
+  const html = panel._npsLiveConeCard("cone", { name: "Cone", live: {
+    jarId: "r", harvestDue: false, harvestHoursUntil: 20, feedAvailability: { available: false },
+  } }, {});
+  assert(html.includes("next harvest in ~20 h") && !html.includes('data-action="cultures-harvest-tank"'), "wait for recovery before suggesting another harvest");
 });
 
 // Keep this LAST: a test defined below the runner is a test that never runs.

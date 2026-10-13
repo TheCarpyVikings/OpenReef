@@ -27,7 +27,7 @@ from .awc import _f, _parse_iso
 from .dosing import compile_schedule, is_standing, standing_state
 # The jar's own harvest clock (0.7.158): the strip reads the same function the
 # Cultures card and the culture reminders read — never a re-derived copy.
-from .cultures import culture_state, species_kind
+from .cultures import bottle_state, culture_state, harvest_ready, species_kind, species_preset
 
 RUNWAY_WINDOW_DAYS = 14        # usage averaging window for days-left forecasts
 LOW_PERCENT_DEFAULT = 10.0     # lowThresholdMl 0 = auto ⇒ this % of the bottle
@@ -707,6 +707,19 @@ def hand_dose_undo(product: dict[str, Any], now: datetime) -> dict[str, Any]:
                     "minutesLeft": round(HAND_DOSE_UNDO_MIN - age_min, 1)}
         break
     return {"available": False, "ml": None, "at": None, "minutesLeft": None}
+
+
+def food_stock_pause_reason(product: Any, ml: float, now: datetime) -> str:
+    """A linked food dose requires a real, stocked, in-date bottle."""
+    if not isinstance(product, dict):
+        return "Linked food is missing — choose an available food in settings."
+    remaining = max(0.0, _f(product.get("remainingMl")))
+    name = str(product.get("name") or "Linked food")
+    if remaining < ml:
+        return f"{name}: {remaining:g} ml left; this dose needs {ml:g} ml — refill or choose available food."
+    if expiry_state(product, now)["status"] == "expired":
+        return f"{name} is expired or its opening date is missing — replace it before dosing."
+    return ""
 
 
 def hand_dose_state(product: dict[str, Any], now: datetime, tank_l: Any = None,
@@ -1641,6 +1654,71 @@ def instar_two_delay_hours(temp_c: Any = None,
             "factor": round(factor, 2)}
 
 
+def brine_batch_shelf_hours(loaded_iso: Any, stamps: dict[str, Any], now: datetime,
+                           room_h: float = BRINE_SHELF_H_ROOM) -> float:
+    """Hours-from-load a batch stays feedable, from ITS stamps (doc §12):
+    the two-rate clock (room until ``refrigeratedAt``, fridge after, plus
+    ``fridgeSavedH`` banked), and the boost window instead of the yolk
+    window for an enriched batch. Shared by the container and the bottle."""
+    fridged_at = str(stamps.get("refrigeratedAt") or "")
+    saved_h = min(240.0, max(0.0, _f(stamps.get("fridgeSavedH"))))
+
+    def _window(iso: Any, r_h: float, f_h: float) -> float:
+        return brine_window_hours(iso, now, r_h, f_h, fridged_at, saved_h)
+
+    shelf_h = _window(loaded_iso, room_h, max(BRINE_SHELF_H_FRIDGE, room_h))
+    if not stamps.get("lastLoadEnriched"):
+        return shelf_h
+    # The HUFA boost is transient (doc §10.5): 12 h warm / 48 h fridged — and
+    # it decays from when the SOAK FINISHED (enrichedAt), not from the load,
+    # so an evening enrich of a morning batch keeps an honest clock. Legacy
+    # states without the stamp fall back to capping from the load.
+    enriched_dt = _parse_iso(stamps.get("enrichedAt"))
+    loaded_dt = _parse_iso(loaded_iso)
+    if enriched_dt is None or loaded_dt is None or enriched_dt.tzinfo is None or loaded_dt.tzinfo is None:
+        return min(shelf_h, _window(loaded_iso, ENRICH_SHELF_H_ROOM,
+                                    ENRICH_SHELF_H_FRIDGE))
+    soak_offset_h = max(0.0, (enriched_dt - loaded_dt).total_seconds() / 3600.0)
+    # NOT min()'d against the plain shelf (0.7.89): that 24 h exists because
+    # unfed nauplii burn their yolk down, and a gut-loaded batch is the one
+    # case where the premise is false. Capping here made the container go
+    # "stale" a few hours after the soak the app itself asked for.
+    boost_h = _window(stamps.get("enrichedAt"), ENRICH_SHELF_H_ROOM,
+                      ENRICH_SHELF_H_FRIDGE)
+    return min(ENRICH_SHELF_MAX_H, soak_offset_h + boost_h)
+
+
+def brine_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) -> bool:
+    loaded = _parse_iso(loaded_iso)
+    try:
+        if loaded is None or loaded > now:
+            return True
+        enriched = _parse_iso(stamps.get("enrichedAt")) if stamps.get("lastLoadEnriched") else None
+        if enriched is not None and (enriched > now or enriched < loaded):
+            return True
+        return (now - loaded).total_seconds() / 3600 >= brine_batch_shelf_hours(loaded_iso, stamps, now)
+    except TypeError:
+        return True
+
+
+def brine_feed_sources(hatchery: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Feedable stock, on the same batch clock as transfers and the pump guard."""
+    sources = {}
+    soaking = bool(((hatchery.get("enrichment") or {}).get("state") or {}).get("startedAt"))
+    for vessel, key in (("container", "reservoir"), ("bottle", "fridgeBottle")):
+        batch = hatchery.get(key) or {}
+        ml = max(0.0, _f(batch.get("remainingMl")))
+        reason = ""
+        if ml <= 0:
+            reason = "No brine available — this vessel is empty."
+        elif vessel == "container" and soaking:
+            reason = "Finish and rinse, or cancel, the enrichment soak before feeding."
+        elif brine_batch_is_stale(batch.get("mixedAt"), batch, now):
+            reason = "Brine is past its handling window or its age is unknown — load fresh brine."
+        sources[vessel] = {"remainingMl": ml, "available": not reason, "pauseReason": reason}
+    return sources
+
+
 def hatch_prime_state(mixed_at_iso: Any, now: datetime,
                       enriched_at_iso: Any = None,
                       refrigerated: bool = False,
@@ -1663,7 +1741,9 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime,
     if mixed is None:
         return dict(unknown)
     try:
-        age_h = max(0.0, (now - mixed).total_seconds() / 3600.0)
+        if mixed > now:
+            return dict(unknown)
+        age_h = (now - mixed).total_seconds() / 3600.0
     except TypeError:
         return dict(unknown)
     enriched = _parse_iso(enriched_at_iso)
@@ -1673,7 +1753,9 @@ def hatch_prime_state(mixed_at_iso: Any, now: datetime,
         hold_h = brine_window_hours(enriched_at_iso, now, ENRICH_SHELF_H_ROOM,
                                     ENRICH_SHELF_H_FRIDGE, stamp, fridge_saved_h)
         try:
-            soak_age_h = max(0.0, (now - enriched).total_seconds() / 3600.0)
+            if enriched > now or enriched < mixed:
+                return dict(unknown)
+            soak_age_h = (now - enriched).total_seconds() / 3600.0
         except TypeError:
             return dict(unknown)
         left_h = hold_h - soak_age_h
@@ -1979,6 +2061,7 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
                       channels: dict[str, Any],
                       pending: list[dict[str, Any]] | None = None,
                       quiet_product_ids: set[str] | frozenset[str] | None = None,
+                      now: datetime | None = None,
                       ) -> dict[str, Any]:
     """The species compiler: what the selected livestock needs, whether the
     shelf and pumps cover it, and per-pump schedule suggestions. Advisory
@@ -2010,9 +2093,19 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
     soon: list[str] = []
     warnings: list[str] = []
     suggestions: list[dict[str, Any]] = []
-    product_items = [(pid, p) for pid, p in products.items() if isinstance(p, dict)
-                     and pid not in quiet
-                     and not (isinstance(p.get("live"), dict) and p["live"].get("expired"))]
+    def usable(p: Any) -> bool:
+        if not isinstance(p, dict):
+            return False
+        live = p.get("live") if isinstance(p.get("live"), dict) else {}
+        if live.get("expired") or (live.get("feedAvailability") or {}).get("available") is False:
+            return False
+        if live.get("vessel") == "cone":
+            return True
+        if "remainingMl" in p and _f(p.get("remainingMl")) <= 0:
+            return False
+        return bool(live) or now is None or expiry_state(p, now)["status"] != "expired"
+
+    product_items = [(pid, p) for pid, p in products.items() if pid not in quiet and usable(p)]
     culture_items = [(pid, p) for pid, p in products.items()
                      if isinstance(p, dict) and pid in quiet]
     pending_list = [p for p in (pending or []) if isinstance(p, dict)]
@@ -2069,7 +2162,7 @@ def compile_feed_plan(selected_ids: list[str], products: dict[str, Any],
         if pid in quiet:
             continue                        # it doses a culture, not the tank
         product = products.get(pid)
-        if not isinstance(product, dict):
+        if not usable(product):
             continue
         matches = [sp for sp in selected if _feeds(product, sp)]
         if not matches:
@@ -2456,6 +2549,29 @@ def _timed_plan(events: list[dict[str, Any]], done: list[dict[str, Any]], now_mi
     return extras
 
 
+def _stocked_feed_plan(planned: list[dict[str, Any]], sources: dict[str, Any]) -> list[dict[str, Any]]:
+    """Reserve only unlogged portions; recorded feeds have already debited stock."""
+    left = {key: _f(value.get("remainingMl")) if value.get("available") else 0
+            for key, value in sources.items()}
+    kept = []
+    for event in planned:
+        if event["status"] == "done":
+            kept.append(event)
+            continue
+        dose = _f(event.get("ml"))
+        vessels = [key for key, ml in left.items() if dose > 0 and ml >= dose]
+        if not vessels:
+            continue
+        event["feedVessels"] = vessels
+        if event["source"] == "brine":
+            where = " or ".join("the fridge bottle" if key == "bottle" else "the brine container" for key in vessels)
+            event["note"] = f"from {where} — Fed here or on the hatchery card logs it"
+        if event["status"] != "missed":
+            left[vessels[0]] -= dose
+        kept.append(event)
+    return kept
+
+
 def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: dict[str, Any],
                   awc: dict[str, Any] | None = None, cultures: dict[str, Any] | None = None,
                   hatchery: dict[str, Any] | None = None,
@@ -2644,9 +2760,9 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         # Cultures card says "first harvest in ~27 d", so must the strip — and
         # a crashed jar has no clock at all. Respect the exact due instant,
         # including establishment and fractional-day recovery intervals.
-        clock = culture_state(jar, now_local).get("harvest") or {}
+        state_now = culture_state(jar, now_local)
         planned = []
-        if straight and clock.get("due") and cultures.get("enabled", True):
+        if straight and harvest_ready(state_now, phyto=phyto) and cultures.get("enabled", True):
             planned.append(ev(id=f"{source}:0", source=source, name=name, ml=None, status="due",
                               note=("a dark vessel, straight into the flow at dusk — by tint" if phyto
                                     else "through the net straight into the tank — the cone's own clock" if bottled
@@ -2675,12 +2791,16 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         slots = spread_slots(per_day, bottle.get("windowStart"), bottle.get("windowEnd"))
         dose = round(_f(bottle.get("doseMl")), 1) or None
         planned = []
-        if per_day > 0 and _f(bottle.get("remainingMl")) > 0:
+        if per_day > 0:
             times: list[int | None] = list(slots) if slots else [None] * per_day
             planned = [ev(id=f"cultures-bottle:{i}", at=t, source="cultures-bottle", name="Rotifers from the bottle",
                           ml=dose, status="planned", note="from the rotifer bottle — the Cultures tab's Fed button logs it")
                        for i, t in enumerate(times)]
         extras = _timed_plan(planned, bottle_done, now_min)
+        fresh = bottle_state(bottle, species_preset("rotifer_L")["bottleShelfDays"], now_local)
+        planned = _stocked_feed_plan(planned, {"rotifers": {
+            "remainingMl": fresh["remainingMl"],
+            "available": cultures.get("enabled", True) and fresh["status"] not in ("empty", "stale")}})
         for i, extra in enumerate(extras):
             extra.update({"id": f"cultures-bottle:x{i}", "source": "cultures-bottle", "name": "Rotifers from the bottle",
                           "actualMl": extra.get("ml"), "note": "fed from the rotifer bottle"})
@@ -2690,10 +2810,10 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
     # --- Hand-fed brine: the hatchery's feeds-a-day as any-time chips while
     # brine is on hand; the hand-feed reminder's completions are the done marks.
     hatchery = hatchery if isinstance(hatchery, dict) else {}
-    if hatchery and not fx_enabled:
-        res = hatchery.get("reservoir") if isinstance(hatchery.get("reservoir"), dict) else {}
-        fridge = hatchery.get("fridgeBottle") if isinstance(hatchery.get("fridgeBottle"), dict) else {}
-        on_hand = _f(res.get("remainingMl")) > 0 or _f(fridge.get("remainingMl")) > 0
+    if hatchery or brine_feeds:
+        sources = brine_feed_sources(hatchery, now_local)
+        if fx_enabled or hatchery.get("enabled") is False:
+            sources = {}
         hand = hatchery.get("handFeed") if isinstance(hatchery.get("handFeed"), dict) else {}
         per_day = max(0, int(_f(hand.get("feedsPerDay"))))
         dose = round(_f(hand.get("defaultDoseMl")), 1) or None
@@ -2703,7 +2823,7 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
         times: list[int | None] = list(slots) if slots else [None] * per_day
         planned = [ev(id=f"brine:{i}", at=t, how="hand", source="brine", name="Live brine", ml=dose, status="planned",
                       note="from the brine container — Fed here or on the hatchery card logs it")
-                   for i, t in enumerate(times if on_hand else [])]
+                   for i, t in enumerate(times)]
         done = []
         for item in (brine_feeds or []):
             if isinstance(item, dict) and not item.get("undoneAt"):
@@ -2712,6 +2832,7 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                     done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
                                  "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at"))})
         extras = _timed_plan(planned, done, now_min)
+        planned = _stocked_feed_plan(planned, sources)
         for i, extra in enumerate(extras):
             extra.update({"id": f"brine:x{i}", "source": "brine", "name": "Live brine",
                           "actualMl": extra.get("ml"), "note": "hand-fed brine"})
