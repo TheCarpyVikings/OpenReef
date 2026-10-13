@@ -2783,4 +2783,23 @@ test("a recovering cone shows its clock without offering a tank harvest", async 
 });
 
 // Keep this LAST: a test defined below the runner is a test that never runs.
+
+test("hatchery summary names the primary vessel and uses its saved batch clock", async () => {
+  const panel = await npsPanel();
+  const hatch = v2HatcherySummary();
+  hatch.primaryVessel = "v2";
+  hatch.eggType = "standard";
+  hatch.hatchHours = 36;
+  hatch.vessels[1] = { id: "v2", name: "Hatchery 2", volumeL: 0.4, eggType: "standard", hatchHours: 36,
+    state: { status: "incubating", hoursElapsed: 22, hoursLeft: 2, percent: 92, eggType: "decapsulated", hatchHours: 24 } };
+  hatch.nextHatch.assumption = "Assumes room for each harvest and a fresh container; topping up keeps the older expiry.";
+  panel._nps.summary.hatchery = hatch;
+  const html = panel._hatcheryTab();
+  const cards = html.match(/<div class="summary-grid">([\s\S]*?)<\/div>/)?.[1] || "";
+  assert(cards.includes("Batch · Hatchery 2") && cards.includes("92%"), "the batch headline identifies its vessel");
+  assert(cards.includes("Clock · Hatchery 2") && cards.includes("24 h") && cards.includes("this batch&#039;s saved clock"), "the saved 24 h batch clock takes precedence over changed 36 h settings");
+  assert(cards.includes("Decapsulated") && !cards.includes("Standard cysts"), "the batch's cysts label matches its own stamp");
+  assert(html.includes("<summary>Forecast assumptions</summary>") && html.includes("topping up keeps the older expiry"), "planning assumptions stay available in expandable detail");
+});
+
 runTests();

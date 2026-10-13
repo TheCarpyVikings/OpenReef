@@ -676,8 +676,10 @@ def freshness_state(reservoir: dict[str, Any] | None, now: datetime) -> dict[str
     if mixed is None:
         return {"status": "stale", "hoursLeft": 0.0, "ageHours": None}
     try:
-        age_h = max(0.0, (now - mixed).total_seconds() / 3600.0)
+        age_h = (now - mixed).total_seconds() / 3600.0
     except TypeError:
+        return {"status": "stale", "hoursLeft": 0.0, "ageHours": None}
+    if age_h < 0:
         return {"status": "stale", "hoursLeft": 0.0, "ageHours": None}
     left_h = shelf_days * 24.0 - age_h
     if left_h <= 0:

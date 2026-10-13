@@ -2201,14 +2201,17 @@ def test_ws_harvest_backflush_draws_the_container_fill_from_the_mix_vessel():
     assert _mix_litres(entry) == 38.75, "the 750 ml backflush must leave the vessel"
     log = entry.options[CONF_SETTINGS]["activity"]
     assert any("0.75 L drawn by the brine backflush" in str(i.get("message", "")) for i in log)
-    # Second batch: the container still holds 750 ml (top-to-full) — the
-    # backflush gains it nothing, so nothing is drawn beyond the cone.
+    # Second batch: the container still holds 750 ml (top-to-full) — refuse
+    # the harvest without consuming the batch or drawing backflush water.
     run(integration.websocket_nps_hatch_start(hass, conn, {"id": 3}))
     run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 4, "harvested": True}))
+    assert conn.errors[-1].code == "container_full"
+    assert entry.options[CONF_SETTINGS]["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchStartedAt"]
     assert _mix_litres(entry) == 38.25, "a full container gains nothing, draws nothing"
     # A cancelled (not harvested) hatch never backflushes — no container draw.
-    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 5}))
-    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 6, "harvested": False}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 5, "harvested": False}))
+    run(integration.websocket_nps_hatch_start(hass, conn, {"id": 6}))
+    run(integration.websocket_nps_hatch_cancel(hass, conn, {"id": 7, "harvested": False}))
     assert _mix_litres(entry) == 37.75
 
 
@@ -2537,10 +2540,10 @@ def test_next_hatch_chain_plans_on_the_plain_shelf():
 # --------------------------------------------------------------------------- #
 # 0.7.129 — the hand-dose plan (Reef Juice moved off the cultures onto the shelf)
 # --------------------------------------------------------------------------- #
-def _reef_juice(**over):
+def _reef_juice(now=None, **over):
     product = _product(name="Reef Juice", brand="Reefphyto", bottleMl=250.0, remainingMl=200.0,
-                       # WS tests use the wall clock: keep their dose supply fresh.
-                       openedAt=_iso(datetime.now(timezone.utc) - timedelta(days=2)),
+                       # WS tests use the wall clock; pure tests pass their fixed clock.
+                       openedAt=_iso((now or datetime.now(timezone.utc)) - timedelta(days=2)),
                        doseGuide={"light": 27, "medium": 18, "heavy": 9}, doseStocking="medium",
                        doseMl=0.0, doseEveryDays=1.0, doseNote="At dusk, skimmer off.", lastDosedAt="")
     product.update(over)
@@ -2557,22 +2560,22 @@ def test_hand_dose_guide_reads_the_stocking_band_off_the_tank_volume():
 
 
 def test_hand_dose_state_size_cadence_and_clock():
-    never = nps.hand_dose_state(_reef_juice(), NOW, 52)
+    never = nps.hand_dose_state(_reef_juice(now=NOW), NOW, 52)
     assert never["planned"] and never["ml"] == 2.9 and never["everyDays"] == 1.0
     assert never["clock"]["due"] and never["clock"]["hoursOverdue"] == 0.0, "planned but never dosed = due now"
-    fresh = nps.hand_dose_state(_reef_juice(lastDosedAt=_iso(NOW - timedelta(hours=6))), NOW, 52)
+    fresh = nps.hand_dose_state(_reef_juice(now=NOW, lastDosedAt=_iso(NOW - timedelta(hours=6))), NOW, 52)
     assert not fresh["clock"]["due"] and fresh["clock"]["hoursUntil"] == 18.0
-    late = nps.hand_dose_state(_reef_juice(lastDosedAt=_iso(NOW - timedelta(hours=30))), NOW, 52)
+    late = nps.hand_dose_state(_reef_juice(now=NOW, lastDosedAt=_iso(NOW - timedelta(hours=30))), NOW, 52)
     assert late["clock"]["due"] and late["clock"]["hoursOverdue"] == 6.0
-    explicit = nps.hand_dose_state(_reef_juice(doseMl=5), NOW, 52)
+    explicit = nps.hand_dose_state(_reef_juice(now=NOW, doseMl=5), NOW, 52)
     assert explicit["ml"] == 5.0, "the keeper's size beats the guide"
-    off = nps.hand_dose_state(_reef_juice(doseEveryDays=0), NOW, 52)
+    off = nps.hand_dose_state(_reef_juice(now=NOW, doseEveryDays=0), NOW, 52)
     assert off["planned"] is False and off["clock"]["available"] is False, "no size, no cadence = no plan"
     plain = nps.hand_dose_state(_product(doseMl=3, doseEveryDays=2, lastDosedAt=_iso(NOW - timedelta(days=1))), NOW, None)
     assert plain["planned"] and plain["ml"] == 3.0 and plain["clock"]["hoursUntil"] == 24.0
-    state = nps.consumable_state(_reef_juice(), NOW, 52)
+    state = nps.consumable_state(_reef_juice(now=NOW), NOW, 52)
     assert state["handDose"]["ml"] == 2.9
-    shelf = nps.shelf_summary({"rj": _reef_juice(), "p": _product()}, NOW, 52)
+    shelf = nps.shelf_summary({"rj": _reef_juice(now=NOW), "p": _product()}, NOW, 52)
     assert shelf["doseDueCount"] == 1 and shelf["products"]["p"]["handDose"]["planned"] is False
 
 
@@ -2854,7 +2857,7 @@ def test_feed_timeline_pumps_hand_slots_and_the_ladder():
                                   {"at": _iso(datetime(2026, 8, 12, 8, 0, tzinfo=tz)), "ml": 2, "kind": "dose"}],
                          lastDosedAt=_iso(datetime(2026, 8, 13, 8, 12, tzinfo=tz))),
         # Every day at 09:00, never dosed -> late (days cadence never goes red).
-        "rj": _reef_juice(doseMl=3, doseFirstAt="09:00"),
+        "rj": _reef_juice(now=now, doseMl=3, doseFirstAt="09:00"),
         # Every 2 days at 20:00, dosed yesterday -> ghost today.
         "ghost": _product(name="Amino", doseMl=1, doseEveryDays=2, doseFirstAt="20:00",
                           lastDosedAt=_iso(datetime(2026, 8, 12, 20, 0, tzinfo=tz))),
@@ -2918,7 +2921,7 @@ def test_feed_timeline_skip_carried_overdue_and_the_zero_states():
     assert empty["events"] == [] and empty["next"] == [] and empty["text"].startswith("Nothing scheduled")
     # A days-cadence slot past its time is late, never missed, right up to midnight.
     late_day = _tl(datetime(2026, 8, 13, 23, 59, tzinfo=tz),
-                   products={"rj": _reef_juice(doseMl=3, doseFirstAt="09:00")})
+                   products={"rj": _reef_juice(now=now, doseMl=3, doseFirstAt="09:00")})
     assert _by_id(late_day, "shelf:rj:")[0]["status"] == "late"
     # Local-day bucketing: a dose logged 23:30 UTC yesterday is TODAY in UTC+2.
     east = timezone(timedelta(hours=2))

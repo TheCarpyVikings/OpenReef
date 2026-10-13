@@ -12915,6 +12915,9 @@ def _dosing_food_freshness(channel: dict[str, Any], now: datetime,
             if ((hatchery.get("enrichment") or {}).get("state") or {}).get("startedAt"):
                 return {"status": "soaking", "hoursLeft": None, "ageHours": None}
             room_h = nps_engine._f(reservoir.get("shelfLifeDays"), 1.0) * 24 or 24.0
+            if nps_engine.brine_batch_is_stale(
+                    reservoir.get("mixedAt"), hatchery.get("reservoir") or {}, now, room_h):
+                return {"status": "stale", "hoursLeft": 0.0, "ageHours": None}
             shelf_h = _nps_batch_shelf_hours(reservoir.get("mixedAt"),
                                             hatchery.get("reservoir") or {}, now, room_h)
             reservoir = {**reservoir, "shelfLifeDays": shelf_h / 24.0}
@@ -15834,6 +15837,7 @@ def _nps_feed_hatchery(config: dict[str, Any]) -> dict[str, Any]:
     hatchery = (config.get("nps") or {}).get("hatchery") or {}
     reservoir = _nps_canonical_reservoir(config)
     return {**hatchery, "reservoir": {**(hatchery.get("reservoir") or {}),
+            "plainShelfHours": _nps_plain_shelf_hours(config, datetime.now(timezone.utc)),
             **{key: reservoir.get(key) for key in ("remainingMl", "volumeMl", "mixedAt")}}}
 
 
@@ -16034,8 +16038,12 @@ def _nps_brine_supply_for_planning(
     the feeding bottle's later expiry for its entire volume."""
     loaded, shelf_h, remaining, rate = _nps_brine_supply(config, now)
     bottle = _nps_fridge_bottle_state(config, now)
-    if bottle["remainingMl"] <= 0:
-        return loaded, shelf_h, remaining, rate
+    hatchery = (config.get("nps") or {}).get("hatchery") or {}
+    soaking = bool(((hatchery.get("enrichment") or {}).get("state") or {}).get("startedAt"))
+    container_ok = not soaking and not nps_engine.brine_batch_is_stale(
+        loaded, hatchery.get("reservoir") or {}, now, _nps_plain_shelf_hours(config, now))
+    bottle_ok = not nps_engine.brine_batch_is_stale(
+        bottle.get("mixedAt"), hatchery.get("fridgeBottle") or {}, now)
 
     def _expiry(iso: Any, hours: float) -> datetime | None:
         loaded_dt = _parse_datetime(iso)
@@ -16043,8 +16051,11 @@ def _nps_brine_supply_for_planning(
 
     container_exp = _expiry(loaded, shelf_h)
     bottle_exp = _expiry(bottle["mixedAt"], bottle["shelfHours"])
-    batches = [(container_exp, loaded, shelf_h, remaining),
-               (bottle_exp, bottle["mixedAt"], bottle["shelfHours"], bottle["remainingMl"])]
+    batches = []
+    if container_ok:
+        batches.append((container_exp, loaded, shelf_h, remaining))
+    if bottle_ok:
+        batches.append((bottle_exp, bottle["mixedAt"], bottle["shelfHours"], bottle["remainingMl"]))
     batches = sorted((b for b in batches if b[0] is not None and b[0] > now
                       and (b[3] is None or b[3] > 0)), key=lambda b: b[0])
     if not batches:
@@ -16365,17 +16376,16 @@ def _nps_container_load(
     old_loaded = str(reservoir.get("mixedAt") or "")
     old_credit = hatchery["reservoir"].get("fridgeSavedH", 0)
     if remaining > 0:
-        supply_loaded, shelf_h, _r, _rate = _nps_brine_supply(config, now)
-        loaded_dt = _parse_datetime(supply_loaded)
-        age_ok = (loaded_dt is not None
-                  and (now - loaded_dt).total_seconds() / 3600.0 < shelf_h)
-        if not age_ok:
+        if nps_engine.brine_batch_is_stale(
+                old_loaded, hatchery["reservoir"], now, _nps_plain_shelf_hours(config, now)):
             return ("stale_brine",
                     "The container still holds brine past its shelf life — "
                     "discard it before loading the fresh batch.")
         if hatchery["reservoir"].get("lastLoadEnriched") and not enriched:
             return "enriched_brine", "Feed or refrigerate the enriched batch before loading plain brine."
     volume = _awc_num(reservoir.get("volumeMl"), 0, 0, 50000)
+    if volume > 0 and remaining >= volume:
+        return "container_full", "The brine container is full — feed or refrigerate some before harvesting."
     load = _awc_num(hatchery["reservoir"].get("loadVolumeMl"), 0, 0, 50000)
     remaining = _awc_num(reservoir.get("remainingMl"), 0, 0, 1e9)
     if volume > 0:
@@ -16875,6 +16885,8 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
         return "unknown_vessel", f"No hatchery '{requested}'"
     running = _nps_running_batches(config)
     target_id = requested
+    if harvested and requested and not any(vid == requested for vid, _started, _hours in running):
+        return "no_hatch", "This hatchery has no running batch to harvest — start a batch first."
     if not target_id and running:
         # Prefer the batch furthest through its clock (a ready one over a
         # half-done one); ties break on the oldest start.
@@ -16969,7 +16981,8 @@ async def websocket_nps_hatch_enrich(
         return
     now = datetime.now(timezone.utc)
     # Per-batch stamps — editing settings mid-soak never moves a running soak.
-    if _nps_batch_is_stale(loaded_iso, hatchery["reservoir"], now):
+    if nps_engine.brine_batch_is_stale(
+            loaded_iso, hatchery["reservoir"], now, _nps_plain_shelf_hours(config, now)):
         connection.send_error(msg["id"], "stale_brine", "Discard the expired batch before enriching fresh brine.")
         return
     if hatchery["reservoir"].get("lastLoadEnriched"):
@@ -17086,7 +17099,8 @@ def _nps_enrich_dose_apply(config: dict[str, Any], now: datetime) -> tuple[str, 
     if (nps_engine._f(reservoir.get("remainingMl")) <= 0
             or reservoir.get("mixedAt") != state.get("batchLoadedAt")):
         return "batch_changed", "The soaking batch is no longer in the container; cancel the soak."
-    if _nps_batch_is_stale(reservoir.get("mixedAt"), hatchery["reservoir"], now):
+    if nps_engine.brine_batch_is_stale(
+            reservoir.get("mixedAt"), hatchery["reservoir"], now, _nps_plain_shelf_hours(config, now)):
         return "stale_brine", "The waiting batch has expired; cancel the soak and discard it."
     pause_reason = _nps_enrich_pause_reason(config, hatchery["enrichment"], now)
     if pause_reason:
@@ -17122,6 +17136,16 @@ def _nps_enrich_second_dose_apply(config: dict[str, Any], now: datetime) -> tupl
         return "no_first_dose", "Add the first dose before the top-up"
     if state.get("secondDoseAt"):
         return "already_dosed", "The top-up is already logged"
+    reservoir = _nps_canonical_reservoir(config)
+    if (nps_engine._f(reservoir.get("remainingMl")) <= 0
+            or reservoir.get("mixedAt") != state.get("batchLoadedAt")):
+        return "batch_changed", "The soaking batch is no longer in the container; cancel the soak."
+    first = _parse_datetime(state.get("firstDoseAt"))
+    hours = nps_engine._f(state.get("enrichHours")) or nps_engine.ENRICH_DEFAULT_HOURS
+    if first is None or first > now:
+        return "invalid_clock", "The first dose has no valid time — check the enrichment record."
+    if now >= first + timedelta(hours=hours):
+        return "soak_complete", "The planned soak has finished — complete or cancel it before adding more food."
     pause_reason = _nps_enrich_pause_reason(config, hatchery["enrichment"], now)
     if pause_reason:
         return "food_unavailable", pause_reason
@@ -17297,7 +17321,8 @@ async def websocket_nps_fridge_bottle(
             connection.send_error(msg["id"], "soaking",
                                   "A soak is running — it needs to stay warm; finish or cancel it first")
             return
-        if _nps_batch_is_stale(loaded_iso, res_cfg, now):
+        if nps_engine.brine_batch_is_stale(
+                loaded_iso, res_cfg, now, _nps_plain_shelf_hours(config, now)):
             connection.send_error(msg["id"], "stale_brine",
                                   "That brine is past its shelf life — the fridge won't bring it "
                                   "back; discard it instead")
@@ -17367,7 +17392,8 @@ async def websocket_nps_fridge_bottle(
             return
         cont_remaining = _awc_num(container.get("remainingMl"), 0, 0, 1e9)
         cont_loaded = str(container.get("mixedAt") or "")
-        if cont_remaining > 0 and _nps_batch_is_stale(cont_loaded, res_cfg, now):
+        if cont_remaining > 0 and nps_engine.brine_batch_is_stale(
+                cont_loaded, res_cfg, now, _nps_plain_shelf_hours(config, now)):
             connection.send_error(msg["id"], "stale_brine",
                                   "The container still holds brine past its shelf life — "
                                   "discard it before pouring the bottle back")
@@ -18561,12 +18587,18 @@ def _cultures_nutrient_product(config: dict[str, Any], jar: dict[str, Any]) -> t
     products = (config.get("consumables") or {}).get("products") or {}
     nutrient = jar.get("nutrient") if isinstance(jar.get("nutrient"), dict) else {}
     pid = str(nutrient.get("productId") or "")
-    if pid and isinstance(products.get(pid), dict):
-        return pid, products[pid]
+    if pid:
+        return pid, products.get(pid) if isinstance(products.get(pid), dict) else None
     for cand, product in sorted(products.items()):
         if isinstance(product, dict) and "f/2" in str(product.get("name") or "").lower():
             return str(cand), product
     return "", None
+
+
+def _cultures_nutrient_pause_reason(config: dict[str, Any], jar: dict[str, Any], ml: float, now: datetime) -> str:
+    """Tracked nutrient must cover the recipe; an untracked addition stays manual."""
+    pid, product = _cultures_nutrient_product(config, jar)
+    return nps_engine.food_stock_pause_reason(product, ml, now) if pid and ml > 0 else ""
 
 
 def _cultures_home_bottle_fill(product: dict[str, Any], ml: float, now: datetime,
@@ -18581,8 +18613,10 @@ def _cultures_home_bottle_fill(product: dict[str, Any], ml: float, now: datetime
     new_ml = remaining + max(0.0, ml)
     accepted = (min(new_ml, cap) - remaining) if cap > 0 else max(0.0, ml)
     product["remainingMl"] = round(min(new_ml, cap) if cap > 0 else new_ml, 2)
-    if remaining <= 0 or not product.get("openedAt"):
+    if remaining <= 0:
         product["openedAt"] = now.isoformat()
+    elif cultures_engine._parse_iso(product.get("openedAt")) is None or cultures_engine._parse_iso(product.get("openedAt")) > now:
+        product["openedAt"] = ""
     product["lastShakenAt"] = now.isoformat()
     history = product.setdefault("history", [])
     if isinstance(history, list):
@@ -18615,13 +18649,15 @@ def _cultures_drip_load(hass: HomeAssistant, cid: str, channel: dict[str, Any], 
     before = max(0.0, awc_engine._f(reservoir.get("remainingMl")))
     taken = min(ml, max(0.0, volume - before)) if volume > 0 else ml
     reservoir["remainingMl"] = round(before + taken, 1)
-    reservoir["mixedAt"] = now.isoformat()
+    old = cultures_engine._parse_iso(reservoir.get("mixedAt"))
+    reservoir["mixedAt"] = now.isoformat() if before <= 0 else old.isoformat() if old is not None and old <= now else ""
     reservoir["refilledAt"] = now.isoformat()
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
-    runtime.setdefault("channels", {}).setdefault(cid, {})["staleFood"] = False
+    runtime.setdefault("channels", {}).setdefault(cid, {})["staleFood"] = dosing_engine.freshness_state(reservoir, now)["status"] == "stale"
     (runtime.get("channels", {}).get(cid) or {}).pop("pendingReservoirMl", None)
     runtime.setdefault("notified", {}).pop(f"stale_{cid}", None)
-    _dosing_record_event(channel, "refresh", f"Jar loaded with {taken:g} ml straight from {jar_name} — the day's clock restarted")
+    _dosing_record_event(channel, "refresh", f"Jar loaded with {taken:g} ml straight from {jar_name} — "
+                         + ("a new load" if before <= 0 else "the oldest remaining load keeps its clock"))
     return round(taken, 1)
 
 
@@ -18959,7 +18995,7 @@ def _cultures_animal_phyto_payload(config: dict[str, Any], cultures: dict[str, A
         owner = owners.get(str(pid))
         sources.append({"id": f"bottle:{pid}", "kind": "bottle", "name": str(product.get("name") or pid),
                         "ml": round(remaining), "ppt": awc_engine._f((owner or {}).get("salinityPpt"), mix_ppt),
-                        "ready": remaining > 0, "tint": ""})
+                        "ready": remaining > 0 and not nps_engine.food_stock_pause_reason(product, min(remaining, 0.5), now), "tint": ""})
     for vid in sorted(cultures["jars"]):
         vessel = cultures["jars"][vid]
         if not isinstance(vessel, dict) or cultures_engine.species_kind(vessel.get("species")) != "phyto":
@@ -18969,9 +19005,9 @@ def _cultures_animal_phyto_payload(config: dict[str, Any], cultures: dict[str, A
             continue
         sources.append({"id": f"vessel:{vid}", "kind": "vessel", "name": str(vessel.get("name") or vid),
                         "ml": round(awc_engine._f(vst.get("workingL")) * 1000), "ppt": awc_engine._f(vessel.get("salinityPpt"), 35.0),
-                        "ready": bool(vst.get("splitEligible")), "tint": str(vessel["state"].get("lastTint") or "")})
+                        "ready": cultures_engine.harvest_ready(vst, phyto=True), "tint": str(vessel["state"].get("lastTint") or "")})
     dose = cultures_engine.cone_dose_ml(jar.get("volumeL"))
-    lead = next((s for s in sources if s["ready"]), None)
+    lead = next((s for s in sources if s["ready"] and s["ml"] >= dose), None)
     guide = (cultures_engine.harvest_guide(jar, mix_ppt, None, dose, lead["ppt"]) if lead else None)
     fill = (cultures_engine.refill_guide(jar["volumeL"], 100, jar["salinityPpt"], mix_ppt, dose, lead["ppt"]) if lead else None)
     still_green = str(jar["state"].get("lastTint") or "") == "green"
@@ -18993,6 +19029,13 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
     bottle_id = str(jar.get("bottleProductId") or "") or _cultures_home_bottle_id(jid)
     bottle = products.get(bottle_id)
     split = cultures_engine.split_guide(jar, mix_ppt)
+    capacity = max(0.0, awc_engine._f((bottle or {}).get("bottleMl"), awc_engine._f(jar.get("bottleMl"), 1000)))
+    free = max(0.0, capacity - max(0.0, awc_engine._f((bottle or {}).get("remainingMl"))))
+    overflow = max(0.0, awc_engine._f(split.get("outMl")) - free)
+    split.update({"bottleFreeMl": round(free, 1), "bottleOverflowMl": round(overflow, 1)})
+    if overflow > 0 and str(jar.get("harvestTo") or "bottle") == "bottle":
+        split["warning"] = " · ".join(filter(None, (split.get("warning"),
+            f"The fridge bottle has {free:g} ml free; route the other {overflow:g} ml elsewhere or it will be recorded as waste.")))
     seed_default = cultures_engine.seed_guide(jar, mix_ppt)
     seed_kit = cultures_engine.seed_guide(jar, mix_ppt, working_l=preset.get("kitWorkingL", 3.5))
     home: dict[str, Any] = {"productId": bottle_id, "exists": False, "remainingMl": 0.0, "bottleMl": _awc_num(jar.get("bottleMl"), 1000, 100, 20000),
@@ -19025,7 +19068,7 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
             continue
         linked = str((channel.get("reservoir") or {}).get("productId") or "") == bottle_id
         drips.append({"id": str(cid), "name": str(channel.get("name") or cid), "linked": linked})
-        if linked and bool(channel.get("enabled", True)):
+        if linked and bool(channel.get("enabled", True)) and bool((channel.get("schedule") or {}).get("enabled", True)):
             drip_ml_day += _awc_num((channel.get("schedule") or {}).get("mlPerDay"), 0, 0, 100000)
     cone_ml_day = 0.0
     cultures = ((config.get("nps") or {}).get("cultures") or {})
@@ -19055,7 +19098,8 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
     opened = _parse_datetime(home.get("openedAt")) if home.get("exists") else None
     status = str(st.get("status") or "none")
     reseed_bottle = bool(status in ("none", "crashed") and home.get("exists") and awc_engine._f(home.get("remainingMl")) > 0
-                         and opened is not None and (now - opened).total_seconds() <= cultures_engine.BOTTLE_RESEED_DAYS * 86400)
+                         and opened is not None and opened <= now and (now - opened).total_seconds() <= cultures_engine.BOTTLE_RESEED_DAYS * 86400
+                         and not nps_engine.food_stock_pause_reason(bottle, min(250.0, awc_engine._f(home.get("remainingMl"))), now))
     # B (doc §5.8, Stage B): this vessel's parent when it is the backup (the
     # refresh recipe = its own 1:4 from the parent's split), or the backup it
     # owns (so the split form can say "→ B (refresh Nanno B)").
@@ -19198,6 +19242,9 @@ async def websocket_cultures_seed(
     starter_ml = msg.get("starter_ml")
     working_l = msg.get("working_l")
     from_bottle = bool(msg.get("from_bottle"))
+    if from_bottle and seeded_from:
+        connection.send_error(msg["id"], "invalid_source", "Choose either a sibling culture or the fridge bottle as the starter")
+        return
     if phyto:
         # The arrival check first (the rotifer pouch's lesson): an off-colour
         # starter is never seeded — nothing is written, the supplier is the call.
@@ -19212,7 +19259,7 @@ async def websocket_cultures_seed(
         bottle = _cultures_home_bottle(config, jar_id, jar) if from_bottle else None
         if from_bottle:
             opened = _parse_datetime((bottle or {}).get("openedAt"))
-            if not isinstance(bottle, dict) or awc_engine._f(bottle.get("remainingMl")) <= 0 or opened is None \
+            if not isinstance(bottle, dict) or awc_engine._f(bottle.get("remainingMl")) <= 0 or opened is None or opened > now \
                     or (now - opened).total_seconds() > cultures_engine.BOTTLE_RESEED_DAYS * 86400:
                 connection.send_error(msg["id"], "bottle_too_old",
                                       "A reseed from the fridge needs a bottle under a week old with something in it")
@@ -19225,11 +19272,43 @@ async def websocket_cultures_seed(
     if guide.get("available") is False:
         connection.send_error(msg["id"], "salinity_unavailable" if not phyto else "invalid_volume", guide["reason"])
         return
+    if not phyto:
+        pause = _cultures_feed_pause_reason(config, jar, now)
+        if pause:
+            connection.send_error(msg["id"], "feed_unavailable", pause)
+            return
+    elif from_bottle:
+        pause = nps_engine.food_stock_pause_reason(bottle, guide["starterMl"], now)
+        if pause:
+            connection.send_error(msg["id"], "bottle_unavailable", pause)
+            return
+    if phyto:
+        pause = _cultures_nutrient_pause_reason(config, jar, guide["nutrientMl"], now)
+        if pause:
+            connection.send_error(msg["id"], "nutrient_unavailable", pause)
+            return
+        if seeded_from:
+            parent = cultures["jars"][seeded_from]
+            parent_state = cultures_engine.culture_state(parent, now)
+            available = awc_engine._f(parent_state.get("workingL")) * 1000
+            if not parent_state.get("splitEligible") or guide["starterMl"] >= available:
+                connection.send_error(msg["id"], "invalid_source", "Use a healthy green or dark sibling and leave some culture as its seed")
+                return
+            if parent["salinityPpt"] != jar["salinityPpt"]:
+                connection.send_error(msg["id"], "salinity_unavailable", "A sibling starter must match the target salinity for this seed recipe")
+                return
     seed_guide = _cultures_seed_jar(config, jar, now, seeded_from, starter_ml=starter_ml, working_l=working_l,
                                     arrival_tint=arrival, starter_opened_at=str(msg.get("starter_opened_at") or ""),
                                     from_bottle=from_bottle)
     if phyto and from_bottle and isinstance(bottle, dict) and seed_guide:
         _consumable_debit(bottle, seed_guide["starterMl"], "dose", at=now, to="jar", jar_id=jar_id)
+    if phyto and seeded_from and seed_guide:
+        parent = cultures["jars"][seeded_from]
+        remaining = available - seed_guide["starterMl"]
+        parent["state"]["workingL"] = round(remaining / 1000, 2)
+        _cultures_history(parent, "harvest", now, ml=seed_guide["starterMl"], draw=True,
+                          to="vessel", dests=[{"to": "vessel", "ml": seed_guide["starterMl"]}],
+                          freshMl=0, nutrientMl=0, workingMl=round(remaining))
     source_name = cultures["jars"][seeded_from]["name"] if seeded_from else ("the fridge bottle" if from_bottle else "")
     if phyto and seed_guide:
         _append_activity(
@@ -19520,6 +19599,9 @@ def _cultures_phyto_source(config: dict[str, Any], cultures: dict[str, Any], jar
         remaining = max(0.0, awc_engine._f(product.get("remainingMl")))
         if awc_engine._f(product.get("bottleMl")) > 0 and remaining + 0.5 < ml:
             return "phyto_short", f"{product.get('name') or ident} holds {remaining:g} ml — {ml:g} ml is more than the bottle has"
+        pause = nps_engine.food_stock_pause_reason(product, ml, now)
+        if pause:
+            return "phyto_unavailable", pause
         owner = next((j for j in cultures["jars"].values() if isinstance(j, dict)
                       and (str(j.get("bottleProductId") or "") == ident or _cultures_home_bottle_id(
                           next((k for k, v in cultures["jars"].items() if v is j), "")) == ident)), None)
@@ -19535,8 +19617,10 @@ def _cultures_phyto_source(config: dict[str, Any], cultures: dict[str, Any], jar
             return "no_phyto_source", f"{vessel.get('name')} is not running"
         if not vst.get("splitEligible"):
             return "vessel_not_ready", f"{vessel.get('name')} wants a green or dark look with no sign on the record before it feeds a cone"
-        if ml > awc_engine._f(vst.get("workingL")) * 1000 + 0.5:
-            return "invalid_volume", f"{vessel.get('name')} holds {awc_engine._f(vst.get('workingL')) * 1000:g} ml"
+        if awc_engine._f(phyto_ml) <= 0 and not cultures_engine.harvest_ready(vst, phyto=True):
+            return "vessel_not_ready", "The estimated dose needs an observed dark culture; inspect it before choosing a measured amount"
+        if ml >= awc_engine._f(vst.get("workingL")) * 1000:
+            return "invalid_volume", f"{vessel.get('name')} holds {awc_engine._f(vst.get('workingL')) * 1000:g} ml — leave some culture as seed"
         return {"kind": "vessel", "ref": ref, "jarId": ident, "name": str(vessel.get("name") or ident),
                 "ml": round(ml, 1), "ppt": awc_engine._f(vessel.get("salinityPpt"), 35.0)}
     return "no_phyto_source", "Pick where the phyto comes from — a home bottle on the shelf or a vessel on the rack"
@@ -19720,16 +19804,16 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
         cones[cid] = cone
     if not st.get("splitEligible") and cones and not fresh_vessel:
         return "not_ready_to_split", f"{jar['name']} wants a green or dark look with no sign on the record before it feeds a cone"
-    named = sum(s["ml"] for s in shares)
-    if named > out_ml + 0.5:
-        return "invalid_volume", f"The destinations add up to {named:g} ml — more than the {out_ml:g} ml split"
     if any(s["to"] == "vessel" for s in shares) and sum(1 for s in shares if s["to"] == "vessel") > 1:
         return "invalid_volume", "One second vessel per split"
+    if sum(1 for s in shares if s["to"] == "drip") > 1:
+        return "invalid_volume", "One drip share per split"
     bottle_id = str(jar.get("bottleProductId") or "") or _cultures_home_bottle_id(jar_id)
     drips = _cultures_drip_channels(config, bottle_id) if any(s["to"] == "drip" for s in shares) else []
     if any(s["to"] == "drip" for s in shares) and not drips:
         return "no_drip", "No phyto drip is set up — bind a standing pump on the Dosing tab, or send this share to the bottle"
     vessel_into = ""
+    target_nutrient_id, target_nutrient_ml = "", 0.0
     if any(s["to"] == "vessel" for s in shares):
         idle = [jid for jid in sorted(cultures["jars"]) if jid != jar_id
                 and cultures["jars"][jid]["species"] == jar["species"]
@@ -19745,8 +19829,29 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
         if not st.get("splitEligible") and not fresh_vessel:
             return "not_ready_to_split", "B wants a green or dark vessel with no sign on the record"
         vessel_into = idle[0] if idle else backup
+        target = cultures["jars"].get(vessel_into) or {**jar, "volumeL": 1.0,
+            "starterMl": cultures_engine.species_preset(jar["species"]).get("starterMl", 250)}
+        share = next(s for s in shares if s["to"] == "vessel")
+        seed = cultures_engine.seed_guide(target, mix_ppt, share["ml"] or None)
+        if seed.get("available") is False:
+            return "invalid_volume", seed["reason"]
+        share["ml"] = seed["starterMl"]
+        target_nutrient_id, _target_product = _cultures_nutrient_product(config, target)
+        target_nutrient_ml = seed["nutrientMl"]
+        pause = _cultures_nutrient_pause_reason(config, target, target_nutrient_ml, now)
+        if pause:
+            return "nutrient_unavailable", pause
+    for share in shares:
+        if share["to"] == "drip" and share["ml"] <= 0:
+            share["ml"] = max(0.0, out_ml - sum(s["ml"] for s in shares))
+    named = sum(s["ml"] for s in shares)
+    if named > out_ml + 0.5:
+        return "invalid_volume", f"The destinations add up to {named:g} ml — more than the {out_ml:g} ml split"
     nutrient_ml = awc_engine._f(guide["nutrientMl"]) if nutrient and fresh > 0 else 0.0
     _npid, nutrient_product = _cultures_nutrient_product(config, jar) if nutrient_ml > 0 else ("", None)
+    pause = _cultures_nutrient_pause_reason(config, jar, nutrient_ml + (target_nutrient_ml if _npid and _npid == target_nutrient_id else 0), now)
+    if pause:
+        return "nutrient_unavailable", pause
     # ---- every check passed: write ---------------------------------------
     state = jar["state"]
     name = str(jar.get("name") or jar_id)
@@ -19762,6 +19867,7 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
                 accepted = _cultures_home_bottle_fill(bottle, share["ml"], now, config, name)
                 bottle_ml += accepted
                 words.append(f"{share['ml']:g} ml to the bottle" + (f" ({accepted:g} ml fitted)" if accepted < share["ml"] - 0.5 else ""))
+                share["ml"] = accepted
                 # Stage D: with the keeper's count behind the index, the crop's
                 # density is an ESTIMATE the bottle can carry — the drip's line
                 # then reads it. Without a count the bottle stays uncounted.
@@ -19773,13 +19879,14 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
                     words.append(f"~{est['cellsPerMl']:,.0f} cells/ml estimated from your count")
             else:
                 words.append(f"{share['ml']:g} ml to the bottle (no room on the shelf — not counted)")
+                share["ml"] = 0.0
         elif share["to"] == "tank":
             tank_ml += share["ml"]
             _nps_hand_feed_done(config, now, f"Logged automatically — {share['ml']:g} ml of phyto from {name} straight into the tank")
             words.append(f"{share['ml']:g} ml straight into the tank")
         elif share["to"] == "drip":
             cid, channel = drips[0]
-            taken = _cultures_drip_load(hass, cid, channel, share["ml"] if share["ml"] > 0 else out_ml, name, now)
+            taken = _cultures_drip_load(hass, cid, channel, share["ml"], name, now)
             share["ml"] = taken
             drip_loaded = True
             words.append(f"{taken:g} ml into the drip's jar ({channel.get('name') or cid})")
@@ -19939,21 +20046,25 @@ def _cultures_feed_credit(config: dict[str, Any], jar: dict[str, Any], jar_id: s
     dose row nearest the tap (older rows were stamped a breath later than the
     journal) is tombstoned; the ml returns only if the bottle still holds the
     load it came from. Returns the ml credited, 0 when nothing came back."""
-    feed = jar.get("feed") if isinstance(jar.get("feed"), dict) else {}
-    product = ((config.get("consumables") or {}).get("products") or {}).get(str(feed.get("productId") or ""))
-    if not isinstance(product, dict) or at is None:
+    products = ((config.get("consumables") or {}).get("products") or {})
+    if at is None:
         return 0.0
-    rows = product.get("history") if isinstance(product.get("history"), list) else []
-    best, best_gap = None, 10.0
-    for item in rows:
-        if not (isinstance(item, dict) and item.get("kind") == "dose" and item.get("to") == "jar"
-                and str(item.get("jarId") or "") == jar_id and not item.get("undoneAt")):
+    best, product, best_gap = None, None, 10.0
+    # The keeper may have changed the feed link since this tap. The original
+    # jar-bound stock row, not today's setting, identifies the bottle to credit.
+    for candidate in products.values():
+        if not isinstance(candidate, dict):
             continue
-        dosed = _parse_datetime(item.get("at"))
-        gap = abs((dosed - at).total_seconds()) if dosed is not None else None
-        if gap is not None and gap <= best_gap:
-            best, best_gap = item, gap
-    if best is None:
+        rows = candidate.get("history") if isinstance(candidate.get("history"), list) else []
+        for item in rows:
+            if not (isinstance(item, dict) and item.get("kind") == "dose" and item.get("to") == "jar"
+                    and str(item.get("jarId") or "") == jar_id and not item.get("undoneAt")):
+                continue
+            dosed = _parse_datetime(item.get("at"))
+            gap = abs((dosed - at).total_seconds()) if dosed is not None else None
+            if gap is not None and gap <= best_gap:
+                best, product, best_gap = item, candidate, gap
+    if best is None or product is None:
         return 0.0
     best["undoneAt"] = datetime.now(timezone.utc).isoformat()
     ml = max(0.0, awc_engine._f(best.get("ml")))
@@ -20021,6 +20132,10 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
                                          phyto["ml"] if phyto else None, phyto["ppt"] if phyto else None)
     if guide.get("available") is False:
         return "salinity_unavailable", guide["reason"]
+    if phyto is None:
+        pause = _cultures_feed_pause_reason(config, jar, now)
+        if pause:
+            return "feed_unavailable", pause
     before = cultures_engine.culture_state(jar, now)
     if split and not before["splitEligible"]:
         split = False
@@ -20277,6 +20392,7 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
         into_id = next((jid for jid in sorted(jars) if jid != jar_id
                         and cultures_engine.culture_state(jars[jid], now)["status"] in ("none", "crashed")
                         and jars[jid]["species"] == jar["species"]), "")
+    new_target = None
     if not into_id:
         if len(jars) >= cultures_engine.CULTURE_JARS_MAX:
             return ("jars_full", f"All {cultures_engine.CULTURE_JARS_MAX} jars are in use"), ""
@@ -20284,7 +20400,7 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
                        if f"c{n}" not in jars)
         base = jar["name"]
         new_name = (base[:-2] + " B") if base.endswith(" A") else f"{base} B"
-        jars[into_id] = {
+        new_target = {
             "name": new_name[:40], "species": jar["species"],
             # A phyto B is a windowsill bottle (doc §5.8): a litre is plenty.
             "volumeL": 1.0 if phyto else jar["volumeL"],
@@ -20294,10 +20410,7 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
             **({"mode": jar.get("mode", "batch"), "nutrient": dict(jar.get("nutrient") or {}),
                 "bottleMl": jar.get("bottleMl", 1000), "harvestTo": "bottle"} if phyto else {}),
         }
-        cultures = _nps_cultures_cfg(config)
-        jars = cultures["jars"]
-        jar = jars[jar_id]
-    target = jars[into_id]
+    target = new_target if new_target is not None else jars[into_id]
     if target["species"] != jar["species"]:
         return ("species_mismatch", "Split into a vessel for the same species"), into_id
     target_status = cultures_engine.culture_state(target, now)["status"]
@@ -20315,6 +20428,16 @@ def _cultures_split_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: s
         seed = cultures_engine.seed_guide(target, _cultures_mix_ppt(config), starter, None)
         if seed.get("available") is False:
             return ("invalid_volume", seed["reason"]), into_id
+        pause = _cultures_nutrient_pause_reason(config, target, seed["nutrientMl"], now)
+    else:
+        pause = _cultures_feed_pause_reason(config, target, now)
+    if pause:
+        return ("nutrient_unavailable" if phyto else "feed_unavailable", pause), into_id
+    if new_target is not None:
+        jars[into_id] = new_target
+        cultures = _nps_cultures_cfg(config)
+        jars = cultures["jars"]
+        jar, target = jars[jar_id], jars[into_id]
     if refresh:
         old_ml = round(awc_engine._f(target["state"].get("workingL")) * 1000.0)
         _cultures_history(target, "restart", now, ml=old_ml, tint=target["state"].get("lastTint") or None,

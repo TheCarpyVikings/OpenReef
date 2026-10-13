@@ -233,6 +233,113 @@ class HatcheryAudit(unittest.TestCase):
         self.assertEqual(nps.vessels_needed(24, 24), 1)
         self.assertEqual(nps.vessels_needed(36, 24), 2)
 
+    def test_planner_excludes_soaking_stock_and_retains_feedable_bottle(self):
+        config = config_with_load(age=1, ml=600)
+        hatchery = config["nps"]["hatchery"]
+        hatchery["handFeed"] = {"defaultDoseMl": 100, "feedsPerDay": 24}
+        hatchery["enrichment"]["state"].update({
+            "startedAt": stamp(1), "firstDoseAt": stamp(1),
+            "batchLoadedAt": stamp(1), "enrichHours": 12})
+        self.assertEqual(integration._nps_brine_supply_for_planning(config, NOW)[2], 0)
+        hatchery["fridgeBottle"].update({
+            "remainingMl": 100, "mixedAt": stamp(1), "refrigeratedAt": stamp(1)})
+        loaded, shelf, usable, rate = integration._nps_brine_supply_for_planning(config, NOW)
+        self.assertEqual(usable, 100)
+        suggestion = nps.next_hatch_suggestion(NOW, 24, loaded, shelf, usable, rate, None)
+        self.assertEqual(suggestion["readyBy"], (NOW + timedelta(hours=1)).isoformat())
+
+    def test_future_and_unknown_batches_never_extend_the_supply_plan(self):
+        for loaded in (stamp(-4), "invalid", "2026-08-13T10:00:00", stamp(25)):
+            config = config_with_load(mixedAt=loaded)
+            self.assertEqual(integration._nps_brine_supply_for_planning(config, NOW)[2], 0)
+            hatchery = config["nps"]["hatchery"]
+            hatchery["fridgeBottle"].update({
+                "remainingMl": 500, "mixedAt": loaded, "refrigeratedAt": NOW.isoformat()})
+            self.assertEqual(integration._nps_brine_supply_for_planning(config, NOW)[2], 0)
+
+    def test_named_idle_or_repeated_harvest_never_creates_stock(self):
+        config = config_with_load(ml=100)
+        before = deepcopy(config)
+        error = integration._nps_hatch_cancel_apply(FakeHass(), config, "v1", True, NOW)
+        self.assertEqual(error[0], "no_hatch")
+        self.assertEqual(config, before)
+        config["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchStartedAt"] = stamp(24)
+        self.assertIsNone(integration._nps_hatch_cancel_apply(FakeHass(), config, "v1", True, NOW))
+        before = deepcopy(config)
+        self.assertEqual(integration._nps_hatch_cancel_apply(FakeHass(), config, "v1", True, NOW)[0], "no_hatch")
+        self.assertEqual(config, before)
+
+    def test_full_container_harvest_preserves_the_running_batch(self):
+        config = config_with_load(ml=750)
+        config["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchStartedAt"] = stamp(24)
+        before = deepcopy(config)
+        error = integration._nps_hatch_cancel_apply(FakeHass(), config, "v1", True, NOW)
+        self.assertEqual(error[0], "container_full")
+        self.assertEqual(config, before)
+
+    def test_second_dose_requires_the_same_loaded_batch_and_preserves_food(self):
+        for remaining, loaded in ((0, stamp(2)), (200, stamp(1))):
+            config = config_with_load(ml=remaining, mixedAt=loaded)
+            config["nps"]["hatchery"]["enrichment"]["state"].update({
+                "startedAt": stamp(2), "firstDoseAt": stamp(2),
+                "batchLoadedAt": stamp(2), "enrichHours": 12})
+            before = deepcopy(config)
+            error = integration._nps_enrich_second_dose_apply(config, NOW)
+            self.assertEqual(error[0], "batch_changed")
+            self.assertEqual(config, before)
+
+    def test_linked_container_manual_feed_keeps_its_configured_window(self):
+        config = config_with_load(age=16)
+        channel = {"reservoir": {"volumeMl": 750, "remainingMl": 300,
+                                "mixedAt": stamp(16), "shelfLifeDays": 0.5}}
+        config["dosing"] = {"channels": {"brine": channel}}
+        config["nps"].setdefault("feedExchange", {})["channelId"] = "brine"
+        sources = nps.brine_feed_sources(integration._nps_feed_hatchery(config), NOW)
+        self.assertFalse(sources["container"]["available"])
+        self.assertEqual(integration._nps_brine_supply_for_planning(config, NOW)[2], 0)
+
+    def test_invalid_saved_rack_or_enrichment_clocks_do_not_crash_the_summary(self):
+        for bad_stamp in ("2026-08-13T10:00:00", "invalid"):
+            rhythm = nps.rack_rhythm(NOW, [{"id": "v1", "hatchHours": 24,
+                                           "startedAt": bad_stamp}], 24)
+            self.assertFalse(rhythm["available"])
+            soak = nps.enrich_state(stamp(3), 12, True, None, NOW, bad_stamp)
+            self.assertEqual(soak["status"], "none")
+            self.assertFalse(soak["firstDoseDue"])
+            self.assertFalse(soak["secondDoseDue"])
+
+    def test_future_opening_cannot_make_perishable_culture_food_available(self):
+        product = {"remainingMl": 100, "shelfLifeDaysOpened": 30,
+                   "openedAt": stamp(-1)}
+        self.assertEqual(nps.expiry_state(product, NOW)["status"], "expired")
+        self.assertTrue(nps.food_stock_pause_reason(product, 5, NOW))
+        product["shelfLifeDaysOpened"] = 0
+        self.assertEqual(nps.expiry_state(product, NOW)["status"], "fresh")
+        self.assertFalse(nps.food_stock_pause_reason(product, 5, NOW))
+
+    def test_late_second_dose_does_not_consume_enrichment_after_soak_end(self):
+        config = config_with_load(age=15)
+        config["nps"]["hatchery"]["enrichment"]["state"].update({
+            "startedAt": stamp(13), "firstDoseAt": stamp(13),
+            "batchLoadedAt": stamp(15), "enrichHours": 12})
+        before = deepcopy(config)
+        self.assertEqual(integration._nps_enrich_second_dose_apply(config, NOW)[0], "soak_complete")
+        self.assertEqual(config, before)
+
+    def test_refrigeration_cannot_bypass_a_shorter_linked_container_window(self):
+        now = datetime.now(timezone.utc)
+        entry = fixtures._v2_entry()
+        config = entry.options[SETTINGS]
+        config["dosing"] = {"channels": {"brine": {"reservoir": {
+            "volumeMl": 750, "remainingMl": 300, "mixedAt": stamp(16, now),
+            "shelfLifeDays": 0.5}}}}
+        config["nps"].setdefault("feedExchange", {})["channelId"] = "brine"
+        hass, conn = FakeHass(entries=[entry]), FakeConnection()
+        before = deepcopy(config)
+        run(integration.websocket_nps_fridge_bottle(hass, conn, {"id": 1, "action": "fill"}))
+        self.assertEqual(conn.errors[-1].code, "stale_brine")
+        self.assertEqual(entry.options[SETTINGS], before)
+
 
 if __name__ == "__main__":
     unittest.main()

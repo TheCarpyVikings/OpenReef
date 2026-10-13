@@ -1943,7 +1943,7 @@ def test_ws_phyto_split_to_the_bottle_and_the_tank_moves_every_ledger():
         cfg = _config(entry)
         jar = cfg["nps"]["cultures"]["jars"]["c1"]
         assert jar["state"]["workingL"] == 3.5 and jar["history"][0]["freshMl"] == 3000 and jar["history"][0]["nutrientMl"] == 4.5
-        assert jar["history"][0]["dests"] == [{"to": "bottle", "ml": 750}], "no list = the vessel's default, the bottle"
+        assert jar["history"][0]["dests"] == [{"to": "bottle", "ml": 400}, {"to": "waste", "ml": 350}], "the bottle takes only its free capacity; the overflow is waste"
         assert cfg["consumables"]["products"]["home_phyto_c1"]["remainingMl"] == 1000, "the litre bottle is full — 350 ml over the top, logged"
         assert cfg["consumables"]["products"]["home_phyto_c1"]["openedAt"] == cfg["nps"]["cultures"]["jars"]["c1"]["history"][1]["at"], "a top-up never renews the clock"
         assert any("over the top" in str(a.get("message", "")) for a in cfg["activity"])
@@ -2008,7 +2008,7 @@ def test_ws_phyto_split_loads_the_drip_and_seeds_b():
     assert not conn.errors, conn.errors
     cfg = _config(entry)
     res = cfg["dosing"]["channels"]["drip"]["reservoir"]
-    assert res["remainingMl"] == 500 and res["mixedAt"], "the jar took 400 ml to its brim and its day clock restarted"
+    assert res["remainingMl"] == 500 and res["mixedAt"] == "", "the jar took 400 ml; an unknown-age existing load stays unknown"
     jars = cfg["nps"]["cultures"]["jars"]
     assert set(jars) == {"c1", "c2"} and jars["c2"]["species"] == "nanno" and jars["c2"]["volumeL"] == 1.0 and jars["c2"]["name"] == "Nanno B"
     assert jars["c2"]["state"]["seededFrom"] == "c1" and jars["c2"]["state"]["generation"] == 2
@@ -2292,8 +2292,8 @@ def test_learned_daily_offer_recovery_by_depth_and_the_light_line():
     learned = cultures.learned_cadences(jar, [jar["history"]], now)
     assert learned["daysToDark"] == {"available": True, "days": 6.0, "samples": 2}
     assert learned["suggest"]["splitIntervalDays"] == 6 and learned["suggest"]["mode"] == "daily"
-    assert learned["dailyOffer"] == {"available": True, "pct": 20.0}, "60 % over 6 d ≈ 14 % a day, held to the guide's 20"
-    assert cultures.daily_draw_pct(70, 3) == 30 and cultures.daily_draw_pct(60, 8) == 20
+    assert learned["dailyOffer"] == {"available": True, "pct": 14.1}, "60 % over 6 d supports about 14.1 % daily replacement"
+    assert cultures.daily_draw_pct(70, 3) == 30 and cultures.daily_draw_pct(60, 8) == 10.8
     jar["mode"] = "daily"
     daily = cultures.learned_cadences(jar, [jar["history"]], now)
     assert daily["suggest"]["mode"] is None and daily["dailyOffer"]["available"] is False, "in daily mode there is nothing to offer"
@@ -2531,7 +2531,7 @@ def test_ws_apply_learned_moves_the_split_interval_and_switches_to_daily():
     conn = FakeConnection()
     run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
     j = conn.results[-1].payload["jars"][0]
-    assert j["learned"]["suggest"]["splitIntervalDays"] == 6 and j["dailyOffer"] == {"available": True, "pct": 20.0}
+    assert j["learned"]["suggest"]["splitIntervalDays"] == 6 and j["dailyOffer"] == {"available": True, "pct": 14.1}
     run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 2, "jar_id": "c1", "field": "splitIntervalDays"}))
     assert not conn.errors, conn.errors
     cfg = _config(entry)
@@ -2546,12 +2546,12 @@ def test_ws_apply_learned_moves_the_split_interval_and_switches_to_daily():
     assert not conn.errors, conn.errors
     cfg = _config(entry)
     jar_after = cfg["nps"]["cultures"]["jars"]["c1"]
-    assert jar_after["mode"] == "daily" and jar_after["cadence"]["splitIntervalDays"] == 1 and jar_after["cadence"]["splitPct"] == 20
+    assert jar_after["mode"] == "daily" and jar_after["cadence"]["splitIntervalDays"] == 1 and jar_after["cadence"]["splitPct"] == 14.1
     assert cfg["maintenance"]["tasks"]["culture_c1_harvest"]["cadenceDays"] == 1
     run(integration.websocket_cultures_summary(hass, conn, {"id": 5}))
     j = conn.results[-1].payload["jars"][0]
     assert j["mode"] == "daily" and j["dailyOffer"]["available"] is False and j["learned"]["suggest"]["mode"] is None
-    assert j["splitGuide"]["outMl"] == 250 and j["splitGuide"]["removalPct"] == 20, "the daily draw is sized to the culture"
+    assert j["splitGuide"]["outMl"] == 176.2 and j["splitGuide"]["removalPct"] == 14.1, "the daily draw is sized to the observed recovery"
     run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 6, "jar_id": "c1", "field": "mode"}))
     assert conn.errors[-1].code == "not_learned"
     run(integration.websocket_cultures_apply_learned(hass, conn, {"id": 7, "jar_id": "c1", "field": "lightHours"}))
@@ -2971,7 +2971,7 @@ def test_index_fit_bands_curve_days_to_dark_and_the_estimate():
     # The pH: rising, flat, falling — two days before it speaks.
     ph = [{"event": "light", "at": iso(d), "lightH": 15, "phMax": v} for d, v in ((4, 8.4), (3, 8.6), (2, 8.9), (1, 9.1))]
     t = cultures.ph_trend(ph)
-    assert t["trend"] == "rising" and t["line"] == "pH 8.4 → 9.1 over 3 d — growing" and t["days"] == 4
+    assert t["trend"] == "rising" and "compare with colour, density and aeration" in t["line"] and t["days"] == 4
     assert cultures.ph_trend([{"event": "light", "at": iso(d), "phMax": 9.1} for d in (3, 2, 1)])["trend"] == "flat"
     down = cultures.ph_trend([{"event": "light", "at": iso(d), "phMax": v} for d, v in ((2, 9.1), (1, 8.4))])
     assert down["trend"] == "falling" and "a crash? look at it" in down["line"]

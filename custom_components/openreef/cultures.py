@@ -468,6 +468,8 @@ def _dark_run_days(history: Any, since: datetime, now: datetime) -> float:
         if at < since or at > now:
             continue
         tint = str(row.get("tint") or "")
+        if row.get("event") == "harvest" and row.get("draw"):
+            continue
         if row.get("event") in ("harvest", "restart", "seeded", "crashed"):
             run_start = None
             continue
@@ -533,7 +535,7 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
     ok_after_sign = False
     if signed:
         for at, row in _chronological(history):
-            if at > sign_at and str(row.get("tint") or "") in ("green", "dark"):
+            if sign_at < at <= now and str(row.get("tint") or "") in ("green", "dark"):
                 ok_after_sign = True
                 break
     out["harvestBlocked"] = (signed and not ok_after_sign) or tint == "off"
@@ -620,6 +622,8 @@ def darkening_samples(history: Any) -> list[float]:
     anchor: datetime | None = None
     for at, row in _chronological(history):
         event = row.get("event")
+        if event == "harvest" and row.get("draw"):
+            continue
         if event in ("seeded", "harvest", "restart"):
             anchor = at
             continue
@@ -676,6 +680,8 @@ def split_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, ml: Any = None,
         out.update({"available": False, "reason": "Enter a positive split volume, or fresh water for a scale-up."})
     elif out_ml > working_ml + 0.5:
         out.update({"available": False, "reason": f"The vessel only holds {working_ml / 1000:g} L of culture."})
+    elif out_ml >= working_ml:
+        out.update({"available": False, "reason": "Leave some culture as seed; withdrawing the entire vessel cannot start another cycle."})
     elif after > container_ml + 0.5:
         out.update({"available": False, "reason": f"The container holds {container_ml / 1000:g} L — {after / 1000:.2f} L would overflow."})
     return out
@@ -714,7 +720,9 @@ def seed_guide(jar: dict[str, Any], mix_ppt: Any = 35.0, starter_ml: Any = None,
         "ratio": round(fresh / starter, 1) if starter > 0 else None,
         "kitWorkingL": _f(preset.get("kitWorkingL"), 3.5),
     }
-    if container_ml > 0 and working_ml > container_ml + 0.5:
+    if starter > working_ml + 0.5:
+        out.update({"available": False, "reason": "The starter volume exceeds the final working volume."})
+    elif container_ml > 0 and working_ml > container_ml + 0.5:
         out.update({"available": False, "reason": f"The container holds {container_ml / 1000:g} L — set a smaller working volume."})
     del state
     return out
@@ -753,7 +761,7 @@ def sizing_line(working_l: Any, split_pct: Any, interval_days: Any, demand_ml_da
     who = f" ({customers})" if customers else ""
     if ratio > 1.5:
         verdict = (f"{ratio:.0f}× more than it needs — run it at ~{ideal:.1f} L, or scale up when the drip "
-                   "or the cone drinks it; the bottle absorbs the difference for three weeks")
+                   "or the cone drinks it; check bottle capacity and use the harvest within its storage window")
     elif ratio < 0.7:
         verdict = f"less than it needs — scale up at the next split (~{ideal:.1f} L would cover it)"
     else:
@@ -994,6 +1002,8 @@ def darkening_by_depth(history: Any) -> dict[str, Any]:
     anchor: tuple[datetime, str] | None = None
     for at, row in _chronological(history):
         event = row.get("event")
+        if event == "harvest" and row.get("draw"):
+            continue
         if event in ("harvest", "restart"):
             ml = _f(row.get("ml"))
             after = _f(row.get("workingMl"))
@@ -1029,6 +1039,8 @@ def secchi_samples(history: Any) -> list[dict[str, Any]]:
     anchor: datetime | None = None
     for at, row in _chronological(history):
         event = row.get("event")
+        if event == "harvest" and row.get("draw"):
+            continue
         if event in ("seeded", "harvest", "restart"):
             anchor = at
             continue
@@ -1099,7 +1111,7 @@ def secchi_fit(history: Any, cm_now: Any = None) -> dict[str, Any]:
     days_to_dark = None
     now_cm = _f(cm_now)
     if fit["available"] and dark_cm and now_cm > 0:
-        days_to_dark = round(max(0.0, math.log(now_cm / dark_cm) / -fit["slopePerDay"]), 1) if now_cm > dark_cm else 0.0
+        days_to_dark = round(max(0.0, math.log(now_cm / dark_cm) / -slope), 1) if now_cm > dark_cm else 0.0
     words: list[str] = []
     if any(v is not None for v in bands.values()):
         named = [f"{tint} ~{bands[tint]:g} cm" for tint in ("dark", "green", "pale") if bands.get(tint) is not None]
@@ -1164,6 +1176,8 @@ def index_samples(history: Any) -> list[dict[str, Any]]:
     tint = ""
     for at, row in rows:
         event = row.get("event")
+        if event == "harvest" and row.get("draw"):
+            continue
         if event in ("seeded", "harvest", "restart"):
             anchor = at
             if not row.get("draw"):
@@ -1224,7 +1238,7 @@ def index_fit(history: Any, od_now: Any = None) -> dict[str, Any]:
     if dark_od and now_od >= 0:
         reads_dark = now_od >= dark_od
         if fit["available"] and now_od > 0:
-            days_to_dark = 0.0 if reads_dark else round(math.log(dark_od / now_od) / fit["ratePerDay"], 1)
+            days_to_dark = 0.0 if reads_dark else round(math.log(dark_od / now_od) / slope, 1)
     words: list[str] = []
     if any(v is not None for v in bands.values()):
         named = [f"{tint} ~{bands[tint]:g}" for tint in ("pale", "green", "dark") if bands.get(tint) is not None]
@@ -1300,22 +1314,22 @@ def ph_trend(history: Any, days: int = PH_TREND_DAYS) -> dict[str, Any]:
     span_days = max(1.0, (recent[-1][0] - recent[0][0]).total_seconds() / 86400.0)
     per_day = (last - first) / span_days
     if per_day >= PH_FLAT_DELTA:
-        trend, line = "rising", f"pH {first:.1f} → {last:.1f} over {span_days:.0f} d — growing"
+        trend, line = "rising", f"pH {first:.1f} → {last:.1f} over {span_days:.0f} d — compare with colour, density and aeration"
     elif per_day <= -PH_FLAT_DELTA:
         trend, line = "falling", f"pH falling {first:.1f} → {last:.1f} over {span_days:.0f} d — a crash? look at it, smell it"
     else:
-        trend, line = "flat", f"pH flat at ~{last:.1f} — stationary; a culture that has stopped climbing is ready to split"
+        trend, line = "flat", f"pH flat at ~{last:.1f} — check colour, density and aeration; pH alone does not show harvest readiness"
     return {"available": True, "trend": trend, "line": line, "days": len(recent), "first": round(first, 2), "last": round(last, 2),
             "perDay": round(per_day, 3)}
 
 
 def daily_draw_pct(split_pct: Any, days_to_dark: Any) -> float:
-    """The semi-continuous draw (doc §5.2): the daily fraction that matches
-    the batch cycle's growth, held to the guide's 20–30 % a day."""
+    """Daily replacement equivalent to the observed batch recovery.
+    Cap at 30%, and round down so slow cultures are never forced to 20%."""
     pct = max(10.0, min(90.0, _f(split_pct, 60.0)))
     days = max(1.0, _f(days_to_dark, 8.0))
     daily = 100.0 * (1.0 - (1.0 - pct / 100.0) ** (1.0 / days))
-    return float(round(max(20.0, min(30.0, daily))))
+    return math.floor(min(30.0, daily) * 10.0) / 10.0
 
 
 def feed_advice(tint: Any, feed_clock: dict[str, Any], harvest_clock: Any = None,
@@ -1389,12 +1403,16 @@ def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0,
     if mix <= 0:
         mix = 35.0
     target = _f(target_ppt)
-    if target > mix:
+    if target > mix and _f(phyto_ml) <= 0:
         return {"available": False, "totalMl": total_ml, "mixMl": 0, "rodiMl": 0,
                 "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target),
                 "reason": f"Cannot make {target:g} ppt by diluting {mix:g} ppt water; prepare stronger saltwater and measure it first."}
     if target < 0:
         target = 0.0
+    if _f(phyto_ml) > total_ml + 0.5:
+        return {"available": False, "totalMl": total_ml, "mixMl": 0, "rodiMl": 0,
+                "targetPpt": round(target, 1), "mixPpt": round(mix, 1), "sg": sg_from_ppt(target),
+                "reason": "The phyto volume exceeds the total refill volume."}
     phyto = float(round(min(float(total_ml), max(0.0, _f(phyto_ml))))) if _f(phyto_ml) > 0 else 0.0
     if phyto > 0:
         p_ppt = max(0.0, _f(phyto_ppt, mix))
@@ -1942,9 +1960,9 @@ def learned_cadences(jar: dict[str, Any], sibling_histories: Any, now: datetime)
                 suggest["splitIntervalDays"] = days
             # Two learned cycles unlock the daily (semi-continuous) offer: a
             # small draw every day, sized to the culture — never to the tank.
-            if mode != "daily":
+            if mode != "daily" and daily_draw_pct(cad.get("harvestPct"), dark.get("days")) >= CADENCE_CAPS["splitPct"][0]:
                 suggest["mode"] = "daily"
-        out["dailyOffer"] = {"available": bool(dark["available"] and mode != "daily"),
+        out["dailyOffer"] = {"available": suggest["mode"] == "daily",
                              "pct": daily_draw_pct(cad.get("harvestPct"), dark.get("days")) if dark["available"] else None}
         # Yield (litres a week — the demand line's other half), recovery by
         # split depth, and the light delivered against a slow cycle.

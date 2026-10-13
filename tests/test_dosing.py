@@ -492,6 +492,9 @@ def test_freshness_state_grades_and_fails_closed():
     assert dosing.freshness_state(res, now)["status"] == "stale"
     # FAIL-CLOSED: unknown age is stale; shelfLifeDays 0 disables expiry
     assert dosing.freshness_state({"shelfLifeDays": 1}, now)["status"] == "stale"
+    for mixed_at in ((now + timedelta(hours=1)).isoformat(),
+                     now.replace(tzinfo=None).isoformat(), "invalid"):
+        assert dosing.freshness_state({"shelfLifeDays": 1, "mixedAt": mixed_at}, now)["status"] == "stale"
     assert dosing.freshness_state({"shelfLifeDays": 0, "mixedAt": ""}, now)["status"] == "fresh"
 
 

@@ -553,7 +553,9 @@ def expiry_state(product: dict[str, Any], now: datetime) -> dict[str, Any]:
     if opened is None:
         return {"status": "expired", "daysLeft": 0.0, "ageDays": None}
     try:
-        age_d = max(0.0, (now - opened).total_seconds() / 86400.0)
+        if opened > now:
+            return {"status": "expired", "daysLeft": 0.0, "ageDays": None}
+        age_d = (now - opened).total_seconds() / 86400.0
     except TypeError:
         return {"status": "expired", "daysLeft": 0.0, "ageDays": None}
     left_d = shelf_days - age_d
@@ -1252,6 +1254,10 @@ def rack_rhythm(
         if clock <= 0:
             clock = 24.0
         started = _parse_iso(item.get("startedAt"))
+        if item.get("startedAt") and (started is None or started.tzinfo is None):
+            # A saved clock without a timezone cannot support a reliable
+            # projection; keep the rest of the hatchery summary usable.
+            return out
         batch_h = _f(item.get("batchHours"))
         if batch_h <= 0:
             batch_h = clock
@@ -1461,6 +1467,7 @@ def next_hatch_suggestion(
         "lateHours": None,
         "supplyGapHours": None,
         "chainShelfHours": round(chain_shelf_h, 1),
+        "assumption": "Assumes room for each harvest and a fresh container; topping up keeps the older expiry.",
     }
 
     def _finish(status: str, start_at: datetime | None, ready_by: datetime | None,
@@ -1587,18 +1594,23 @@ def enrich_state(started_iso: Any, enrich_hours: Any, split_dose: bool,
     hours = _f(enrich_hours)
     if hours <= 0:
         hours = ENRICH_DEFAULT_HOURS
-    if started is None:
-        return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
+    inactive = {"status": "none", "hoursElapsed": None, "hoursLeft": None,
                 "percent": None, "firstDoseDue": False, "secondDoseDue": False,
                 "moltInHours": None}
+    if started is None:
+        return inactive
     try:
         elapsed_h = max(0.0, (now - started).total_seconds() / 3600.0)
     except TypeError:
-        return {"status": "none", "hoursElapsed": None, "hoursLeft": None,
-                "percent": None, "firstDoseDue": False, "secondDoseDue": False,
-                "moltInHours": None}
+        return inactive
     delay_h = max(0.0, _f(dose_delay_h))
     first = _parse_iso(first_dose_iso)
+    if first_dose_iso:
+        try:
+            if first is None or first < started or first > now:
+                return inactive
+        except TypeError:
+            return inactive
     if first is None and delay_h <= 0:
         first = started  # immediate-dose protocol: food went in at soak start
     # The age that matters is the BATCH's, measured from its load stamp when
@@ -1688,7 +1700,8 @@ def brine_batch_shelf_hours(loaded_iso: Any, stamps: dict[str, Any], now: dateti
     return min(ENRICH_SHELF_MAX_H, soak_offset_h + boost_h)
 
 
-def brine_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) -> bool:
+def brine_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime,
+                         room_h: float = BRINE_SHELF_H_ROOM) -> bool:
     loaded = _parse_iso(loaded_iso)
     try:
         if loaded is None or loaded > now:
@@ -1696,7 +1709,7 @@ def brine_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime)
         enriched = _parse_iso(stamps.get("enrichedAt")) if stamps.get("lastLoadEnriched") else None
         if enriched is not None and (enriched > now or enriched < loaded):
             return True
-        return (now - loaded).total_seconds() / 3600 >= brine_batch_shelf_hours(loaded_iso, stamps, now)
+        return (now - loaded).total_seconds() / 3600 >= brine_batch_shelf_hours(loaded_iso, stamps, now, room_h)
     except TypeError:
         return True
 
@@ -1713,7 +1726,8 @@ def brine_feed_sources(hatchery: dict[str, Any], now: datetime) -> dict[str, Any
             reason = "No brine available — this vessel is empty."
         elif vessel == "container" and soaking:
             reason = "Finish and rinse, or cancel, the enrichment soak before feeding."
-        elif brine_batch_is_stale(batch.get("mixedAt"), batch, now):
+        elif brine_batch_is_stale(batch.get("mixedAt"), batch, now,
+                                   _f(batch.get("plainShelfHours"), BRINE_SHELF_H_ROOM)):
             reason = "Brine is past its handling window or its age is unknown — load fresh brine."
         sources[vessel] = {"remainingMl": ml, "available": not reason, "pauseReason": reason}
     return sources

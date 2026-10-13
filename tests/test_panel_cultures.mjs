@@ -584,7 +584,7 @@ test("never zero: the Jars card says backup or not, and the restart seeds B by d
   try {
     let panel = await culturesPanel();
     let html = panel._culturesTab();
-    assert(html.includes("no backup") && html.includes("split only a healthy, mature culture") && html.includes("12 days without a gap"), "the Jars card must say there is no backup and count continuity");
+    assert(html.includes("Rotifers (L-type): backup needed") && html.includes("split only a healthy, mature culture") && html.includes("12 days without a gap"), "the Jars card must say there is no backup and count continuity");
     assert(html.includes('data-cultures-split="c1" checked'), "with no backup the restart ticks 'seed B' by default");
     assert(html.includes("gen 1 · from the starter"), "the lineage line is missing");
     assert(html.includes('data-action="cultures-share-card" data-id="c1"'), "the share-card button is missing");
@@ -1498,10 +1498,10 @@ test("Stage C animal tile: the phyto refill row, the three-way jug line, the sti
     assert(html.includes(`data-cultures-phyto-from="${cid}"`) && html.includes('<option value="bottle:home_phyto_n1" >Home phyto (Nanno A) · 600 ml</option>') && html.includes('<option value="vessel:n1" >Nanno A · dark</option>'), `the source select: ${html.match(/<select data-cultures-phyto-from[\s\S]*?<\/select>/)}`);
     assert(html.includes('<option value="vessel:n2" disabled>Nanno B · pale (not ready)</option>'), "a pale vessel is offered greyed");
     assert(html.includes(`data-cultures-phyto-ml="${cid}"`) && html.includes('placeholder="170"'), "the ml box shows one tint as its placeholder");
-    assert(html.includes("refill with phyto: 170 ml of 35 ppt phyto + 351 ml mix + 154 ml RODI → 27 ppt"), "the three-way jug line");
+    assert(html.includes("Plain-water refill selected; no phyto is included"), "the default source does not claim a phyto refill");
     cone.phytoRefill.stillGreen = true;
     const html2 = panel._culturesTab();
-    assert(html2.includes("still green — plain water this time"), "the still-green word");
+    assert(html2.includes("Plain-water refill selected"), "plain water remains the default even when a phyto example exists");
     // The senders: a picked source rides the harvest and the restart; blank ml lets the backend size one tint.
     const picked = { value: "vessel:n1" }, box = { value: "" };
     panel.shadowRoot = { querySelector: (sel) => sel.includes("phyto-from") ? picked : sel.includes("phyto-ml") ? box : null };
@@ -1702,6 +1702,103 @@ test("an unavailable linked feed leaves the culture care controls without a fals
   assert(!html.includes('data-action="cultures-fed" data-id="c1"'), "no feed from an empty bottle");
   assert(html.includes('data-action="cultures-harvested-only"'), "a harvest remains loggable without inventing a feed");
   assert(html.includes('data-cultures-enrich="c1" disabled'), "empty enrichment is unavailable");
+});
+
+
+test("draft phyto recipes follow edited volumes and allocations without rerendering inputs", async () => {
+  const jar = phytoJar({ volumeL: 4, state: { ...phytoJar().state, workingL: 3.5 },
+    splitGuide: { ...phytoJar().splitGuide, outMl: 2100, freshMl: 2100, nutrientMl: 3.2, bottleFreeMl: 1000 },
+    homeBottle: { ...phytoJar().homeBottle, bottleMl: 1000, remainingMl: 0 } });
+  const panel = await culturesPanel({}, summaryFixture([jar]));
+  const fields = {
+    "data-cultures-split-ml": { value: "2100", type: "number", dataset: { culturesSplitMl: jar.id } },
+    "data-cultures-working-after": { value: "4", type: "number", dataset: { culturesWorkingAfter: jar.id } },
+    "data-cultures-f2": { checked: true, type: "checkbox", dataset: { culturesF2: jar.id } },
+    "data-cultures-dest-bottle": { checked: true }, "data-cultures-dest-bottle-ml": { value: "" },
+    "data-cultures-dest-tank": { checked: false }, "data-cultures-dest-tank-ml": { value: "35" },
+    "data-culture-split-preview": {}, "data-culture-nutrient-preview": {}, "data-culture-split-warning": {},
+  };
+  const handlers = {};
+  panel.shadowRoot = { querySelector: (selector) => fields[selector.match(/^\[([^=]+)/)?.[1]] || null,
+    addEventListener: (name, handler) => { handlers[name] = handler; } };
+  panel.addEventListener = () => {};
+  panel._render = () => { throw new Error("recipe updates must preserve the form and focus"); };
+  panel._attachEvents();
+  handlers.input({ target: fields["data-cultures-working-after"], type: "input" });
+  assert(fields["data-culture-split-preview"].textContent.includes("2600 ml fresh") && fields["data-culture-nutrient-preview"].textContent.includes("3.9 ml"), "a scale-up recalculates fresh water and f/2");
+  assert(fields["data-culture-split-warning"].textContent.includes("1100 ml of its share would go to waste"), "default bottle overflow is visible before logging");
+  fields["data-cultures-dest-tank"].checked = true;
+  panel._culturesUpdateRecipePreview(jar.id);
+  assert(fields["data-culture-split-warning"].textContent.includes("1065 ml"), "the tank share reduces the remaining bottle share");
+  fields["data-cultures-dest-bottle"].checked = false;
+  fields["data-cultures-dest-tank"].checked = false;
+  panel._culturesUpdateRecipePreview(jar.id);
+  assert(fields["data-culture-split-warning"].textContent.includes("1100 ml"), "no ticked shares follows the backend's default bottle destination");
+  fields["data-cultures-f2"].checked = false;
+  handlers.change({ target: fields["data-cultures-f2"], type: "change" });
+  assert(fields["data-culture-nutrient-preview"].textContent.includes("0 ml (not added)"), "unchecked f/2 is excluded");
+  fields["data-cultures-working-after"].value = "5";
+  handlers.input({ target: fields["data-cultures-working-after"], type: "input" });
+  assert(fields["data-culture-split-preview"].textContent.includes("Check the split"), "overflowing the vessel produces no plausible recipe");
+  assert(fields["data-cultures-working-after"].value === "5", "validation preserves typed input");
+});
+
+test("animal refill preview follows the chosen source, dose and tint", async () => {
+  const jar = jarSummary({ salinityPpt: 27, coneDoseMl: 170,
+    harvestGuide: { totalMl: 625, refillMl: 675, mixMl: 521, rodiMl: 154, mixPpt: 35, targetPpt: 27 },
+    phytoSources: [{ id: "bottle:a", kind: "bottle", name: "Nanno A", ppt: 35, ml: 600, ready: true },
+      { id: "bottle:b", kind: "bottle", name: "Nanno B", ppt: 30, ml: 300, ready: true }] });
+  const panel = await culturesPanel({}, summaryFixture([jar]));
+  const fields = { "data-cultures-phyto-from": { value: "bottle:a", dataset: { culturesPhytoFrom: jar.id } },
+    "data-cultures-phyto-ml": { value: "", dataset: { culturesPhytoMl: jar.id }, type: "number" },
+    "data-cultures-tint": { value: "clearing", dataset: { culturesTint: jar.id } },
+    "data-culture-phyto-refill": {}, "data-culture-harvest-guide": {} };
+  const handlers = {};
+  panel.shadowRoot = { querySelector: (selector) => fields[selector.match(/^\[([^=]+)/)?.[1]] || null,
+    addEventListener: (name, handler) => { handlers[name] = handler; } };
+  panel.addEventListener = () => {};
+  panel._render = () => { throw new Error("keep the typed source and amount"); };
+  panel._attachEvents();
+  handlers.change({ target: fields["data-cultures-phyto-from"], type: "change" });
+  assert(fields["data-culture-phyto-refill"].textContent.includes("170 ml of 35 ppt phyto from Nanno A + 351 ml mix + 154 ml RODI"), "three-way salt balance replaces the plain-water recipe");
+  assert(fields["data-culture-harvest-guide"].hidden, "do not display an incompatible plain-water recipe alongside it");
+  fields["data-cultures-phyto-from"].value = "bottle:b";
+  fields["data-cultures-phyto-ml"].value = "200";
+  handlers.input({ target: fields["data-cultures-phyto-ml"], type: "input" });
+  assert(fields["data-culture-phyto-refill"].textContent.includes("200 ml of 30 ppt phyto from Nanno B + 349 ml mix + 126 ml RODI"), "source salinity and edited amount both affect the refill");
+  fields["data-cultures-phyto-ml"].value = "400";
+  panel._culturesUpdateRecipePreview(jar.id);
+  assert(fields["data-culture-phyto-refill"].textContent.includes("Only 300 ml"), "an oversized dose is unavailable");
+  fields["data-cultures-phyto-from"].value = "bottle:a";
+  fields["data-cultures-phyto-ml"].value = "600";
+  panel._culturesUpdateRecipePreview(jar.id);
+  assert(fields["data-culture-phyto-refill"].textContent.includes("cannot make a 27 ppt refill"), "phyto carrying too much salt is refused, even when it fits the refill volume");
+  fields["data-cultures-tint"].value = "green";
+  panel._culturesUpdateRecipePreview(jar.id);
+  assert(fields["data-culture-phyto-refill"].textContent.includes("Still green"), "a selected green observation prevents a feeding recipe");
+  fields["data-cultures-phyto-from"].value = "";
+  panel._culturesUpdateRecipePreview(jar.id);
+  assert(fields["data-culture-phyto-refill"].textContent.includes("Plain-water refill selected") && !fields["data-culture-harvest-guide"].hidden, "clearing the source restores the plain-water guide");
+});
+
+test("culture temperature summary names the measured vessel and affected species", async () => {
+  const jar = phytoJar({ name: "Nanno Main", temp: { ...phytoJar().temp,
+    available: true, source: "vessel", status: "warm", tempC: 28.2, maxC: 27 } });
+  const sum = summaryFixture([jar]);
+  jar.due = [];
+  sum.dueCount = 0;
+  sum.backup = [{ species: "rotifer_L", speciesName: "Rotifers (L-type)", running: 1, backedUp: false },
+    { species: "nannochloropsis", speciesName: "Nannochloropsis", running: 2, backedUp: true }];
+  sum.tempC = 24;
+  const panel = await culturesPanel({}, sum);
+  let html = panel._culturesTab();
+  assert(html.includes("No care actions due") && !html.includes("all quiet"), "no scheduled care does not claim all sources are ready");
+  assert(html.includes("Rotifers (L-type): backup needed") && !html.includes("Nannochloropsis: backup needed"), "the missing backup names the affected species");
+  assert(html.includes("Nanno Main water") && html.includes("28.2 °C"), "the warning is paired with its vessel reading");
+  assert(html.includes("warm for Nanno Main") && !html.includes("warm for the pods"), "a phyto warning must not name absent copepods");
+  jar.temp.status = "hot";
+  html = panel._culturesTab();
+  assert(html.includes("is over its heat limit — shade it or move it somewhere cooler"), "phyto heat advice does not prescribe animal feeding");
 });
 
 runTests();
