@@ -1388,7 +1388,6 @@ class OpenReefPanel extends HTMLElement {
       }
       if (action === "cooling-dehum") this._coolingActuator("dehumidifier", id);
       if (action === "cooling-vent") this._coolingActuator("vent", id);
-      if (action === "cooling-learning-reset") this._coolingLearningReset();
       if (action === "spawn-exec-pargate") this._spawnExecToggleParGate();
       if (action === "icp-subview") {
         this._icp.subview = id || "dashboard";
@@ -12485,6 +12484,9 @@ class OpenReefPanel extends HTMLElement {
     const L = 30, R = 412, W = R - L;
     const X = (min) => L + (Math.max(0, Math.min(1440, Number(min) || 0)) / 1440) * W;
     const hm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+    // Any-time slots gain a position once logged. Keep timed doses on their
+    // planned slots, and use the same position for drawing and stacking.
+    const markAt = (ev) => ev.at ?? (ev.status === "done" ? ev.doneAt : null);
     // Feeds landing on the same minute would sit one on top of the other — a
     // 250 ml brine dose hiding the 2 ml of phyto beside it. Marks close enough
     // to collide are stacked instead, earliest at the top, threaded by a
@@ -12495,7 +12497,7 @@ class OpenReefPanel extends HTMLElement {
     const laneKey = (ev) => compact ? "row" : ev.how === "pump" ? "pump" : "hand";
     const byLane = new Map();
     for (const ev of tl.events) {
-      if (ev.kind === "band" || ev.at == null || ev.how === "system") continue;
+      if (ev.kind === "band" || markAt(ev) == null || ev.how === "system") continue;
       const key = laneKey(ev);
       if (!byLane.has(key)) byLane.set(key, []);
       byLane.get(key).push(ev);
@@ -12508,7 +12510,7 @@ class OpenReefPanel extends HTMLElement {
       // against the first of a run bounds a cluster to that span, so a busy
       // pump ladder cannot chain itself into one tall column.
       const gap = key === "pump" ? 5 : 11;
-      const sorted = evs.slice().sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0));
+      const sorted = evs.slice().sort((a, b) => Number(markAt(a)) - Number(markAt(b)));
       let group = [];
       const flush = () => {
         if (group.length > 1) {
@@ -12519,7 +12521,7 @@ class OpenReefPanel extends HTMLElement {
         group = [];
       };
       for (const e of sorted) {
-        if (group.length && X(e.at) - X(group[0].at) > gap) flush();
+        if (group.length && X(markAt(e)) - X(markAt(group[0])) > gap) flush();
         group.push(e);
       }
       flush();
@@ -12537,7 +12539,7 @@ class OpenReefPanel extends HTMLElement {
     const axisY = (compact ? 48 : 90) + 2 * pumpHalf + 2 * handHalf, H = axisY + 16;
     const ties = clusters.map(({ key, evs }) => {
       const laneY = key === "pump" ? pumpY : handY;
-      const pts = evs.map((e) => `${X(e.at).toFixed(1)},${(laneY + stackDy(e)).toFixed(1)}`).join(" ");
+      const pts = evs.map((e) => `${X(markAt(e)).toFixed(1)},${(laneY + stackDy(e)).toFixed(1)}`).join(" ");
       return `<polyline points="${pts}" fill="none" stroke="#546e7a" stroke-width="1" opacity="0.55"></polyline>`;
     }).join("");
     const open = readOnly ? "" : (this._nps?.timelineOpen || "");
@@ -12546,7 +12548,7 @@ class OpenReefPanel extends HTMLElement {
     const marks = tl.events.map((ev) => {
       const color = this._npsTimelineColor(ev);
       const when = ev.kind === "band" && Array.isArray(ev.band) ? ` · ${hm(ev.band[0])} → ${ev.band[1] >= 1440 ? "midnight" : hm(ev.band[1] % 1440)}`
-        : ev.at != null ? ` · ${hm(ev.doneAt ?? ev.at)}` : " · any time today";
+        : markAt(ev) != null ? ` · ${hm(ev.doneAt ?? ev.at)}` : " · any time today";
       const label = `${ev.name}${ev.ml != null ? ` · ${ev.actualMl ?? ev.ml} ml` : ""} · ${this._npsTimelineStatusLabel(ev.status)}${when}`;
       if (ev.kind === "band" && Array.isArray(ev.band)) {
         const [a0, b0] = ev.band;
@@ -12561,10 +12563,10 @@ class OpenReefPanel extends HTMLElement {
         const segs = b0 > a0 ? [[a0, b0]] : [[a0, 1440], [0, b0]];
         return segs.map(([a, b]) => `<rect x="${X(a)}" y="${y}" width="${Math.max(1, X(b) - X(a))}" height="${h}" rx="2" fill="${color}" opacity="${alpha}" class="${cls}" ${act(ev)}><title>${esc(label)}</title></rect>`).join("");
       }
-      if (ev.at == null) { chips.push(ev); return ""; }
+      if (markAt(ev) == null) { chips.push(ev); return ""; }
       // A dose that satisfied a slot sits ON the slot (the card says when it
       // really happened); an extra sits where it happened.
-      const x = X(ev.at ?? ev.doneAt);
+      const x = X(markAt(ev));
       if (ev.how === "system") {
         return `<g class="nps-tl-ev" ${act(ev)}><title>${esc(label)}</title><rect x="${x - 1.25}" y="${sysY - 5}" width="2.5" height="6" rx="1" fill="${color}" opacity="${ev.status === "expected" ? 0.5 : 1}"></rect></g>`;
       }
@@ -13800,7 +13802,7 @@ const rigSteps = [
   }
 
   // Demo view (the last §7.1 leftover, 0.7.140): a staged rack for the
-  // stream — two cones out of phase, the tub, a soak running, tomorrow's heat
+  // stream — two cones out of phase, the tub, a soak running, measured heat
   // warning, a journal that has learned. Only the summary is swapped; the
   // config is never touched and every tap is refused while it shows.
   _culturesToggleDemo() {
@@ -13835,11 +13837,6 @@ const rigSteps = [
       available, due, at: available ? iso(due ? 2 : -hoursUntil) : null, hoursUntil: due ? 0 : hoursUntil, hoursOverdue: due ? 2 : 0 });
     const rot = this._culturesPresetFallback("rotifer_L") || {};
     const pod = this._culturesPresetFallback("tigriopus") || {};
-    const guardWarn = { available: true, status: "warn", peakC: 29.1, peakAt: iso(-9), crossAt: iso(-8), hoursUntil: 8, offsetC: 1.2,
-      line: "the rack passes 28 °C in ~8 h (peak 29.1 °C, rack +1.2 °C over the room) — extra air, shade, feed lightly, a 50 % change ready" };
-    const guardWatch = { available: true, status: "watch", peakC: 27.9, peakAt: iso(-9), crossAt: null, hoursUntil: null, offsetC: 1.2,
-      line: "the rack peaks at 27.9 °C, rack +1.2 °C over the room — above the 26 °C band, keep an eye on it" };
-    const noGuard = { available: false, status: "unknown", peakC: null, peakAt: null, crossAt: null, hoursUntil: null, offsetC: 0, line: "" };
     const row = (event, hoursAgo, extra = {}) => ({ event, at: iso(hoursAgo), ml: 0, tint: "", from: "", sign: "", eggRatio: 0, tempC: null, purgeMl: 0, skipped: false, ...extra });
     // The timeline (0.7.184): what cultures.feed_timeline would say for these
     // rows — marks oldest first, the clearing spans, the newest one open.
@@ -13885,7 +13882,6 @@ const rigSteps = [
       restartGuide: { totalMl: 2500, mixMl: 1929, rodiMl: 571, targetPpt: 27 },
       waterChangeGuide: { totalMl: 0, mixMl: 0, rodiMl: 0, targetPpt: 27 },
       temp: { available: true, status: "ok", tempC: 25.4, minC: 18, maxC: 26, hardMaxC: 30, actC: 30, criticalC: 33, act: false },
-      guard: guardWatch,
       ...over,
     });
     const jarA = rotJar({
@@ -13933,7 +13929,7 @@ const rigSteps = [
       learned: learnedNone, risk: { level: "watch", reason: "the room is over the band — feed lightly, extra air" },
       lastSign: "", lineage: { generation: 1, fromName: "", line: "gen 1 · from the starter" },
       tintStrip: ["green", "green", "green", "clearing", "green", "green", "green", "green", "clearing", "green", "green", "green", "green", "green"],
-      stagger: { available: false, days: null, idealDays: null, advice: "" }, guard: guardWarn,
+      stagger: { available: false, days: null, idealDays: null, advice: "" },
       harvestGuide: { totalMl: 1000, mixMl: 1000, rodiMl: 0, targetPpt: 35 }, restartGuide: { totalMl: 4000, mixMl: 4000, rodiMl: 0, targetPpt: 35 },
       waterChangeGuide: { totalMl: 2000, mixMl: 2000, rodiMl: 0, targetPpt: 35 },
       hasBottle: false, seededFrom: "", reseedFrom: [],
@@ -13959,7 +13955,7 @@ const rigSteps = [
         feed: clock(false, 0, false), look: clock(false, 9), harvest: clock(false, 2 * 24), restart: clock(false, 3 * 8 * 24), waterChange: clock(false, 0, false),
         nextChore: { key: "look", at: iso(-9), due: false, hoursUntil: 9 } },
       tint: "green", due: [], densityAdvice: { action: "wait", reason: "growing — dark in ~2 d" }, feedAdvice: { action: "wait", reason: "growing — dark in ~2 d" },
-      temp: { available: true, status: "ok", tempC: 25.4, minC: 20, maxC: 27, hardMaxC: 29, actC: 30, criticalC: 32, act: false }, guard: noGuard,
+      temp: { available: true, status: "ok", tempC: 25.4, minC: 20, maxC: 27, hardMaxC: 29, actC: 30, criticalC: 32, act: false },
       learned: { ...learnedNone, daysToDark: { available: false, days: null, samples: 1 } }, risk: { level: "ok", reason: "no warning from the recorded observations" },
       lineage: { generation: 1, fromName: "", line: "gen 1 · from the starter" },
       tintStrip: ["", "pale", "pale", "pale", "green", "green", "dark", "pale", "pale", "pale", "green", "green", "green", "green"],
@@ -14031,11 +14027,11 @@ const rigSteps = [
         soak: { status: "soaking", percent: 55, hoursLeft: 2.7, hoursElapsed: 3.3 }, portionMl: 300, jarId: "a", jarName: "Rotifers A" },
       nextHarvest: { status: "wait", hoursUntil: 14, driver: "depletion" },
       backup: [
-        { species: "rotifer_L", speciesName: rot.name || "Rotifers (L-type)", running: 2, backedUp: true, continuityDays: 23, guard: guardWatch },
-        { species: "tigriopus", speciesName: pod.name || "Tigriopus copepods", running: 1, backedUp: false, continuityDays: 41, guard: guardWarn },
-        { species: "nanno", speciesName: nannoPreset.name || "Nannochloropsis (phyto)", running: 1, backedUp: false, continuityDays: 13, guard: noGuard },
+        { species: "rotifer_L", speciesName: rot.name || "Rotifers (L-type)", running: 2, backedUp: true, continuityDays: 23 },
+        { species: "tigriopus", speciesName: pod.name || "Tigriopus copepods", running: 1, backedUp: false, continuityDays: 41 },
+        { species: "nanno", speciesName: nannoPreset.name || "Nannochloropsis (phyto)", running: 1, backedUp: false, continuityDays: 13 },
       ],
-      guardAvailable: true, rackOffsetC: 1.2, tempC: 25.4,
+      tempC: 25.4,
       arrival: { rotifer: { fromPpt: 27, toPpt: 27, pouchMl: 500, steps: [], finalStepPpt: 0, withinRule: true,
         line: "the starter is at ~27 ppt and the cone at 27: float the pouch 15 min and pour in — a 0 ppt step is inside the 5 ppt rule" } },
       rig, species, tints: ["green", "clearing", "clear"],
@@ -15377,7 +15373,7 @@ const rigSteps = [
         </div>
       </div>`;
     const notices = `
-      ${st.demo ? `<div class="notice info-notice"><small>Demo view — a staged rack: two cones out of phase, the tub, a phyto vessel greening over its fridge bottle, a soak running and tomorrow's heat warning. The buttons are for show; exit the demo to run the real thing.</small></div>` : ""}
+      ${st.demo ? `<div class="notice info-notice"><small>Demo view — a staged rack: two cones out of phase, the tub, a phyto vessel greening over its fridge bottle and a soak running. The buttons are for show; exit the demo to run the real thing.</small></div>` : ""}
       ${st.message ? `<div class="notice info-notice"><small>${this._escape(st.message)}</small></div>` : ""}
       ${st.error ? `<div class="notice warning-notice"><small>${this._escape(st.error)}</small></div>` : ""}`;
 
@@ -15435,20 +15431,16 @@ const rigSteps = [
     const worstTemp = worstTempJar?.temp;
     const vesselTemperature = worstTemp?.source === "vessel";
     const tempSubject = worstTempJar ? `${worstTempJar.name} (${worstTempJar.speciesName || "culture"})` : "cultures";
-    const worstGuard = (sum.backup || []).map((b) => b.guard).filter((g) => g && g.available)
-      .sort((a, b) => ({ warn: 2, watch: 1 })[b.status] - ({ warn: 2, watch: 1 })[a.status] || 0)[0];
     const tempCard = this._missionSummaryCard(vesselTemperature ? `${worstTempJar.name} water` : "Room",
       vesselTemperature ? `${worstTemp.tempC} °C` : sum.tempC != null ? `${sum.tempC} °C` : "—",
-      worstGuard && worstGuard.status === "warn" && (!worstTemp || worstTemp.status === "ok" || worstTemp.status === "cool") ? `tomorrow: ${worstGuard.line}`
-        : !worstTemp ? (sum.guardAvailable ? "no sensor — the guard reads the forecast" : "link a temperature sensor in Culture settings")
+      !worstTemp ? "link a temperature sensor in Culture settings"
         : worstTemp.status === "critical" ? "over the critical line — move the cultures NOW"
           : worstTemp.status === "hot" ? (worstTempJar?.kind === "phyto"
             ? `${tempSubject} is over its heat limit — shade it or move it somewhere cooler`
             : worstTemp.act ? "act now — extra air, shade, feed lightly, water change" : "over the hard line — extra air, shade, feed lightly")
             : worstTemp.status === "warm" ? `warm for ${tempSubject} — above its ${worstTemp.maxC} °C band`
               : worstTemp.status === "cool" ? `cool for ${tempSubject} — below its ${worstTemp.minC} °C band` : "inside the measured cultures' bands",
-      worstGuard && worstGuard.status === "warn" && (!worstTemp || ["ok", "cool"].includes(worstTemp.status)) ? "warning"
-        : !worstTemp ? "unknown" : worstTemp.status === "critical" || worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
+      !worstTemp ? "unknown" : worstTemp.status === "critical" || worstTemp.status === "hot" ? "critical" : worstTemp.status === "warm" || worstTemp.status === "cool" ? "warning" : "ok",
       "settings", { section: "cultures", scroll: "or-section-cultures" });
     const phytoAvailable = phytoBottles.reduce((ml, j) => ml + (["fresh", "aging"].includes(j.homeBottle.expiry?.status)
       ? Math.max(0, Number(j.homeBottle.remainingMl) || 0) : 0), 0);
@@ -15528,10 +15520,6 @@ const rigSteps = [
       // The look that decided not to feed (0.7.184): the clock holds, say so.
       const skippedLine = running && s.feed?.skipped && !due.includes("feed")
         ? `<small class="muted" data-culture-skipped="${this._escape(j.id)}">feed skipped · next look in ~${this._escape(String(Math.round(Number(s.feed.hoursUntil) || 0)))} h</small>` : "";
-      const guard = j.guard || {};
-      const guardLine = running && guard.available && guard.status !== "clear"
-        ? `<small style="color:${guard.status === "warn" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-guard="${this._escape(guard.status)}">${guard.status === "warn" ? "🌡️ tomorrow: " : "🌡️ "}${this._escape(guard.line)}</small>`
-        : "";
       const needsBackup = status === "producing" && s.splitEligible && j.hasBottle && (sum.backup || []).some((b) => b.species === j.species && !b.backedUp) && (sum.canAddJar || (sum.idleJars || []).length);
       const splitTick = running && s.splitEligible && s.restart?.available && j.hasBottle && (sum.canAddJar || (sum.idleJars || []).length)
         ? `
@@ -15597,7 +15585,7 @@ const rigSteps = [
           </div>
           ${this._feedingFacts([["Working volume", `${j.volumeL} L`], ["Last water reading", j.tint || "Not checked"]])}
           <div class="feeding-next"><p class="eyebrow">Next action</p><strong>${this._escape(this._cultureNextTitle(j))}</strong>${advice}${skippedLine}</div>
-          <div class="feeding-alerts">${risk}${guardLine}${tempLine}${j.feed?.pauseReason ? `<small class="awc-hint">${this._escape(j.feed.pauseReason)}</small>` : ""}</div>
+          <div class="feeding-alerts">${risk}${tempLine}${j.feed?.pauseReason ? `<small class="awc-hint">${this._escape(j.feed.pauseReason)}</small>` : ""}</div>
           ${tintSelect ? `<div class="culture-form">${tintSelect}</div>` : ""}
           ${this._feedingActions(buttons, everyday)}
           ${status === "producing" ? `<div class="button-row">${this._feedingReview(`culture-${j.id}-recipe`, "Review harvest & refill")}</div>` : ""}
@@ -16060,7 +16048,7 @@ const rigSteps = [
         <span><strong>Cultures on</strong><small>The Cultures tab — rotifer and copepod jars with their own feed / harvest / restart clocks, the rotifer fridge bottle, and reminders. Standalone: works with NPS off.</small></span>
       </label>
       <div class="mini-grid">
-        <label title="Today's heat line reads it, and the day-ahead heat guard shifts the cooling forecast by what it reads over the room">Culture / rack temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
+        <label title="Current temperature warnings use this sensor">Culture / rack temperature sensor (optional)<input data-scope="nps-cultures" data-field="tempEntity" value="${this._escape(cultures.tempEntity || "")}" placeholder="sensor.bench_temperature"></label>
         <label>Rotifer bottle size (ml)<input type="number" min="0" max="20000" step="50" data-scope="nps-culture-bottle" data-field="volumeMl" value="${this._escape(String(cultures.bottle?.volumeMl ?? 1000))}"></label>
         <label>Bottle feed dose (ml)<input type="number" min="0.5" max="1000" step="0.5" data-scope="nps-culture-bottle" data-field="doseMl" value="${this._escape(String(cultures.bottle?.doseMl ?? 20))}"></label>
         <label>Bottle feeds / day (0 = no plan)<input type="number" min="0" max="24" step="1" data-scope="nps-culture-bottle" data-field="feedsPerDay" value="${this._escape(String(cultures.bottle?.feedsPerDay ?? 0))}"></label>
@@ -20867,9 +20855,6 @@ const rigSteps = [
           push("cultures-next", "Cultures", nh.status === "now" ? "Harvest the cone now" : `Harvest the cone in ~${nh.hoursUntil} h`,
             nh.driver === "empty" ? "The bottle is empty." : nh.driver === "freshness" ? "The bottle is about to go stale." : nh.driver === "depletion" ? "The bottle is about to run dry." : "Its own clock says so.", "warning");
         }
-        (sum.backup || []).filter((b) => b.guard?.status === "warn").forEach((b) =>
-          push(`cultures-guard-${b.species}`, "Cultures", `Heat ahead for the ${b.speciesName.toLowerCase()}`,
-            `${b.guard.line}. Heat can directly stress animals and worsen oxygen and ammonia problems.`, "warning"));
         // A pouch per hatchery (0.7.147); an older summary carries one.
         const pouchVessels = (this._nps?.summary?.hatchery?.vessels || []).filter((v) => v.cysts);
         const pouches = pouchVessels.length
@@ -31037,22 +31022,22 @@ const rigSteps = [
     }
     const pct = Math.round(Number(result.index || 0) * 100);
     const detail = `dew point ${Number(result.dewC).toFixed(1)} °C vs tank ${Number(result.waterC).toFixed(1)} °C · room ${Number(result.roomC).toFixed(1)} °C at ${Math.round(Number(result.rh))} %`;
-    const projection = status.projection || null;
-    const plan = status.plan || null;
+    // Ignore retired forecast decisions in a response from an older backend.
+    const plan = ["now", "losing", "ceiling", "unrescuable", "vented", "none"].includes(status.plan?.kind) ? status.plan : null;
+    const decision = status.ventDecision;
+    const ventDecision = ["cool", "freecool", "none"].includes(decision?.kind)
+      || (decision?.kind === "blocked" && ["cool", "freecool"].includes(decision.wants)) ? decision : null;
     const vent = status.vent || null;
-    const worstPct = projection?.worst ? Math.round(Number(projection.worst.index) * 100) : null;
     return {
       band: result.band, pill: this._coolingPillClass(result.band), label: result.title,
       pct, needed: Boolean(status.fanNeeded), warn: Boolean(status.warn), detail,
       status: result.status, netFan: result.netFan,
-      dayKind: projection?.dayKind || "", dayKindLabel: projection?.dayKindLabel || "",
-      worstPct, firstAffectedAt: projection?.firstAffectedAt || null,
-      plan, planActive: Boolean(plan && (plan.kind === "now" || plan.kind === "ahead" || plan.kind === "losing" || plan.kind === "ceiling")),
+      plan, planActive: Boolean(plan && (plan.kind === "now" || plan.kind === "losing" || plan.kind === "ceiling")),
       planCeiling: Boolean(plan && plan.kind === "ceiling"),
       ventAdvised: Boolean(vent && vent.advised), ventReason: vent?.reason || "",
-      ventDecision: status.ventDecision || null,
-      ventRunning: Boolean(status.ventDecision?.shouldRun),
-      ventBlocked: status.ventDecision?.kind === "blocked",
+      ventDecision,
+      ventRunning: Boolean(ventDecision?.shouldRun),
+      ventBlocked: ventDecision?.kind === "blocked",
       ventFanOn: status.ventFan?.state === "on",
       ventControlling: Boolean(status.ventFan?.controlling),
     };
@@ -31062,9 +31047,8 @@ const rigSteps = [
     const d = sum?.ventDecision;
     if (!d) return "";
     if (d.kind === "blocked") return `Open the window — ${d.reason}`;
-    if (d.kind === "purge") return `${sum.ventControlling && sum.ventFanOn ? "Night purge running" : "Night purge — run the intake fan"}: ${d.reason}`;
     if (d.kind === "freecool") return `${sum.ventControlling && sum.ventFanOn ? "Free cooling" : "Vent the room — free cooling"}: ${d.reason}`;
-    if (d.kind === "cool" || d.kind === "predry") return `${sum.ventControlling && sum.ventFanOn ? "Venting" : "Vent the room"}: ${d.reason}`;
+    if (d.kind === "cool") return `${sum.ventControlling && sum.ventFanOn ? "Venting" : "Vent the room"}: ${d.reason}`;
     return "";
   }
 
@@ -31078,10 +31062,9 @@ const rigSteps = [
   _coolingPlanLine(sum) {
     const plan = sum?.plan;
     if (!plan) return "";
-    if (plan.kind === "now" || plan.kind === "ahead" || plan.kind === "losing") return `Dehumidify now — ${plan.reason}`;
+    if (plan.kind === "now" || plan.kind === "losing") return `Dehumidify now — ${plan.reason}`;
     if (plan.kind === "ceiling") return `Dehumidify — ${plan.reason}`;
-    if (plan.kind === "scheduled") return `Dehumidifier: ${plan.reason}`;
-    if (plan.kind === "unrescuable") return `Chiller day — ${plan.reason}`;
+    if (plan.kind === "unrescuable") return `Room too hot for dehumidification — ${plan.reason}`;
     if (plan.kind === "vented") return `Dehumidifier off — ${plan.reason}`;
     return "";
   }
@@ -31108,7 +31091,6 @@ const rigSteps = [
     let detail = sum ? (sum.needed ? sum.detail : `${sum.detail} · fans not needed right now`) : "";
     if (sum && (sum.ventRunning || sum.ventBlocked)) detail += ` · ${this._coolingVentLine(sum)}`;
     else if (sum && sum.planActive) detail += ` · ${this._coolingPlanLine(sum)}`;
-    else if (sum && sum.plan?.kind === "scheduled") detail += ` · drops to ${sum.worstPct} % from ${this._coolingHhmm(sum.firstAffectedAt)}`;
     return `
       <button class="row row-link" data-action="cooling-open" aria-label="Cooling headroom — Open the live view">
         <div>
@@ -31131,13 +31113,10 @@ const rigSteps = [
       return { key: "cooling", kicker: "Cooling headroom", title: sum.label, detail: sum.detail, status: sum.status || "warning" };
     }
     if (sum.plan?.kind === "unrescuable") {
-      return { key: "cooling", kicker: "Cooling headroom", title: "Chiller day", detail: sum.plan.reason, status: "critical" };
+      return { key: "cooling", kicker: "Cooling headroom", title: "Room too hot for dehumidification", detail: sum.plan.reason, status: "critical" };
     }
     if (sum.ventBlocked) {
       return { key: "cooling", kicker: "Cooling headroom", title: "Open the window — venting would help", detail: sum.ventDecision.reason, status: "warning" };
-    }
-    if (sum.ventRunning && sum.ventDecision.kind === "purge") {
-      return { key: "cooling", kicker: "Cooling headroom", title: sum.ventControlling && sum.ventFanOn ? "Night purge running" : "Night purge — run the intake fan", detail: sum.ventDecision.reason, status: "ok" };
     }
     if (sum.ventRunning) {
       const freecool = sum.ventDecision.kind === "freecool";
@@ -31150,53 +31129,10 @@ const rigSteps = [
     if (sum.planActive) {
       return { key: "cooling", kicker: "Cooling headroom", title: sum.ventAdvised ? "Vent the room now" : "Dehumidify now", detail: sum.ventAdvised ? sum.ventReason : sum.plan.reason, status: "warning" };
     }
-    if (sum.plan?.kind === "scheduled") {
-      return { key: "cooling", kicker: "Cooling headroom", title: `Humid-heat day — dehumidifier by ${this._coolingHhmm(sum.plan.startAt)}`, detail: `${sum.plan.reason} · now ${sum.pct} %`, status: "ok" };
-    }
     if (!sum.needed && (sum.band === "weak" || sum.band === "dead" || sum.band === "reversed")) {
       return { key: "cooling", kicker: "Cooling headroom", title: "Humid, but the fans aren't needed", detail: `${sum.detail} · the room is below the cooling gate`, status: "ok" };
     }
-    const kind = sum.dayKindLabel ? ` · ${sum.dayKindLabel}` : "";
-    return { key: "cooling", kicker: "Cooling headroom", title: `${sum.label} — ${sum.pct} %`, detail: `${sum.detail}${kind}`, status: "ok" };
-  }
-
-  // The 24 h strip: one cell per forecast hour, coloured by band; affected
-  // hours (fans needed AND losing) get a marker. Pure render of the backend rows.
-  _coolingForecastStrip(status) {
-    const proj = status?.projection;
-    if (!proj || !Array.isArray(proj.hours) || !proj.hours.length) return "";
-    const cells = proj.hours.map((h) => `
-      <div class="cooling-hour ${this._escape(h.band)} ${h.affected ? "affected" : ""} ${h.fanNeeded ? "" : "idle"}" title="${this._escape(`${this._coolingHhmm(h.at)} · room ${h.roomC} °C at ${h.rh} % · dew ${h.dewC} °C · outdoor ${h.outC} °C / dew ${h.outDewC} °C`)}">
-        <small>${this._coolingHhmm(h.at)}</small>
-        <strong>${Math.round(Number(h.index) * 100)}</strong>
-        <span>${Number(h.roomC).toFixed(0)}°</span>
-      </div>`).join("");
-    const purge = proj.purgeWindow ? `<small class="hint">Coolest outdoor air ${this._coolingHhmm(proj.purgeWindow.from)}–${this._coolingHhmm(proj.purgeWindow.to)} (${Number(proj.purgeWindow.outC).toFixed(0)} °C) — the night-purge window for the intake fan.</small>` : "";
-    return `
-      <div class="cooling-strip-wrap">
-        <p class="eyebrow">${this._escape(proj.dayKindLabel || "")} · next ${Number.isFinite(Number(this._coolingCfg().lookaheadHours)) ? Number(this._coolingCfg().lookaheadHours) : proj.hours.length} h</p>
-        <div class="cooling-strip">${cells}</div>
-        <small class="hint">Fan effect % per hour, room ${Number(proj.offsets?.offsetT ?? 0).toFixed(1)} °C over and dew point ${Number(proj.offsets?.offsetDew ?? 0).toFixed(1)} °C over the forecast (the live difference)${Number(proj.learnedHours) > 0 ? `, per-hour learned offsets on ${proj.learnedHours} of ${proj.hours.length} hours` : ""}. Greyed hours: fans not needed. Marked hours: needed and losing.</small>
-        ${purge}
-      </div>`;
-  }
-
-  // One line on the learned per-hour offsets: coverage and the data behind it.
-  _coolingLearnedLine(status) {
-    const l = status?.learned;
-    if (!l || !Number.isFinite(Number(l.hoursLearned))) return "";
-    if (!l.hoursLearned) return `Per-hour offsets: learning — ${Number(l.days || 0).toFixed(1)} days of readings so far, none trusted yet (each hour needs half an hour of readings).`;
-    return `Per-hour offsets learned for ${l.hoursLearned} of 24 hours from ${Number(l.days || 0).toFixed(1)} days of readings${l.since ? ` since ${this._coolingHhmm(l.since)} on ${String(l.since).slice(0, 10)}` : ""}; the projection uses them where they exist and the live pair elsewhere.`;
-  }
-
-  async _coolingLearningReset() {
-    try {
-      await this._callWS({ type: "openreef/cooling_learning", action: "reset" });
-      this._message = "Learned offsets forgotten — learning again from now.";
-    } catch (err) {
-      this._error = err?.message || "Could not reset the learned offsets";
-    }
-    this._loadCoolingStatus(true);
+    return { key: "cooling", kicker: "Cooling headroom", title: `${sum.label} — ${sum.pct} %`, detail: sum.detail, status: "ok" };
   }
 
   _coolingWhatIfTable(status) {
@@ -31276,8 +31212,8 @@ const rigSteps = [
       const now = `
         <div class="cooling-now">
           ${status.vent?.known ? `<p class="hint">${status.vent.advised ? "🪟 " : ""}<strong>Vent:</strong> ${this._escape(status.vent.reason)}${weather.outRh != null ? ` · outdoor ${Number(weather.outC).toFixed(1)} °C at ${weather.outRh} %` : ""}${status.vent.hysteresis && status.vent.advised ? ` · <em>holding while air moves — the fan narrows this gap itself</em>` : ""}</p>` : ""}
-          ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : status.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(status.plan.reason)}</p>` : ""}
-          ${ventLine ? `<p class="hint"><strong>Intake fan:</strong> ${this._escape(ventLine)}</p>` : status.ventDecision ? `<p class="hint"><strong>Intake fan:</strong> off — ${this._escape(status.ventDecision.reason)}</p>` : ""}
+          ${planLine ? `<p class="hint"><strong>Plan:</strong> ${this._escape(planLine)}</p>` : sum?.plan ? `<p class="hint"><strong>Plan:</strong> ${this._escape(sum.plan.reason)}</p>` : ""}
+          ${ventLine ? `<p class="hint"><strong>Intake fan:</strong> ${this._escape(ventLine)}</p>` : sum?.ventDecision ? `<p class="hint"><strong>Intake fan:</strong> off — ${this._escape(sum.ventDecision.reason)}</p>` : ""}
         </div>`;
       const dehum = cfg.dehumidifier || {};
       const vent = cfg.vent || {};
@@ -31285,11 +31221,6 @@ const rigSteps = [
       const plugs = `
         ${dehum.switchEntity ? this._coolingActuatorRow("Dehumidifier", "cooling-dehum", dehum, status.dehumidifier || {}) : ""}
         ${vent.switchEntity ? this._coolingActuatorRow("Intake fan", "cooling-vent", vent, status.ventFan || {}, windowText) : windowText ? `<small class="hint">${this._escape(windowText.slice(3))}</small>` : ""}`;
-      const weatherBound = Boolean(cfg.weatherEntity);
-      const forecast = !weatherBound ? `<small class="hint">Bind a weather entity in Settings for the 24 h projection, the dehumidifier plan and the night purge.</small>` : `
-        ${this._coolingForecastStrip(status)}
-        ${!status.projection ? `<small class="hint">${this._escape(status.issues?.forecast || status.issues?.weather || "Waiting for the first forecast read (within five minutes of saving).")}</small>` : ""}
-        ${this._coolingLearnedLine(status) ? `<p class="hint">${this._escape(this._coolingLearnedLine(status))} <button class="secondary compact-button" data-action="cooling-learning-reset">Forget learned offsets</button></p>` : ""}`;
       const issues = Object.values(status.issues || {});
       body = `
         ${verdict}
@@ -31297,8 +31228,6 @@ const rigSteps = [
         <div class="awc-section-title"><p class="eyebrow">Right now</p></div>
         ${now}
         ${plugs}
-        <div class="awc-section-title"><p class="eyebrow">Next 24 h</p></div>
-        ${forecast}
         <div class="awc-section-title"><p class="eyebrow">What the fans are worth</p></div>
         ${this._coolingWhatIfTable(status)}
         ${issues.length ? `<ul class="hint">${issues.map((i) => `<li>${this._escape(i)}</li>`).join("")}</ul>` : ""}`;
@@ -31329,14 +31258,14 @@ const rigSteps = [
     const spawningOn = Boolean(this._config.spawningProgram?.enabled);
     const targetMode = cfg.targetMode === "spawning" ? "spawning" : "fixed";
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
-    // Settings is for settings (0.7.175): the live reading, the forecast
+    // Settings is for settings (0.7.175): the live reading
     // strip, the what-if table and the plug controls live in the dialog.
     const live = !enabled ? "" : `
       <div class="spawn-channel-row">
         <strong>${sum && sum.pct != null ? `${sum.pct} % fan effect` : status ? "No reading" : "Loading…"}</strong>
         <span class="pill ${sum ? sum.pill : "unknown"}">${this._escape(sum ? sum.label : "Not reporting")}</span>
         <button class="secondary compact-button" data-action="cooling-open">Open the live view</button>
-        <small class="hint">Today's reading, the 24 h forecast, the what-if table and the plug controls — also one tap from the Cooling headroom row in Mission Control.</small>
+        <small class="hint">Current readings, the what-if table and the plug controls — also one tap from the Cooling headroom row in Mission Control.</small>
       </div>`;
     const content = `
       <label class="toggle-card compact-toggle">
@@ -31371,17 +31300,16 @@ const rigSteps = [
     );
   }
 
-  // Layer 2: the forecast, the day kind, vent advice and the dehumidifier.
+  // Layer 2: current outdoor conditions and the dehumidifier.
   _coolingLayer2Settings(cfg, status, sum) {
     const dehum = cfg.dehumidifier || {};
     const mode = ["off", "advise", "auto"].includes(dehum.mode) ? dehum.mode : "advise";
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
     return `
-      <div class="awc-section-title"><p class="eyebrow">Forecast + dehumidifier</p></div>
-      ${this._howItWorks("cooling-forecast", `<p>Bind a weather entity and OpenReef projects the next day hour by hour — room temperature and dew point follow the outdoor forecast plus the live indoor offset — and tells you when the fans will lose it and when to start the dehumidifier so its heat lands before the peak, not in it. If outdoor air is drier, it says vent instead. Two more triggers need no forecast: the fans are on but the tank is still sitting over target (the honest sign they are losing), and a plain room-humidity ceiling for the house. Advise tells you; auto switches a plug. Efficiency, never safety: it fails off and the fan/guard stay the backstop.</p>`)}
+      <div class="awc-section-title"><p class="eyebrow">Current conditions + dehumidifier</p></div>
+      ${this._howItWorks("cooling-dehumidifier", `<p>OpenReef uses current room temperature, humidity and tank temperature to decide whether dehumidification would help. It can respond when fan performance is poor, the tank remains over target, or room humidity exceeds your ceiling. Suitable outdoor air can provide ventilation instead. Advise tells you; auto switches the configured plug with its timing and manual-override safeguards.</p>`)}
       <div class="grid two">
-        <label><span>Weather entity <small>hourly forecast — HA's built-in weather.home works</small></span>${this._awcEntitySelect("cooling", "", "weatherEntity", cfg.weatherEntity || "", "weather")}</label>
-        <label><span>Look ahead (hours)</span><input type="number" min="6" max="48" step="1" value="${num(cfg.lookaheadHours, 24)}" data-scope="cooling" data-field="lookaheadHours" /></label>
+        <label><span>Weather entity <small>current outdoor temperature and humidity for ventilation</small></span>${this._awcEntitySelect("cooling", "", "weatherEntity", cfg.weatherEntity || "", "weather")}</label>
         <label><span>Dehumidifier</span>
           <select data-scope="cooling-dehum" data-field="mode">
             <option value="off" ${mode === "off" ? "selected" : ""}>Off</option>
@@ -31389,7 +31317,6 @@ const rigSteps = [
             <option value="auto" ${mode === "auto" ? "selected" : ""}>Auto — switch the plug</option>
           </select></label>
         <label><span>Dehumidifier plug <small>a dumb unit's own humidistat must sit at its lowest / continuous</small></span>${this._awcEntitySelect("cooling-dehum", "", "switchEntity", dehum.switchEntity || "", "switch")}</label>
-        <label><span>Start ahead (hours)</span><input type="number" min="0" max="12" step="0.5" value="${num(dehum.leadHours, 3)}" data-scope="cooling-dehum" data-field="leadHours" /></label>
         <label><span>Max run (hours)</span><input type="number" min="1" max="24" step="1" value="${num(dehum.maxRunHours, 8)}" data-scope="cooling-dehum" data-field="maxRunHours" /></label>
         <label><span>Min on (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(dehum.minOnMinutes, 20)}" data-scope="cooling-dehum" data-field="minOnMinutes" /></label>
         <label><span>Min off (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(dehum.minOffMinutes, 10)}" data-scope="cooling-dehum" data-field="minOffMinutes" /></label>
@@ -31408,14 +31335,14 @@ const rigSteps = [
       </label>` : ""}`;
   }
 
-  // Layer 3: the intake fan — vent rule, window sensor, night purge.
+  // Layer 3: the intake fan — current conditions and the window sensor.
   _coolingLayer3Settings(cfg, status, sum) {
     const vent = cfg.vent || {};
     const mode = ["off", "advise", "auto"].includes(vent.mode) ? vent.mode : "advise";
     const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
     return `
       <div class="awc-section-title"><p class="eyebrow">Intake fan (vent)</p></div>
-      ${this._howItWorks("cooling-vent", `<p>The circulating fan in front of a slightly-open window is free dehumidification and cooling whenever outdoor air is drier and no warmer — usually most of a UK summer. OpenReef runs it (or tells you to) only for a reason: the room needs cooling now, a losing hour is coming and the room can be pre-dried, or the night purge through the coolest hours before a hot day. Never at the same time as the dehumidifier. On a muggy evening it says close up.</p>`)}
+      ${this._howItWorks("cooling-vent", `<p>The intake fan runs when cooling is needed now and outdoor air is suitably cooler or drier. A closed window sensor blocks it. While the room is being vented, dehumidification pauses. Min on/off timing and manual overrides still apply.</p>`)}
       <div class="grid two">
         <label><span>Intake fan</span>
           <select data-scope="cooling-vent" data-field="mode">
@@ -31428,7 +31355,6 @@ const rigSteps = [
         <label><span>Vent when outdoor dew point is at least this much lower (°C)</span><input type="number" min="0.5" max="6" step="0.5" value="${num(vent.dewGapC, 2)}" data-scope="cooling-vent" data-field="dewGapC" /></label>
         <label><span>…or when the room is this much hotter than outside (°C) <small>free cooling — only ever with air no wetter than indoors</small></span><input type="number" min="0.5" max="8" step="0.5" value="${num(vent.coolGapC, 2)}" data-scope="cooling-vent" data-field="coolGapC" /></label>
         <label><span>Never free-cool on air colder than (°C) <small>0 = no floor</small></span><input type="number" min="0" max="20" step="1" value="${num(vent.coolMinOutdoorC, 10)}" data-scope="cooling-vent" data-field="coolMinOutdoorC" /></label>
-        <label><span>Stop the night purge once the tank is this far below target (°C)</span><input type="number" min="0" max="6" step="0.5" value="${num(vent.purgeFloorC, 2)}" data-scope="cooling-vent" data-field="purgeFloorC" /></label>
         <label><span>Min on (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(vent.minOnMinutes, 10)}" data-scope="cooling-vent" data-field="minOnMinutes" /></label>
         <label><span>Min off (minutes)</span><input type="number" min="5" max="120" step="5" value="${num(vent.minOffMinutes, 10)}" data-scope="cooling-vent" data-field="minOffMinutes" /></label>
         <label><span>If you switch it by hand</span>
@@ -31439,11 +31365,7 @@ const rigSteps = [
       </div>
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="cooling-vent" data-field="coolVent" ${vent.coolVent === false ? "" : "checked"}>
-        <span><strong>Free cooling</strong><small>Vent whenever outdoor air is simply cooler than the room and no wetter, even when it is not dry enough to be worth venting for drying. A cooler room conducts less heat into the tank — a benefit the dew-point rule cannot see. The night purge uses this too.</small></span>
-      </label>
-      <label class="toggle-card compact-toggle">
-        <input type="checkbox" data-scope="cooling-vent" data-field="nightPurge" ${vent.nightPurge === false ? "" : "checked"}>
-        <span><strong>Night purge</strong><small>Ahead of a day that needs the fans, run the intake fan through the coolest forecast hours so the room's walls, floor and water start the afternoon cool.</small></span>
+        <span><strong>Free cooling</strong><small>Vent whenever outdoor air is simply cooler than the room and no wetter, even when it is not dry enough to be worth venting for drying. A cooler room conducts less heat into the tank — a benefit the dew-point rule cannot see.</small></span>
       </label>
       ${mode === "auto" ? `
       <label class="toggle-card compact-toggle">

@@ -123,7 +123,7 @@ test("mission row opens the dialog, not settings; the dialog carries the reading
   assert(html.includes("band-dead"), "margin tile carries the band");
   assert(html.includes("<small>Fans needed</small><strong>Yes</strong>"));
   assert(html.includes("cooling-grid"), "what-if table moved into the dialog");
-  assert(html.includes("Bind a weather entity"), "no forecast without a weather entity");
+  assert(!html.includes("24 h projection"), "no indoor forecast prompt");
   assert(html.includes('data-action="tab" data-id="settings" data-section="cooling"'), "settings deep link");
 });
 
@@ -176,20 +176,21 @@ function l2(over = {}) {
   });
 }
 
-test("scheduled plan: ok card names the start time; row carries the drop", async () => {
-  const panel = await prep({ enabled: true, weatherEntity: "weather.home", dehumidifier: { mode: "advise", switchEntity: "switch.dehum" } }, l2());
-  const sum = panel._coolingSummary();
-  assertEqual(sum.dayKind, "humid-heat");
-  assertEqual(sum.worstPct, 12);
-  assertEqual(sum.planActive, false);
-  const card = panel._coolingInsightCard();
-  assertEqual(card.status, "ok");
-  assert(card.title.startsWith("Humid-heat day — dehumidifier by "), card.title);
-  assert(panel._coolingMissionRow().includes("drops to 12 % from"));
+test("cached indoor forecasts and scheduled plans are ignored on every surface", async () => {
+  for (const kind of ["scheduled", "ahead"]) {
+    const st = l2({ plan: { ...l2().plan, kind, shouldRun: kind === "ahead" } });
+    const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, st);
+    assertEqual(panel._coolingSummary().plan, null);
+    assertEqual(panel._coolingSummary().planActive, false);
+    const html = panel._coolingDialog() + panel._coolingMissionRow() + JSON.stringify(panel._coolingInsightCard());
+    assert(!html.includes(st.plan.reason) && !html.includes("Humid-heat day") && !html.includes("Next 24 h"), "no forecast advice");
+    assert(!html.includes("cooling-strip") && !html.includes("cooling-learning-reset"), "no forecast controls");
+    assert(html.includes("Room") && html.includes("Humidity"), "current sensor readings remain");
+  }
 });
 
 test("active plan: warning card; vent advice takes the title when outdoor air is drier", async () => {
-  const st = l2({ plan: { shouldRun: true, kind: "ahead", startAt: "x", until: "y", reason: "fan headroom drops to 12 % from 16:00" } });
+  const st = l2({ plan: { shouldRun: true, kind: "now", startAt: "x", until: null, reason: "the fans are down to 12 % right now" } });
   const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, st);
   const card = panel._coolingInsightCard();
   assertEqual(card.status, "warning");
@@ -200,23 +201,23 @@ test("active plan: warning card; vent advice takes the title when outdoor air is
   assert(panel2._coolingMissionRow().includes("Dehumidify now"));
 });
 
-test("chiller day is a critical card", async () => {
-  const st = l2({ plan: { shouldRun: false, kind: "unrescuable", startAt: null, until: null, reason: "room 31.0 °C at 85 % — a dehumidifier cannot rescue this afternoon; this is a chiller day" } });
+test("current conditions too hot for dehumidification produce a critical card", async () => {
+  const st = l2({ plan: { shouldRun: false, kind: "unrescuable", startAt: null, until: null, reason: "room 31.0 °C at 85 % — a dehumidifier cannot restore cooling safely under these current conditions" } });
   const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, st);
   const card = panel._coolingInsightCard();
   assertEqual(card.status, "critical");
-  assertEqual(card.title, "Chiller day");
+  assertEqual(card.title, "Room too hot for dehumidification");
 });
 
-test("forecast strip renders every hour with band, idle and affected markers", async () => {
-  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, l2());
-  const html = panel._coolingForecastStrip(l2());
-  assertEqual((html.match(/class="cooling-hour /g) || []).length, 6);
-  assertEqual((html.match(/affected/g) || []).length, 2);
-  assertEqual((html.match(/ idle/g) || []).length, 2);
-  assert(html.includes("Humid-heat day"));
-  assert(html.includes("night-purge window"));
-  assertEqual(panel._coolingForecastStrip(status()), "");
+test("cooling settings retain current conditions and omit retired forecast options", async () => {
+  const panel = await prep({ enabled: true }, l2());
+  panel._settingsSectionOpen = () => true;
+  panel._awcEntitySelect = (scope, _id, field) => `<input data-scope="${scope}" data-field="${field}">`;
+  const html = panel._coolingSettings();
+  for (const field of ["lookaheadHours", "leadHours", "nightPurge", "purgeFloorC"]) {
+    assert(!html.includes(`data-field="${field}"`), `retired setting ${field}`);
+  }
+  assert(html.includes('data-field="weatherEntity"') && html.includes('data-field="maxRh"'), "current weather and humidity controls remain");
 });
 
 test("layer 2 settings render the weather/dehumidifier fields, the plan, vent and controls", async () => {
@@ -233,8 +234,8 @@ test("layer 2 settings render the weather/dehumidifier fields, the plan, vent an
   assert(dialog.includes("OpenReef is driving the plug"));
   assert(dialog.includes("Give it back to the plan"), "resume button while held");
   assert(dialog.includes('data-action="cooling-dehum" data-id="run"'));
-  assert(dialog.includes("<strong>Vent:</strong>") && dialog.includes("<strong>Plan:</strong>"));
-  assert(dialog.includes("cooling-strip"), "forecast strip moved into the dialog");
+  assert(dialog.includes("<strong>Vent:</strong>") && !dialog.includes(st.plan.reason));
+  assert(!dialog.includes("cooling-strip"), "forecast strip removed");
   assert(dialog.includes("<small>Outdoor</small><strong>20.0 °C · dew 12.0 °C</strong>"));
   const advise = await prep({ enabled: true, dehumidifier: { mode: "advise" } }, l2());
   advise._settingsSectionOpen = () => true;
@@ -317,14 +318,17 @@ test("blocked by a closed window: warning card and row say open the window", asy
   assert(panel._coolingMissionRow().includes("Open the window"));
 });
 
-test("night purge: running vs advised wording follows who is driving the fan", async () => {
-  const purge = { shouldRun: true, kind: "purge", wants: "purge", reason: "night purge — the coolest outdoor air (12.0 °C) until 06:00, ahead of a dry-heat day" };
-  const running = await prep({ enabled: true }, l3(purge, { ventFan: { mode: "auto", armed: true, switchEntity: "switch.vent", controlling: true, state: "on" } }));
-  assertEqual(running._coolingInsightCard().title, "Night purge running");
-  assertEqual(running._coolingInsightCard().status, "ok");
-  const advised = await prep({ enabled: true }, l3(purge, { ventFan: { mode: "advise", armed: false, switchEntity: "", controlling: false, state: null } }));
-  assertEqual(advised._coolingInsightCard().title, "Night purge — run the intake fan");
-  assert(advised._coolingMissionRow().includes("Night purge — run the intake fan"));
+test("cached forecast ventilation cannot show a running or blocked recommendation", async () => {
+  for (const kind of ["purge", "predry"]) {
+    for (const blocked of [false, true]) {
+      const decision = { shouldRun: !blocked, kind: blocked ? "blocked" : kind, wants: kind, reason: "old forecast ventilation" };
+      const panel = await prep({ enabled: true }, l3(decision));
+      assertEqual(panel._coolingSummary().ventDecision, null);
+      assertEqual(panel._coolingSummary().ventRunning, false);
+      assert(!JSON.stringify(panel._coolingInsightCard()).includes(decision.reason));
+      assert(!panel._coolingDialog().includes(decision.reason));
+    }
+  }
 });
 
 test("vent wins over the dehumidifier plan on every surface", async () => {
@@ -367,7 +371,7 @@ test("layer 3 settings render the free-cooling fields", async () => {
   panel._settingsSectionOpen = () => true;
   panel._awcEntitySelect = (scope, _id, field, value) => `<input data-scope="${scope}" data-field="${field}" value="${value}">`;
   const html = panel._coolingSettings();
-  for (const f of ["coolVent", "coolGapC", "coolMinOutdoorC", "purgeFloorC"]) {
+  for (const f of ["coolVent", "coolGapC", "coolMinOutdoorC"]) {
     assert(html.includes(`data-field="${f}"`), `missing ${f}`);
   }
   assert(html.includes("Free cooling"), "the route toggle names itself");
@@ -387,7 +391,7 @@ test("layer 3 settings render the vent fields, window state and controls", async
   panel._awcEntitySelect = (scope, _id, field, value) => `<input data-scope="${scope}" data-field="${field}" value="${value}">`;
   const html = panel._coolingSettings();
   assert(html.includes('data-scope="cooling-vent" data-field="mode"') && html.includes('data-field="windowEntity"'));
-  assert(html.includes('data-field="nightPurge"') && html.includes('data-scope="cooling-vent" data-field="armed"'));
+  assert(!html.includes('data-field="nightPurge"') && html.includes('data-scope="cooling-vent" data-field="armed"'));
   const dialog = panel._coolingDialog();
   assert(dialog.includes("window closed"));
   assert(dialog.includes("keep the windows shut"));
@@ -402,19 +406,13 @@ test("layer 3 settings render the vent fields, window state and controls", async
 
 // --- learned per-hour offsets ----------------------------------------------
 
-test("learned-offsets line: learning, then coverage; strip hint counts learned hours", async () => {
-  const none = l2({ learned: { hoursLearned: 0, samples: 30, days: 0.1, since: "", byHour: [] } });
-  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, none);
-  assert(panel._coolingLearnedLine(none).startsWith("Per-hour offsets: learning"));
-  const some = l2({ learned: { hoursLearned: 14, samples: 900, days: 3.1, since: "2026-07-11T09:00:00Z", byHour: [] },
-    projection: { ...l2().projection, learnedHours: 4 } });
-  const line = panel._coolingLearnedLine(some);
-  assert(line.includes("14 of 24 hours") && line.includes("3.1 days") && line.includes("2026-07-11"), line);
-  assert(panel._coolingForecastStrip(some).includes("per-hour learned offsets on 4 of 6 hours"));
-  assert(!panel._coolingForecastStrip(l2()).includes("per-hour learned"));
-  assertEqual(panel._coolingLearnedLine(status()), "");
-  panel._cooling.status = some;
-  assert(panel._coolingDialog().includes('data-action="cooling-learning-reset"'), "forget button lives in the dialog");
+test("retired learning payloads do not appear in the cooling dialog", async () => {
+  const panel = await prep({ enabled: true, weatherEntity: "weather.home" }, l2({
+    learned: { hoursLearned: 24, samples: 900, days: 3.1, since: "2026-07-11T09:00:00Z" }
+  }));
+  const html = panel._coolingDialog();
+  assert(!html.includes("learned offsets") && !html.includes("cooling-learning-reset"));
+  assert(!html.includes("Waiting for the first forecast") && !html.includes("Next 24 h"));
 });
 
 await runTests();

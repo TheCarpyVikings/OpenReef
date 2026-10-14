@@ -607,26 +607,27 @@ test("never zero: the Jars card says backup or not, and the restart seeds B by d
   } finally { restore(); }
 });
 
-test("the heat guard reads the day ahead onto the tile, the Room card and the Pulse", async () => {
+test("cultures ignore old heat forecasts and keep measured-temperature warnings", async () => {
   const restore = freezeTime(NOW);
   try {
-    const warn = { available: true, status: "warn", peakC: 30.1, peakAt: iso(-15), crossAt: iso(-9), hoursUntil: 9,
-      line: "room passes 28 °C in ~9 h (peak 30.1 °C) — extra air, shade, feed lightly, a 50 % change ready" };
-    const pod = { ...summaryFixture().jars[1], state: { ...summaryFixture().jars[1].state, status: "producing", ageDays: 40 }, tint: "green", guard: warn };
-    const summary = summaryFixture([jarSummary(), pod]);
-    summary.backup = [
-      { species: "rotifer_L", speciesName: "Rotifers (L-type)", running: 1, backedUp: false, continuityDays: 12, guard: { available: true, status: "watch", line: "room peaks at 28.4 °C — above the 26 °C band, keep an eye on it" } },
-      { species: "tigriopus", speciesName: "Tigriopus copepods", running: 1, backedUp: false, continuityDays: 40, guard: warn },
-    ];
+    const guard = { available: true, status: "warn", peakC: 35, line: "room peaks at 35 °C tomorrow" };
+    const summary = summaryFixture([jarSummary({ guard })]);
     summary.guardAvailable = true;
+    summary.backup[0].guard = guard;
     const panel = await culturesPanel({}, summary);
-    const html = panel._culturesTab();
-    assert(html.includes('data-culture-guard="warn"') && html.includes("🌡️ tomorrow: room passes 28 °C in ~9 h"), "the pods' tile must carry the day-ahead warning");
-    assert(html.includes("tomorrow: room passes 28 °C"), "the Room card must escalate to the guard when the room is fine today");
+    let html = panel._culturesTab();
+    assert(!html.includes(guard.line) && !html.includes("data-culture-guard") && !html.includes("How this is estimated"), "no forecast warning or explanation");
     panel._culturesLoadSummary = async () => {};
-    const titles = panel._pulseInsightCards().map((c) => `${c.kicker}: ${c.title}`).join(" | ");
-    assert(titles.includes("Cultures: Heat ahead for the tigriopus copepods"), `guard Pulse line missing: ${titles}`);
-    noPlaceholders(html, "guard");
+    assert(!panel._pulseInsightCards().some((c) => c.key?.startsWith("cultures-guard") || c.title?.includes("Heat ahead")), "no forecast Pulse card");
+    summary.tempC = 30.5;
+    summary.jars[0].temp = { available: true, status: "hot", tempC: 30.5, minC: 18, maxC: 26, hardMaxC: 30, act: true, source: "rack" };
+    html = panel._culturesTab();
+    assert(html.includes("30.5 °C") && html.includes("act now"), "actual high temperature still warns");
+    summary.tempC = null;
+    summary.jars[0].temp = { available: false, status: "unknown" };
+    html = panel._culturesTab();
+    assert(html.includes("link a temperature sensor in Culture settings"), "missing measurement does not fall back to a forecast");
+    noPlaceholders(html, "measured culture temperatures");
   } finally { restore(); }
 });
 
@@ -728,11 +729,11 @@ test("the demo view stages a rack, refuses every tap, and hands the real rack ba
     assert(panel._cultures.demo === true && panel._cultures.summary !== real, "the demo swaps the summary");
     const sum = panel._cultures.summary;
     assert(sum.jars.length === 4 && sum.jars.map((j) => j.name).join(",") === "Rotifers A,Rotifers B,Pods,Nanno A", "two cones, the tub and the phyto vessel");
-    assert(sum.enrichment.soak.status === "soaking" && sum.backup[1].guard.status === "warn" && sum.jars[0].learned.purge.available, "a soak, a warning, a journal that learned");
+    assert(sum.enrichment.soak.status === "soaking" && !sum.backup[1].guard && sum.jars[0].learned.purge.available, "a soak and a journal that learned, without a room forecast");
     const html = panel._culturesTab();
     assert(html.includes("Demo view — a staged rack") && html.includes("Exit demo"), "the banner and the exit button");
     assert(html.includes("ROTIFERS A") && html.includes("ROTIFERS B") && html.includes("PODS · TUB"), "the rig draws the staged rack");
-    assert(html.includes("tomorrow") && html.includes("enrichment estimate") && html.includes("Purge: runs bled"), "the guard, the boost and the learned purge show");
+    assert(!html.includes("tomorrow") && html.includes("enrichment estimate") && html.includes("Purge: runs bled"), "the boost and learned purge show without a room forecast");
     assert(html.includes("harvested · bled 50 ml"), "the journal carries the bleed");
     noPlaceholders(html, "cultures demo view");
     // Every tap is refused; nothing reaches the backend; nothing is saved.

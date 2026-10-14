@@ -12,6 +12,7 @@ Or with pytest:  pytest tests/
 
 from __future__ import annotations
 
+import copy
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -330,87 +331,19 @@ def _fc(hours, base=None, out_c=None, out_rh=None, unit_f=False):
     return items
 
 
-def test_parse_forecast_tolerates_missing_fields_and_fahrenheit():
-    items = _fc(3, out_c=20, out_rh=50, unit_f=True)
-    items.append({"datetime": (NOW + timedelta(hours=3)).isoformat(), "temperature": 68.0,
-                  "dew_point": 50.0})                              # dew, no humidity
-    items.append({"datetime": (NOW + timedelta(hours=4)).isoformat(), "temperature": 68.0})  # neither → dropped
-    items.append({"datetime": "junk", "temperature": 68.0, "humidity": 50})                 # bad time → dropped
-    items.append("nonsense")
-    hours = cooling.parse_forecast(items, "°F")
-    assert len(hours) == 4
-    assert hours[0]["outC"] == 20.0 and abs(hours[0]["outDewC"] - 9.3) < 0.1
-    assert abs(hours[3]["outDewC"] - 10.0) < 0.01 and 50 < hours[3]["outRh"] < 55
-    assert cooling.parse_forecast(None) == [] and cooling.parse_forecast({"x": 1}) == []
-    z = cooling.parse_forecast([{"datetime": "2026-07-14T14:00:00Z", "temperature": 20, "humidity": 50}])
-    assert z[0]["at"].tzinfo is not None
-
-
-def test_offsets_smooth_towards_the_live_difference_and_clamp():
-    first = cooling.smooth_offsets(None, 30.0, 24.0, 22.0, 15.0)     # +8 / +9 live
-    assert cooling.DEFAULT_OFFSET_T_C < first["offsetT"] < 8.0
-    later = first
-    for _ in range(30):
-        later = cooling.smooth_offsets(later, 30.0, 24.0, 22.0, 15.0)
-    assert abs(later["offsetT"] - 8.0) < 0.05 and abs(later["offsetDew"] - 9.0) < 0.05
-    same = cooling.smooth_offsets(later, None, None, 22.0, 15.0)   # indoor missing → unchanged
-    assert same == later
-    wild = cooling.smooth_offsets(None, 60.0, 40.0, 0.0, 0.0)
-    assert wild["offsetT"] <= cooling.OFFSET_T_RANGE[1] and wild["offsetDew"] <= cooling.OFFSET_DEW_RANGE[1]
-
-
-def test_projection_finds_the_humid_afternoon_and_classifies_the_day():
-    # A UK humid-heat day: outdoor climbs 18 → 27 °C by hour 6 at 65 % RH, drops overnight.
-    out_c = lambda i: 18 + 9 * max(0.0, 1 - abs(i - 6) / 6)
-    hours = cooling.parse_forecast(_fc(24, out_c=out_c, out_rh=55))
-    proj = cooling.project(hours, NOW, 24, 25.5, 25.5, {"offsetT": 3.0, "offsetDew": 5.0}, 1.0)
-    assert proj["dayKind"] == "humid-heat" and proj["affectedHours"] >= 1
-    assert proj["firstAffectedAt"] is not None and proj["worst"]["index"] < 0.4
-    assert proj["neededHours"] > proj["affectedHours"]
-    assert proj["purgeWindow"] and proj["purgeWindow"]["outC"] == 18.0
-    # Same shape but dry: 35 % RH → fans needed, never losing.
-    dry = cooling.project(cooling.parse_forecast(_fc(24, out_c=out_c, out_rh=35)), NOW, 24, 25.5, 25.5,
-                          {"offsetT": 3.0, "offsetDew": 3.0}, 1.0)
-    assert dry["dayKind"] == "dry-heat" and dry["affectedHours"] == 0
-    # A cool day: nothing needed.
-    quiet = cooling.project(cooling.parse_forecast(_fc(24, out_c=14, out_rh=90)), NOW, 24, 25.5, 25.5,
-                            {"offsetT": 3.0, "offsetDew": 3.0}, 1.0)
-    assert quiet["dayKind"] == "quiet" and quiet["worst"] is None
-    # A brutal day: 32 °C outdoors at 75 % → room far over target and dead → chiller.
-    hot = cooling.project(cooling.parse_forecast(_fc(24, out_c=32, out_rh=75)), NOW, 24, 25.5, 25.5,
-                          {"offsetT": 3.0, "offsetDew": 3.0}, 1.0)
-    assert hot["dayKind"] == "chiller"
-    # Window respected; nothing inside → None.
-    assert cooling.project(hours, NOW + timedelta(days=3), 24, 25.5, 25.5, {}, 1.0) is None
-    assert cooling.project([], NOW, 24, 25.5, 25.5, {}, 1.0) is None
-
-
-def test_plan_now_ahead_scheduled_none_and_unrescuable():
-    live_bad = cooling.evaluate(26, 28, 75)                       # weak, room not far over target
-    plan = cooling.dehumidifier_plan(live_bad, True, None, NOW, 3, 25.5)
-    assert plan["shouldRun"] and plan["kind"] == "now"
-    # Live bad but room far over target and index ≈ 0 → chiller day, don't start.
-    live_hopeless = cooling.evaluate(26, 31, 85)
-    plan = cooling.dehumidifier_plan(live_hopeless, True, None, NOW, 3, 25.5)
-    assert not plan["shouldRun"] and plan["kind"] == "unrescuable"
-    # Live fine, a hit at +5 h with a 3 h lead → scheduled now, ahead at +2 h, still on at +5 h, off after.
-    out_c = lambda i: 20 if i < 5 else 27
-    proj = cooling.project(cooling.parse_forecast(_fc(12, out_c=out_c, out_rh=70)), NOW, 24, 25.5, 25.5,
-                           {"offsetT": 3.0, "offsetDew": 5.0}, 1.0)
-    assert proj["firstAffectedAt"] == (NOW + timedelta(hours=5)).isoformat()
-    live_ok = cooling.evaluate(25.5, 23, 60)
-    sched = cooling.dehumidifier_plan(live_ok, False, proj, NOW, 3, 25.5)
-    assert not sched["shouldRun"] and sched["kind"] == "scheduled"
-    assert sched["startAt"] == (NOW + timedelta(hours=2)).isoformat()
-    ahead = cooling.dehumidifier_plan(live_ok, False, proj, NOW + timedelta(hours=2), 3, 25.5)
-    assert ahead["shouldRun"] and ahead["kind"] == "ahead" and "%" in ahead["reason"]
-    still = cooling.dehumidifier_plan(live_ok, False, proj, NOW + timedelta(hours=11, minutes=30), 3, 25.5)
-    assert still["shouldRun"]
-    done = cooling.dehumidifier_plan(live_ok, False, proj, NOW + timedelta(hours=13), 3, 25.5)
-    assert not done["shouldRun"] and done["kind"] == "none"
-    # A cool humid live reading is not "now" — the gate holds.
-    quiet = cooling.dehumidifier_plan(cooling.evaluate(26, 20, 95), False, None, NOW, 3, 25.5)
-    assert quiet["kind"] == "none"
+def test_plan_uses_live_readings_and_ignores_legacy_forecasts():
+    projection = {"firstAffectedAt": NOW.isoformat(), "lastAffectedAt": (NOW + timedelta(hours=24)).isoformat(),
+                  "worst": {"index": 0.0}, "hours": [{"roomC": 40.0}]}
+    for cached in (None, projection):
+        live_bad = cooling.evaluate(26, 28, 75)
+        plan = cooling.dehumidifier_plan(live_bad, True, cached, NOW, 3, 25.5)
+        assert plan["shouldRun"] and plan["kind"] == "now" and plan["until"] is None
+        live_hopeless = cooling.evaluate(26, 31, 85)
+        plan = cooling.dehumidifier_plan(live_hopeless, True, cached, NOW, 3, 25.5)
+        assert not plan["shouldRun"] and plan["kind"] == "unrescuable"
+        for live in (cooling.evaluate(25.5, 23, 60), cooling.evaluate(26, 20, 95), None):
+            quiet = cooling.dehumidifier_plan(live, False, cached, NOW, 12, 25.5)
+            assert quiet["kind"] == "none" and not quiet["shouldRun"]
 
 
 def test_plan_losing_is_reeces_2026_09_13_screenshot():
@@ -458,27 +391,14 @@ def test_plan_ceiling_is_a_house_rule_with_its_own_deadband():
     assert cooling.dehumidifier_plan(None, False, None, NOW, 3, 25.5, max_rh=70)["kind"] == "none"
 
 
-def test_plan_priority_now_losing_ahead_ceiling_scheduled():
+def test_plan_priority_is_current_fan_performance_tank_temperature_then_humidity():
     kw = {"losing_over_c": 0.3, "max_rh": 70, "water_known": True}
-    # now beats losing: weak band, tank over target.
-    weak = cooling.evaluate(26.0, 28, 75)
-    assert weak["band"] == "weak"
-    assert cooling.dehumidifier_plan(weak, True, None, NOW, 3, 25.5, **kw)["kind"] == "now"
-    # losing beats ahead: thin, over target, and a hit inside the lead window.
-    out_c = lambda i: 20 if i < 5 else 27
-    proj = cooling.project(cooling.parse_forecast(_fc(12, out_c=out_c, out_rh=70)), NOW, 24, 25.5, 25.5,
-                           {"offsetT": 3.0, "offsetDew": 5.0}, 1.0)
-    thin_over = cooling.evaluate(25.9, 26.1, 68)
-    assert thin_over["band"] == "thin"
-    inside = NOW + timedelta(hours=2)
-    assert cooling.dehumidifier_plan(thin_over, True, proj, inside, 3, 25.5, **kw)["kind"] == "losing"
-    # ahead beats ceiling.
-    wet_ok = cooling.evaluate(25.5, 23, 75)
-    assert cooling.dehumidifier_plan(wet_ok, False, proj, inside, 3, 25.5, **kw)["kind"] == "ahead"
-    # ceiling beats scheduled — the not-yet must not hide a breach that wants the plug on now.
-    sched = cooling.dehumidifier_plan(wet_ok, False, proj, NOW, 3, 25.5, **kw)
-    assert sched["shouldRun"] and sched["kind"] == "ceiling"
-    assert cooling.dehumidifier_plan(cooling.evaluate(25.5, 23, 60), False, proj, NOW, 3, 25.5, **kw)["kind"] == "scheduled"
+    projection = {"firstAffectedAt": NOW.isoformat(), "worst": {"index": 0}}
+    for cached in (None, projection):
+        assert cooling.dehumidifier_plan(cooling.evaluate(26, 28, 75), True, cached, NOW, 3, 25.5, **kw)["kind"] == "now"
+        assert cooling.dehumidifier_plan(cooling.evaluate(25.9, 26.1, 68), True, cached, NOW, 3, 25.5, **kw)["kind"] == "losing"
+        assert cooling.dehumidifier_plan(cooling.evaluate(25.5, 23, 75), False, cached, NOW, 3, 25.5, **kw)["kind"] == "ceiling"
+        assert cooling.dehumidifier_plan(cooling.evaluate(25.5, 23, 60), False, cached, NOW, 3, 25.5, **kw)["kind"] == "none"
 
 
 def test_normaliser_dehumidifier_losing_and_ceiling_fields():
@@ -591,33 +511,38 @@ def _plug_calls(hass, service):
     return [c for c in hass.services.calls if c.domain == "switch" and c.service == service]
 
 
-def test_tick_reads_the_forecast_once_per_ttl_and_projects():
+def test_tick_ignores_stored_forecasts_and_offsets_and_does_not_fetch_or_learn():
+    entry = _l2_entry(mode="auto", armed=True)
+    now = datetime.now(timezone.utc)
+    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
+    runtime = hass.data.setdefault(integration.DOMAIN, {}).setdefault(integration.COOLING_RUNTIME, {})
+    runtime.update({"forecast": {"hours": [{"at": now, "outC": 40, "outDewC": 35}]},
+                    "learning": {"byHour": {str(now.hour): {"n": 84, "t": 12, "dew": 12}}},
+                    "offsets": {"offsetT": 12, "offsetDew": 12}})
+    before = copy.deepcopy(runtime["learning"])
+    for minutes in (0, 5, 180):
+        run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=minutes)))
+        snap = runtime["snapshot"]
+        assert snap["projection"] is None and snap["plan"]["kind"] == "none"
+        assert "offsets" not in snap and "learned" not in snap
+        assert snap["weather"]["outC"] == 20.0 and snap["vent"]["known"]
+    assert runtime["learning"] == before
+    assert not [c for c in hass.services.calls if c.service == "get_forecasts"]
+    assert not _notes(hass) and not _plug_calls(hass, "turn_on")
+
+
+def test_tick_advise_notifies_for_current_need_only():
     entry = _l2_entry()
     now = datetime.now(timezone.utc)
     hass = _l2_hass(entry, forecast=_humid_afternoon(now))
     run(integration._async_cooling_tick(hass, entry, now))
+    assert not _notes(hass)
+    hass.states.set("sensor.room", _fresh(28))
+    hass.states.set("sensor.hum", _fresh(75, "%"))
     run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5)))
-    fetches = [c for c in hass.services.calls if c.service == "get_forecasts"]
-    assert len(fetches) == 1 and fetches[0].kwargs.get("return_response") is True
-    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
-    assert snap["projection"]["dayKind"] == "humid-heat"
-    assert snap["plan"]["kind"] == "scheduled" and snap["weather"]["outC"] == 20.0
-    assert snap["vent"]["known"] and snap["offsets"]["offsetT"] > 0
-    assert not _plug_calls(hass, "turn_on")                    # advise never switches
-
-
-def test_tick_advise_notifies_once_when_the_lead_window_opens():
-    entry = _l2_entry()
-    now = datetime.now(timezone.utc)
-    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
-    run(integration._async_cooling_tick(hass, entry, now))
-    assert not _notes(hass)                                    # scheduled: logged, not pushed
-    assert any("start by" in a["message"] for a in _activity(entry, "Dehumidifier"))
-    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=2, minutes=1)))
-    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=2, minutes=6)))
-    plan_notes = [n for n in _notes(hass) if "plan_ahead" in str(n.data.get("notification_id"))]
-    assert len(plan_notes) == 1
-    assert "Start the dehumidifier" in plan_notes[0].data.get("title", "")
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=10)))
+    notes = [n for n in _notes(hass) if "plan_now" in str(n.data.get("notification_id"))]
+    assert len(notes) == 1 and "Start the dehumidifier" in notes[0].data["title"]
     assert not _plug_calls(hass, "turn_on")
 
 
@@ -631,32 +556,38 @@ def test_tick_without_a_weather_entity_stays_layer_one():
     assert not [c for c in hass.services.calls if c.service == "get_forecasts"]
 
 
-def test_tick_broken_forecast_is_an_issue_not_a_crash():
+def test_cached_advance_plans_cannot_drive_actuators():
+    for kind in ("ahead", "scheduled"):
+        assert integration._cooling_desired({"plan": {"shouldRun": True, "kind": kind}}, "dehumidifier")[0] is False
+    for kind in ("purge", "predry"):
+        assert integration._cooling_desired({"ventDecision": {"shouldRun": True, "kind": kind}}, "vent")[0] is False
+    assert integration._cooling_desired({"plan": {"shouldRun": True, "kind": "now"}}, "dehumidifier")[0] is True
+    assert integration._cooling_desired({"ventDecision": {"shouldRun": True, "kind": "cool"}}, "vent")[0] is True
+
+
+def test_tick_uses_current_weather_without_requesting_forecasts():
     entry = _l2_entry()
     hass = _l2_hass(entry)
-    hass.services.responses[("weather", "get_forecasts")] = {"weather.home": {"forecast": "nope"}}
-    run(integration._async_cooling_tick(hass, entry, datetime.now(timezone.utc)))
-    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
-    assert "forecast" in snap["issues"] and snap["projection"] is None
-    hass.states.set("weather.home", FakeState("unavailable"))
     hass.services.fail_on.add(("weather", "get_forecasts"))
-    hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["forecast"].clear()
     run(integration._async_cooling_tick(hass, entry, datetime.now(timezone.utc)))
     snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
-    assert "weather" in snap["issues"] and "forecast" in snap["issues"]
+    assert snap["weather"]["available"] and "forecast" not in snap["issues"]
+    hass.states.set("weather.home", FakeState("unavailable"))
+    run(integration._async_cooling_tick(hass, entry, datetime.now(timezone.utc)))
+    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+    assert "weather" in snap["issues"] and "forecast" not in snap["issues"]
+    assert not [c for c in hass.services.calls if c.service == "get_forecasts"]
 
 
 def test_auto_disarmed_never_switches_and_armed_drives_the_plan():
     now = datetime.now(timezone.utc)
     entry = _l2_entry(mode="auto", armed=False)
-    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
+    hass = _l2_hass(entry, room=28, rh=75)
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))
     assert not _plug_calls(hass, "turn_on")
     entry = _l2_entry(mode="auto", armed=True)
-    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
-    run(integration._async_cooling_tick(hass, entry, now))                          # scheduled → off
-    assert not _plug_calls(hass, "turn_on")
-    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))     # ahead → on
+    hass = _l2_hass(entry, room=28, rh=75)
+    run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))     # live demand → on
     assert len(_plug_calls(hass, "turn_on")) == 1 and hass.states.get("switch.dehum").state == "on"
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3, minutes=5)))
     assert len(_plug_calls(hass, "turn_on")) == 1                                   # reconciled, no spam
@@ -667,20 +598,20 @@ def test_auto_disarmed_never_switches_and_armed_drives_the_plan():
 def test_auto_short_cycle_guard_and_max_run():
     now = datetime.now(timezone.utc)
     entry = _l2_entry(mode="auto", armed=True)
-    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
+    hass = _l2_hass(entry, room=28, rh=75)
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))     # on
     runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
-    # Plan flips to none (the forecast comes back empty) a minute later → min-on holds it.
-    hass.services.responses[("weather", "get_forecasts")] = {"weather.home": {"forecast": []}}
-    runtime["forecast"].clear()
+    # Current readings recover a minute later → min-on holds it.
+    hass.states.set("sensor.room", _fresh(23))
+    hass.states.set("sensor.hum", _fresh(60, "%"))
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3, minutes=1)))
     assert not _plug_calls(hass, "turn_off")
     runtime["dehum"]["lastOn"] = (now - timedelta(hours=1)).isoformat()
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3, minutes=2)))
     assert len(_plug_calls(hass, "turn_off")) == 1
     # Max run: asserted on for longer than the cap → off + a bucket nudge.
-    runtime["forecast"] = {"entity": "weather.home", "at": now.timestamp() + 99999,
-                           "hours": cooling.parse_forecast(_fc(12, base=now, out_c=27, out_rh=70)), "error": ""}
+    hass.states.set("sensor.room", _fresh(28))
+    hass.states.set("sensor.hum", _fresh(75, "%"))
     runtime["dehum"] = {"asserted": "on", "lastOn": (now - timedelta(hours=9)).isoformat()}
     hass.states.set("switch.dehum", "on")
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=1)))
@@ -691,16 +622,16 @@ def test_auto_short_cycle_guard_and_max_run():
 def test_auto_hold_respects_a_hand_on_the_plug_and_leaving_auto_fails_off():
     now = datetime.now(timezone.utc)
     entry = _l2_entry(mode="auto", armed=True)
-    hass = _l2_hass(entry, forecast=_humid_afternoon(now))
+    hass = _l2_hass(entry, room=28, rh=75)
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))     # on
     hass.states.set("switch.dehum", "off")                                         # a human
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3, minutes=5)))
     assert len(_plug_calls(hass, "turn_on")) == 1                                   # held
     runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
     assert runtime["dehum"]["override"]["state"] == "off"
-    # Plan flips to none (empty forecast) → the hold releases.
-    hass.services.responses[("weather", "get_forecasts")] = {"weather.home": {"forecast": []}}
-    runtime["forecast"].clear()
+    # Current readings recover → the hold releases.
+    hass.states.set("sensor.room", _fresh(23))
+    hass.states.set("sensor.hum", _fresh(60, "%"))
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=4)))
     assert "override" not in runtime["dehum"]
     # Leaving auto while we hold it on switches it off once.
@@ -781,11 +712,11 @@ def test_vent_decision_kinds():
                 "dayKind": "humid-heat", "purgeWindow": None}
     assert cooling.vent_decision(_advice(), True, None, NOW, True, None)["kind"] == "cool"
     predry = cooling.vent_decision(_advice(), False, proj_hit, NOW, True, None)
-    assert predry["kind"] == "predry" and predry["shouldRun"] and "20 %" in predry["reason"]
+    assert predry["kind"] == "none" and not predry["shouldRun"]
     purge_proj = {"firstAffectedAt": None, "worst": None, "dayKind": "dry-heat",
                   "purgeWindow": {"from": (NOW - timedelta(hours=1)).isoformat(), "to": (NOW + timedelta(hours=2)).isoformat(), "outC": 12}}
     purge = cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None)
-    assert purge["kind"] == "purge" and purge["shouldRun"]
+    assert purge["kind"] == "none" and not purge["shouldRun"]
     assert cooling.vent_decision(_advice(), False, purge_proj, NOW, False, None)["kind"] == "none"    # purge off
     assert cooling.vent_decision(_advice(), False, dict(purge_proj, dayKind="quiet"), NOW, True, None)["kind"] == "none"
     assert cooling.vent_decision(_advice(), False, purge_proj, NOW + timedelta(hours=6), True, None)["kind"] == "none"  # outside the window
@@ -958,21 +889,21 @@ def test_freecool_priority_and_the_purge_floor():
     # predry still needs the drying route — pre-drying with dew-neutral air is
     # not a thing, so freecool alone must not reach it.
     assert cooling.vent_decision(_advice(advised=False), False, proj_hit, NOW, True, None)["kind"] == "none"
-    assert cooling.vent_decision(_advice(), False, proj_hit, NOW, True, None)["kind"] == "predry"
+    assert cooling.vent_decision(_advice(), False, proj_hit, NOW, True, None)["kind"] == "none"
     # The purge now rides the freecool gates, not the dew gap.
     purge_proj = {"firstAffectedAt": None, "worst": None, "dayKind": "dry-heat",
                   "purgeWindow": {"from": (NOW - timedelta(hours=1)).isoformat(),
                                   "to": (NOW + timedelta(hours=2)).isoformat(), "outC": 12}}
-    assert cooling.vent_decision(_advice(advised=False), False, purge_proj, NOW, True, None)["kind"] == "purge"
+    assert cooling.vent_decision(_advice(advised=False), False, purge_proj, NOW, True, None)["kind"] == "none"
     assert cooling.vent_decision(_advice(freecool=False), False, purge_proj, NOW, True, None)["kind"] == "none"
     # …and stops on the TANK, not the room: a reef room sits well under the
     # tank's target every night, which is exactly when a purge is worth running.
     warm = cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, 25.5, 25.5, 2.0)
-    assert warm["kind"] == "purge"                                   # tank on target, room irrelevant
+    assert warm["kind"] == "none"                                   # tank on target, room irrelevant
     cold = cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, 23.4, 25.5, 2.0)
     assert cold["kind"] == "none"                                    # tank 2.1 under target — stop
     # No probe (water falls back to the target) must never block a purge.
-    assert cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, None, 25.5, 2.0)["kind"] == "purge"
+    assert cooling.vent_decision(_advice(), False, purge_proj, NOW, True, None, None, 25.5, 2.0)["kind"] == "none"
 
 
 def test_normaliser_vent_block():
@@ -985,30 +916,30 @@ def test_normaliser_vent_block():
     assert normalise(None)["coolingHeadroom"]["vent"]["mode"] == "advise"
 
 
-def test_tick_vent_auto_pre_dries_and_takes_the_dehumidifier_plan_away():
+def test_tick_vent_auto_cools_now_and_takes_the_dehumidifier_plan_away():
     now = datetime.now(timezone.utc)
     entry = _l3_entry()
-    hass = _l3_hass(entry, forecast=_humid_afternoon(now))
+    hass = _l3_hass(entry, room=28, rh=75)
     run(integration._async_cooling_tick(hass, entry, now))
     snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
-    assert snap["vent"]["advised"] and snap["ventDecision"]["kind"] == "predry"
+    assert snap["vent"]["advised"] and snap["ventDecision"]["kind"] == "cool"
     assert len(_calls(hass, "turn_on", "switch.vent")) == 1 and hass.states.get("switch.vent").state == "on"
-    assert snap["ventActive"] is True and snap["plan"]["kind"] == "scheduled"   # not yet wanted → not "vented" yet
-    # The dehumidifier's lead window opens, but the room is being vented: it stays off.
+    assert snap["ventActive"] is True and snap["plan"]["kind"] == "vented"
+    # Continued current demand: ventilation keeps the dehumidifier off.
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))
     snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
     assert snap["plan"]["kind"] == "vented"
     assert not _calls(hass, "turn_on", "switch.dehum")
     assert len(_calls(hass, "turn_on", "switch.vent")) == 1                       # reconciled, no spam
     msgs = [a["message"] for a in entry.options[CONF_SETTINGS]["activity"]]
-    assert any(m.startswith("Vent: pre-drying") for m in msgs)
+    assert any(m.startswith("Vent: the room needs cooling") for m in msgs)
     assert any("Intake fan switched on" in m for m in msgs)
 
 
 def test_tick_vent_window_closed_blocks_the_fan_and_leaves_the_dehumidifier_alone():
     now = datetime.now(timezone.utc)
     entry = _l3_entry(window="binary_sensor.window")
-    hass = _l3_hass(entry, window="off", forecast=_humid_afternoon(now))
+    hass = _l3_hass(entry, room=28, rh=75, window="off")
     run(integration._async_cooling_tick(hass, entry, now))
     run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5)))
     snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
@@ -1030,22 +961,22 @@ def test_tick_vent_window_closed_blocks_the_fan_and_leaves_the_dehumidifier_alon
 def test_tick_open_window_in_advise_mode_counts_as_vented():
     now = datetime.now(timezone.utc)
     entry = _l3_entry(vent_mode="advise", armed=False, window="binary_sensor.window")
-    hass = _l3_hass(entry, window="on", forecast=_humid_afternoon(now))
+    hass = _l3_hass(entry, room=28, rh=75, window="on")
     run(integration._async_cooling_tick(hass, entry, now + timedelta(hours=3)))
     snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
     assert snap["ventActive"] is True and snap["plan"]["kind"] == "vented"
     assert not _calls(hass, "turn_on", "switch.dehum") and not _calls(hass, "turn_on", "switch.vent")
-    vent_notes = [n for n in _notes(hass) if "vent_predry" in str(n.data.get("notification_id"))]
+    vent_notes = [n for n in _notes(hass) if "vent_cool" in str(n.data.get("notification_id"))]
     assert len(vent_notes) == 1 and "Vent the room" in vent_notes[0].data.get("title", "")
 
 
 def test_tick_vent_closes_up_when_outdoor_air_turns_wet():
     now = datetime.now(timezone.utc)
     entry = _l3_entry()
-    hass = _l3_hass(entry, forecast=_humid_afternoon(now))
+    hass = _l3_hass(entry, room=28, rh=75)
     run(integration._async_cooling_tick(hass, entry, now))
     assert hass.states.get("switch.vent").state == "on"
-    hass.states.set("weather.home", _weather_state(20.0, 95.0))                   # muggy: dew 19.2 > indoors
+    hass.states.set("weather.home", _weather_state(28.0, 95.0))                   # muggy: dew 19.2 > indoors
     runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
     runtime["vent"]["lastOn"] = (now - timedelta(hours=1)).isoformat()
     run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=30)))
@@ -1055,28 +986,22 @@ def test_tick_vent_closes_up_when_outdoor_air_turns_wet():
     assert any("Vent: close up" in a["message"] for a in entry.options[CONF_SETTINGS]["activity"])
 
 
-def test_tick_night_purge_runs_through_the_coolest_hours_before_a_hot_dry_day():
+def test_tick_does_not_run_night_purge_even_with_legacy_setting_enabled():
     now = datetime.now(timezone.utc)
-    # Cool dry night now (12 °C / 70 %, dew 6.7) in a 22 °C / 55 % room (dew 12.6): advised, not needed.
-    # Tomorrow: 26 °C at 35 % from +6 h — dry-heat, nothing to pre-dry for.
-    forecast = _fc(14, base=now, out_c=lambda i: 12 if i < 6 else 26, out_rh=lambda i: 70 if i < 6 else 35)
-    entry = _l3_entry()
-    hass = _l3_hass(entry, room=22.0, rh=55.0, out=(12.0, 70.0), forecast=forecast)
-    run(integration._async_cooling_tick(hass, entry, now))
-    snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
-    assert snap["projection"]["dayKind"] == "dry-heat"
-    assert snap["ventDecision"]["kind"] == "purge" and hass.states.get("switch.vent").state == "on"
-    entry2 = _l3_entry(night_purge=False)
-    hass2 = _l3_hass(entry2, room=22.0, rh=55.0, out=(12.0, 70.0), forecast=forecast)
-    run(integration._async_cooling_tick(hass2, entry2, now))
-    assert hass2.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]["ventDecision"]["kind"] == "none"
-    assert not _calls(hass2, "turn_on", "switch.vent")
+    forecast = _fc(14, base=now, out_c=lambda i: 12 if i < 6 else 32, out_rh=70)
+    for enabled in (False, True):
+        entry = _l3_entry(night_purge=enabled)
+        hass = _l3_hass(entry, room=22, rh=55, out=(12, 70), forecast=forecast)
+        run(integration._async_cooling_tick(hass, entry, now))
+        snap = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]
+        assert snap["projection"] is None and snap["ventDecision"]["kind"] == "none"
+        assert not _calls(hass, "turn_on", "switch.vent")
 
 
 def test_leaving_vent_auto_fails_off_and_ws_vent_actions():
     now = datetime.now(timezone.utc)
     entry = _l3_entry()
-    hass = _l3_hass(entry, forecast=_humid_afternoon(now))
+    hass = _l3_hass(entry, room=28, rh=75)
     run(integration._async_cooling_tick(hass, entry, now))
     assert hass.states.get("switch.vent").state == "on"
     entry.options[CONF_SETTINGS]["coolingHeadroom"]["vent"]["mode"] = "advise"
@@ -1091,7 +1016,7 @@ def test_leaving_vent_auto_fails_off_and_ws_vent_actions():
     assert hass.states.get("switch.vent").state == "off"
     integration.websocket_cooling_status(hass, conn, {"id": 3, "type": "openreef/cooling_status"})
     payload = conn.results[-1].payload
-    assert payload["ventFan"]["asserted"] == "off" and payload["ventDecision"]["kind"] == "predry"
+    assert payload["ventFan"]["asserted"] == "off" and payload["ventDecision"]["kind"] == "cool"
     unbound = _l3_entry(fan="")
     run(integration.websocket_cooling_vent(_l3_hass(unbound), conn, {"id": 4, "type": "x", "action": "run"}))
     assert conn.error_codes[-1] == "not_bound"
@@ -1099,122 +1024,8 @@ def test_leaving_vent_auto_fails_off_and_ws_vent_actions():
 
 
 # --------------------------------------------------------------------------- #
-# Learned per-hour offsets
+# Startup lifecycle
 # --------------------------------------------------------------------------- #
-
-import shutil  # noqa: E402
-import tempfile  # noqa: E402
-
-
-def test_learn_slot_running_mean_then_capped_ema():
-    table = None
-    for _ in range(4):
-        table = cooling.learn_slot(table, 14, 4.0, 5.0)
-    assert table["14"] == {"n": 4, "t": 4.0, "dew": 5.0}
-    table = cooling.learn_slot(table, 14, 8.0, 9.0)          # running mean: (4*4+8)/5
-    assert abs(table["14"]["t"] - 4.8) < 0.01 and table["14"]["n"] == 5
-    for _ in range(300):
-        table = cooling.learn_slot(table, 14, 1.0, 1.0)
-    assert table["14"]["n"] == cooling.LEARN_MAX_SAMPLES        # capped
-    assert abs(table["14"]["t"] - 1.0) < 0.1                    # and it forgot the old days
-    wild = cooling.learn_slot(None, 3, 99.0, -99.0)
-    assert wild["3"]["t"] == cooling.OFFSET_T_RANGE[1] and wild["3"]["dew"] == cooling.OFFSET_DEW_RANGE[0]
-    junk = cooling.learn_slot({"7": {"n": "x", "t": None}}, 7, 2.0, 3.0)
-    assert junk["7"] == {"n": 1, "t": 2.0, "dew": 3.0}
-    assert cooling.learn_slot(None, 27, 1.0, 1.0).get("3")     # hour wraps
-
-
-def test_offsets_for_hour_trusts_a_slot_only_with_enough_samples():
-    fb = {"offsetT": 2.0, "offsetDew": 3.0}
-    table = {"9": {"n": cooling.LEARN_MIN_SAMPLES - 1, "t": 7.0, "dew": 8.0},
-             "10": {"n": cooling.LEARN_MIN_SAMPLES, "t": 7.0, "dew": 8.0}}
-    assert cooling.offsets_for_hour(table, 9, fb) == (2.0, 3.0, False)
-    assert cooling.offsets_for_hour(table, 10, fb) == (7.0, 8.0, True)
-    assert cooling.offsets_for_hour(None, 10, fb) == (2.0, 3.0, False)
-    summary = cooling.learning_summary(table)
-    assert summary["hoursLearned"] == 1 and len(summary["byHour"]) == 24
-    assert summary["byHour"][10]["learned"] and not summary["byHour"][9]["learned"]
-
-
-def test_projection_uses_the_learned_slot_for_its_hour_and_falls_back_elsewhere():
-    hours = cooling.parse_forecast(_fc(4, out_c=20, out_rh=60))   # NOW is 14:00 UTC
-    table = {"15": {"n": 50, "t": 9.0, "dew": 9.0}}               # 15:00 learned hot & wet
-    proj = cooling.project(hours, NOW, 24, 25.5, 25.5, {"offsetT": 2.0, "offsetDew": 3.0}, 1.0,
-                           offsets_by_hour=table)
-    by_hour = {cooling._parse_when(r["at"]).hour: r for r in proj["hours"]}
-    assert by_hour[15]["learned"] and by_hour[15]["roomC"] == 29.0
-    assert not by_hour[14]["learned"] and by_hour[14]["roomC"] == 22.0
-    assert proj["learnedHours"] == 1
-
-
-def test_tick_learns_the_hour_persists_and_reloads():
-    tmp = tempfile.mkdtemp(prefix="openreef_cooling_")
-    try:
-        now = datetime.now(timezone.utc)
-        entry = _l2_entry()
-        hass = _l2_hass(entry, room=23.0, rh=60.0, out=(20.0, 60.0), forecast=_humid_afternoon(now))
-        hass.config._dir = tmp
-        for i in range(cooling.LEARN_MIN_SAMPLES):
-            run(integration._async_cooling_tick(hass, entry, now + timedelta(minutes=5 * i)))
-        runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
-        slot = runtime["learning"]["byHour"][str(now.hour)]
-        assert slot["n"] >= 1 and abs(slot["t"] - 3.0) < 0.01          # 23 − 20
-        assert abs(slot["dew"] - (cooling.dew_point_c(23, 60) - cooling.dew_point_c(20, 60))) < 0.05
-        assert runtime["snapshot"]["learned"]["hoursLearned"] >= 0
-        # Saved at most every 30 min: force via the unload-style flush, then reload fresh.
-        assert runtime["learning"]["dirty"] is True
-        run(integration._async_cooling_learning_save(hass, runtime, force=True))
-        path = integration._cooling_learning_path(hass)
-        assert path.exists() and runtime["learning"]["dirty"] is False
-        fresh = {}
-        run(integration._async_cooling_learning_load(hass, fresh))
-        assert fresh["learning"]["byHour"][str(now.hour)]["n"] == slot["n"]
-        # Corrupt file → empty ledger, no crash.
-        path.write_text("{not json", encoding="utf-8")
-        fresh = {}
-        run(integration._async_cooling_learning_load(hass, fresh))
-        assert fresh["learning"]["byHour"] == {}
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def test_learning_needs_both_sides_and_reset_ws_forgets():
-    tmp = tempfile.mkdtemp(prefix="openreef_cooling_")
-    try:
-        now = datetime.now(timezone.utc)
-        entry = _entry()                                             # no weather entity
-        hass = _hass(entry, room=23.0, rh=60.0)
-        hass.config._dir = tmp
-        run(integration._async_cooling_tick(hass, entry, now))
-        runtime = hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]
-        assert runtime["learning"]["byHour"] == {} and runtime["learning"]["dirty"] is False
-        runtime["learning"]["byHour"] = {"3": {"n": 40, "t": 5.0, "dew": 5.0}}
-        conn = FakeConnection()
-        run(integration.websocket_cooling_learning(hass, conn, {"id": 1, "type": "x", "action": "reset"}))
-        assert conn.results[-1].payload["success"] and runtime["learning"]["byHour"] == {}
-        assert integration._cooling_learning_path(hass).exists()
-        assert any("forgotten" in a["message"] for a in entry.options[CONF_SETTINGS]["activity"])
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-
-def test_purge_window_is_contiguous_around_the_coolest_hour_and_capped():
-    # A flat night (19–21 °C for 25 h): every hour is within the band — the
-    # window must still be one run of at most PURGE_MAX_HOURS around the minimum.
-    flat = cooling.parse_forecast(_fc(25, out_c=lambda i: 19 if i == 9 else 20 + (i % 2), out_rh=80))
-    proj = cooling.project(flat, NOW, 24, 25.5, 25.5, {"offsetT": 2.6, "offsetDew": 1.6}, 1.0)
-    window = proj["purgeWindow"]
-    start = cooling._parse_when(window["from"])
-    end = cooling._parse_when(window["to"])
-    hours = int((end - start).total_seconds() // 3600) + 1
-    assert hours == cooling.PURGE_MAX_HOURS and window["outC"] == 19.0
-    assert start <= NOW + timedelta(hours=9) <= end
-    # A real dip: 12 °C for six hours then 26 °C — the window is exactly those six.
-    dip = cooling.parse_forecast(_fc(14, out_c=lambda i: 12 if i < 6 else 26, out_rh=70))
-    proj = cooling.project(dip, NOW, 24, 25.5, 25.5, {"offsetT": 3.0, "offsetDew": 3.0}, 1.0)
-    window = proj["purgeWindow"]
-    assert window["from"] == NOW.isoformat() and window["to"] == (NOW + timedelta(hours=5)).isoformat()
 
 
 
@@ -1230,13 +1041,14 @@ def test_schedule_defers_the_first_read_until_ha_has_started():
     started = [l for l in hass.bus.listeners if l.event_type == integration.EVENT_HOMEASSISTANT_STARTED]
     assert len(started) == 1
     run(started[0].callback(None))                                                # HA fires "started"
-    assert len([c for c in hass.services.calls if c.service == "get_forecasts"]) == 1
-    assert hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]["projection"] is not None
+    assert not [c for c in hass.services.calls if c.service == "get_forecasts"]
+    assert hass.data[integration.DOMAIN][integration.COOLING_RUNTIME]["snapshot"]["projection"] is None
     # Already running: the first read happens inline.
     entry2 = _l2_entry()
     hass2 = _l2_hass(entry2, forecast=_humid_afternoon(now))
     run(integration._async_schedule_cooling_tick(hass2, entry2))
-    assert len([c for c in hass2.services.calls if c.service == "get_forecasts"]) == 1
+    assert not [c for c in hass2.services.calls if c.service == "get_forecasts"]
+    assert "snapshot" in hass2.data[integration.DOMAIN][integration.COOLING_RUNTIME]
 
 
 # Keep this LAST: a test defined below the runner is a test that never runs.

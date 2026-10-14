@@ -197,12 +197,6 @@ def test_starter_plan_needs_a_measurement_and_preserves_mass_balance():
     assert 'sieve' in cultures.acclimation_plan(27, 27)['line']
 
 
-def test_heat_guard_finds_first_crossing_even_when_forecast_is_unsorted():
-    rows = [{'at': _iso(NOW + timedelta(hours=h)), 'roomC': temp} for h, temp in ((8, 32), (4, 28), (1, math.nan), (2, 25))]
-    result = cultures.heat_guard(rows, 'tigriopus', NOW)
-    assert result['hoursUntil'] == 4 and result['peakC'] == 32
-
-
 def test_maintenance_uses_first_harvest_and_fractional_culture_clocks():
     jar = _jar('tigriopus', 2, now=NOW)
     cfg = _config(_entry(jars={'c1': jar}, maintenance={'enabled': True, 'tasks': {'culture_c1_harvest': {'enabled': True, 'cadenceDays': 1}}}))

@@ -116,16 +116,12 @@ ENRICH_DROP_ML = 0.05
 BOOST_WARM_H = 8.0
 BOOST_COLD_H = 24.0
 BOTTLE_EVENTS: tuple[str, ...] = ("filled", "fed_tank", "enriched", "emptied")
-GUARD_LOOKAHEAD_H = 24.0       # the heatwave guard looks one day ahead (doc §8.8 #2)
 TINT_STRIP_DAYS = 14
 RIG_CONES_MAX = 4
 # 0.7.140 (doc §8.12): the purge is a journal fact, so the run-length learning
-# can compare observed run lengths at different purge volumes; the guard
-# takes the rack's own offset over the room; the starter's acclimation is
-# arithmetic, not a shrug.
+# can compare observed run lengths at different purge volumes; the
+# starter's acclimation is arithmetic, not a shrug.
 PURGE_RUNS_MIN = 2             # runs at EACH purge volume before the note speaks
-RACK_OFFSET_MAX_C = 5.0        # chosen projection correction cap, not a physical limit
-RACK_OFFSET_WINDOW_H = 1.5     # the projection row that counts as "now"
 STARTER_PPT = 27.0             # culture target only; NEVER a measured shipping salinity
 ACCLIMATE_STEP_PPT = 5.0       # FAO flags transfers differing by more than 5 ppt
 ACCLIMATE_WAIT_MIN = 15       # handling guideline, not a validated acclimation time
@@ -2168,88 +2164,8 @@ def next_harvest(bottle_state: dict[str, Any], ml_per_day: Any, harvest_clock: A
 
 
 # --------------------------------------------------------------------------- #
-# V2 Stage D — never zero, and the guard (doc §8.8)
+# V2 Stage D — culture continuity (doc §8.8)
 # --------------------------------------------------------------------------- #
-def rack_offset_c(projection_hours: Any, temp_c: Any, now: datetime,
-                  window_h: float = RACK_OFFSET_WINDOW_H) -> float | None:
-    """How far the rack's own sensor reads over (or under) the room the
-    projection describes, from the projection row nearest to now. None
-    without a sensor reading or a row inside the window; clamped to
-    ±RACK_OFFSET_MAX_C so a mis-linked sensor cannot invent a heatwave."""
-    if not isinstance(temp_c, (int, float)) or isinstance(temp_c, bool) or not math.isfinite(temp_c):
-        return None
-    nearest: tuple[float, float] | None = None
-    for row in (projection_hours if isinstance(projection_hours, list) else []):
-        if not isinstance(row, dict):
-            continue
-        at = _parse_iso(row.get("at"))
-        room = row.get("roomC")
-        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool) or not math.isfinite(room):
-            continue
-        gap = abs((at - now).total_seconds()) / 3600.0
-        if gap <= window_h and (nearest is None or gap < nearest[0]):
-            nearest = (gap, float(room))
-    if nearest is None:
-        return None
-    offset = max(-RACK_OFFSET_MAX_C, min(RACK_OFFSET_MAX_C, float(temp_c) - nearest[1]))
-    return round(offset, 1)
-
-
-def heat_guard(projection_hours: Any, species_id: Any, now: datetime,
-               lookahead_h: float = GUARD_LOOKAHEAD_H, offset_c: Any = 0.0) -> dict[str, Any]:
-    """The heatwave guard: the cooling headroom's indoor projection (room °C
-    per forecast hour, learned offsets included) against the species band.
-    ``warn`` when the room is projected past the warning line inside the
-    window (with WHEN), ``watch`` past the productive band, ``clear``
-    otherwise; ``available`` False with no projection — never a guess.
-    ``offset_c`` is the rack's measured lead over the room (rack_offset_c):
-    the forecast is shifted by it, and the line says so."""
-    species = species_preset(species_id)
-    offset = _f(offset_c)
-    if not (-RACK_OFFSET_MAX_C <= offset <= RACK_OFFSET_MAX_C):
-        offset = 0.0
-    rows = []
-    for row in (projection_hours if isinstance(projection_hours, list) else []):
-        if not isinstance(row, dict):
-            continue
-        at = _parse_iso(row.get("at"))
-        room = row.get("roomC")
-        if at is None or not isinstance(room, (int, float)) or isinstance(room, bool) or not math.isfinite(room):
-            continue
-        hours = (at - now).total_seconds() / 3600.0
-        if -1.0 <= hours <= lookahead_h:
-            rows.append((at, float(room) + offset, hours))
-    base = {"offsetC": round(offset, 1) if abs(offset) >= 0.5 else 0.0}
-    if not rows:
-        return {**base, "available": False, "status": "unknown", "peakC": None, "peakAt": None,
-                "crossAt": None, "hoursUntil": None, "line": ""}
-    rows.sort(key=lambda row: row[0])
-    peak_at, peak_c, _h = max(rows, key=lambda r: r[1])
-    hard = _f(species["tempHardMaxC"])
-    band = _f(species["tempMaxC"])
-    where = "the rack" if base["offsetC"] else "room"
-    rack_note = f", rack {offset:+.1f} °C over the room" if base["offsetC"] else ""
-    cross = next((r for r in rows if r[1] >= hard), None)
-    # The alga's copy (doc §5.6): it declines abruptly near 30 — shade, move,
-    # cool; an animal's jar wants air and a water change ready.
-    advice = ("shade it, move it off the sunlit shelf, a cooler room — the alga declines abruptly near 30 °C"
-              if species.get("kind") == "phyto" else "extra air, shade, feed lightly, a 50 % change ready")
-    if cross is not None:
-        at, room, hours = cross
-        return {**base, "available": True, "status": "warn", "peakC": round(peak_c, 1),
-                "peakAt": peak_at.isoformat(), "crossAt": at.isoformat(),
-                "hoursUntil": round(max(0.0, hours), 1),
-                "line": (f"{where} passes {hard:g} °C in ~{max(0.0, hours):.0f} h (peak {peak_c:.1f} °C{rack_note}) — "
-                         f"{advice}")}
-    if peak_c > band:
-        return {**base, "available": True, "status": "watch", "peakC": round(peak_c, 1),
-                "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
-                "line": f"{where} peaks at {peak_c:.1f} °C{rack_note} — above the {band:g} °C band, keep an eye on it"}
-    return {**base, "available": True, "status": "clear", "peakC": round(peak_c, 1),
-            "peakAt": peak_at.isoformat(), "crossAt": None, "hoursUntil": None,
-            "line": f"{where} peaks at {peak_c:.1f} °C{rack_note} — inside the band"}
-
-
 def stagger_advice(jar_a: dict[str, Any], jar_b: dict[str, Any], now: datetime) -> dict[str, Any]:
     """Two jars are only a backup when they never restart together: the ideal
     gap is half the restart interval; more than two days off it earns a line."""

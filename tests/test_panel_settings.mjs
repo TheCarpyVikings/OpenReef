@@ -67,10 +67,10 @@ test("the prose-heavy sections use how-it-works for their intros", async () => {
   panel._cooling = { status: null, at: 0, loading: false, error: "" };
   panel._render = () => {};
   const cooling = panel._coolingSettings();
-  assert(cooling.includes('data-section="how-cooling-forecast"') && cooling.includes('data-section="how-cooling-vent"'), "cooling intros collapse");
-  assert(!cooling.includes("Bind a weather entity and OpenReef projects"), "the 114-word forecast paragraph is hidden until asked for");
-  panel._healthSections["how-cooling-forecast"] = true;
-  assert(panel._coolingSettings().includes("Bind a weather entity and OpenReef projects"), "…and shows when opened");
+  assert(cooling.includes('data-section="how-cooling-dehumidifier"') && cooling.includes('data-section="how-cooling-vent"'), "cooling intros collapse");
+  assert(!cooling.includes("OpenReef uses current room temperature"), "the current-conditions paragraph is hidden until asked for");
+  panel._healthSections["how-cooling-dehumidifier"] = true;
+  assert(panel._coolingSettings().includes("OpenReef uses current room temperature"), "…and shows when opened");
 });
 
 test("duplicates of tab actions left Settings: capture-now, timelapse grab, the manual preset", async () => {

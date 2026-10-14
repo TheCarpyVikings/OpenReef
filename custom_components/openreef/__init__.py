@@ -181,11 +181,8 @@ from .const import (
     CULTURES_TICK_SECONDS,
     COOLING_STALE_MINUTES,
     COOLING_NOTIFY_COOLDOWN_S,
-    COOLING_FORECAST_TTL_S,
     COOLING_LOOKAHEAD_MIN_H,
     COOLING_LOOKAHEAD_MAX_H,
-    COOLING_LEARNING_FILE,
-    COOLING_LEARNING_SAVE_S,
     SPAWNING_TARGET_TEMP_ENTITY,
     SPAWNING_TEMP_DRIFT_ALERT_C,
     SPAWNING_TEMP_PLAUSIBLE_MAX_C,
@@ -1153,6 +1150,9 @@ def _normalise_cooling_headroom(raw: Any) -> dict[str, Any]:
         "bands": {k: round(v, 3) for k, v in bands.items()},
         "notify": bool(raw.get("notify", True)),
         "weatherEntity": _normalise_entity_id(raw.get("weatherEntity")) or "",
+        # Retired forecast options round-trip old saves, but no longer drive
+        # calculations or controls (lookaheadHours, leadHours, nightPurge,
+        # purgeFloorC). Current outdoor conditions still inform ventilation.
         "lookaheadHours": _awc_num(raw.get("lookaheadHours"), defaults["lookaheadHours"],
                                    COOLING_LOOKAHEAD_MIN_H, COOLING_LOOKAHEAD_MAX_H),
         "dehumidifier": {
@@ -1421,7 +1421,7 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
     raw_enrich = raw.get("enrichment") if isinstance(raw.get("enrichment"), dict) else {}
     raw_enrich_state = raw_enrich.get("state") if isinstance(raw_enrich.get("state"), dict) else {}
     # Continuity (Stage D): per species, since when the rack has never been
-    # without a running jar; and the heat guard's once-a-day push stamps.
+    # without a running jar. Preserve retired heat-push stamps in old saves.
     raw_cont = raw.get("continuity") if isinstance(raw.get("continuity"), dict) else {}
     continuity = {sid: {"since": _awc_str((raw_cont.get(sid) or {}).get("since") if isinstance(raw_cont.get(sid), dict) else "", 40)}
                   for sid in cultures_engine.species_ids()}
@@ -6072,8 +6072,6 @@ async def _async_fire_maintenance_reminder(
     # per jar with a chore due, buttons for the very taps the tab offers.
     try:
         await _async_cultures_push_due(hass, latest_config, target)
-        if await _async_cultures_heat_guard_push(hass, latest_config, target):
-            _persist_entry_config(hass, entry, latest_config)
     except Exception as err:  # noqa: BLE001 - never let a push break the digest
         _LOGGER.warning("Cultures: the daily question could not be sent: %s", err)
     if target:
@@ -18722,19 +18720,6 @@ def _cultures_seed_jar(config: dict[str, Any], jar: dict[str, Any], now: datetim
     return guide
 
 
-def _cultures_projection_hours(hass: HomeAssistant) -> list[dict[str, Any]]:
-    """The cooling headroom's indoor projection (room °C per forecast hour,
-    learned offsets included) — the heat guard's only input. Empty when the
-    cooling arc is off or has no forecast yet: the guard then says so."""
-    try:
-        runtime = (hass.data.get(DOMAIN) or {}).get(COOLING_RUNTIME) or {}
-        projection = (runtime.get("snapshot") or {}).get("projection") or {}
-        hours = projection.get("hours")
-        return hours if isinstance(hours, list) else []
-    except (AttributeError, TypeError):
-        return []
-
-
 def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
     """The Cultures tab's whole state, backend computed (the lockstep rule):
     per-jar clocks + advice, the bottle's clock, the room against each
@@ -18743,10 +18728,6 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
     cultures = _nps_cultures_cfg(config)
     products = (config.get("consumables") or {}).get("products") or {}
     temp_c = _cultures_temp_c(hass, config, cultures)
-    projection_hours = _cultures_projection_hours(hass)
-    # The rack's own lead over the room (doc §8.11 #10): the guard shifts the
-    # forecast by it. None without a rack sensor or a projection row for now.
-    rack_offset = cultures_engine.rack_offset_c(projection_hours, temp_c, now)
     mix_ppt = _cultures_mix_ppt(config)
     # Stage B: the sun as HA reads it and the local clock the lamp windows
     # are read in — one snapshot for every vessel on the rack.
@@ -18834,8 +18815,6 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "stagger": (cultures_engine.stagger_advice(jar, siblings[0], now)
                         if siblings and st["status"] in ("establishing", "producing")
                         else {"available": False, "days": None, "idealDays": None, "advice": ""}),
-            "guard": cultures_engine.heat_guard(projection_hours, jar["species"], now,
-                                                offset_c=rack_offset or 0.0),
             "speciesName": preset["name"], "kind": preset["kind"], "latin": preset["latin"],
             "mixPpt": mix_ppt,
             "volumeL": jar["volumeL"], "salinityPpt": jar["salinityPpt"],
@@ -18943,7 +18922,6 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "species": sid, "speciesName": cultures_engine.species_preset(sid)["name"],
             "running": len(running), "backedUp": len(running) >= 2,
             "continuityDays": cultures_engine.continuity_days(since, now),
-            "guard": cultures_engine.heat_guard(projection_hours, sid, now, offset_c=rack_offset or 0.0),
         })
     # The day the parcel lands (doc §8.8 #7): the starter's acclimation into
     # the first rotifer cone's water, in FAO's 5 ppt steps.
@@ -18957,8 +18935,9 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
         "enrichment": enrichment_payload,
         "nextHarvest": next_harvest,
         "backup": backup,
-        "guardAvailable": bool(projection_hours),
-        "rackOffsetC": rack_offset,
+        # Compatibility for older panels: indoor forecasts are retired.
+        "guardAvailable": False,
+        "rackOffsetC": None,
         "arrival": {"rotifer": next((j["arrival"] for j in jars_payload if j["species"] == "rotifer_L"),
                                      cultures_engine.acclimation_plan(None, rot_target))},
         "dueCount": due_count,
@@ -20732,41 +20711,6 @@ async def _async_cultures_push_due(hass: HomeAssistant, config: dict[str, Any], 
         await _async_push_actionable(hass, target, item["title"], item["message"],
                                      item["actions"], item["tag"])
     return len(plan)
-
-
-async def _async_cultures_heat_guard_push(hass: HomeAssistant, config: dict[str, Any], target: str,
-                                          now: datetime | None = None) -> int:
-    """The heatwave guard's push (doc §8.8 #2): once a day per species with a
-    running jar, when the cooling headroom's projection crosses the species'
-    warning line inside the next day — the day-ahead warning the last
-    Tigriopus culture never got. Stamps ``cultures.guard.notified``."""
-    if not target or not bool(((config.get("nps") or {}).get("cultures") or {}).get("enabled")):
-        return 0
-    now = now or datetime.now(timezone.utc)
-    summary = _cultures_summary_payload(hass, config)
-    # AFTER the summary: it re-normalises the block in place, and the stamp
-    # must land in the dict the save will read.
-    cultures = _nps_cultures_cfg(config)
-    sent = 0
-    for item in summary.get("backup") or []:
-        guard = item.get("guard") or {}
-        if guard.get("status") != "warn":
-            continue
-        sid = item["species"]
-        last = _parse_datetime(cultures["guard"]["notified"].get(sid))
-        if last is not None and (now - last).total_seconds() < 20 * 3600:
-            continue
-        tail = (". The alga declines abruptly near 30 °C — shade the vessel, move it off the sunlit shelf, a cooler room."
-                if cultures_engine.species_kind(sid) == "phyto"
-                else ". Heat can directly stress animals and worsen oxygen and ammonia problems.")
-        await _async_push_actionable(
-            hass, target, f"OpenReef: heat ahead for the {item['speciesName']}",
-            (lambda line: line[:1].upper() + line[1:])(guard.get("line") or "") + tail,
-            [], tag=f"openreef_culture_guard_{sid}")
-        cultures["guard"]["notified"][sid] = now.isoformat()
-        _append_activity(config, f"Heat guard: {item['speciesName']} — {guard.get('line')}", "warning")
-        sent += 1
-    return sent
 
 
 async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:
@@ -24492,117 +24436,14 @@ def _cooling_outdoor_now(hass: HomeAssistant, weather_entity: str) -> dict[str, 
     return out
 
 
-def _cooling_learning_path(hass: HomeAssistant) -> Path:
-    return Path(hass.config.path(COOLING_LEARNING_FILE))
-
-
-async def _async_cooling_learning_load(hass: HomeAssistant, runtime: dict[str, Any]) -> None:
-    """Read the per-hour ledger from the config dir once per schedule. A
-    missing or corrupt file is an empty ledger, never an error."""
-    if "learning" in runtime:
-        return
-    path = _cooling_learning_path(hass)
-
-    def _read() -> dict[str, Any]:
-        import json
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    data = await hass.async_add_executor_job(_read)
-    by_hour = data.get("byHour") if isinstance(data.get("byHour"), dict) else {}
-    runtime["learning"] = {"byHour": by_hour, "since": data.get("since") or "", "dirty": False,
-                           "savedAt": datetime.now(timezone.utc).timestamp()}
-
-
-async def _async_cooling_learning_save(hass: HomeAssistant, runtime: dict[str, Any], force: bool = False) -> None:
-    """Write the ledger when it changed — at most every COOLING_LEARNING_SAVE_S,
-    or now on unload. Best-effort: a full disk must not break the tick."""
-    learning = runtime.get("learning")
-    if not isinstance(learning, dict) or not learning.get("dirty"):
-        return
-    now_ts = datetime.now(timezone.utc).timestamp()
-    if not force and now_ts - float(learning.get("savedAt", 0)) < COOLING_LEARNING_SAVE_S:
-        return
-    path = _cooling_learning_path(hass)
-    payload = {"version": 1, "since": learning.get("since") or "", "byHour": learning.get("byHour") or {}}
-
-    def _write() -> None:
-        import json
-        tmp = path.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        tmp.replace(path)
-
-    try:
-        await hass.async_add_executor_job(_write)
-        learning["dirty"] = False
-        learning["savedAt"] = now_ts
-    except OSError as err:
-        _LOGGER.warning("Cooling headroom: could not save the learned offsets: %s", err)
-
-
-def _cooling_learn(runtime: dict[str, Any], now_local: datetime, room_c: float | None, dew_c: float | None,
-                   out_c: float | None, out_dew_c: float | None) -> None:
-    """Fold this tick's indoor-minus-outdoor difference into the hour's slot."""
-    learning = runtime.get("learning")
-    if not isinstance(learning, dict) or None in (room_c, dew_c, out_c, out_dew_c):
-        return
-    learning["byHour"] = cooling_engine.learn_slot(
-        learning.get("byHour"), now_local.hour, float(room_c) - float(out_c), float(dew_c) - float(out_dew_c))
-    learning["dirty"] = True
-    if not learning.get("since"):
-        learning["since"] = now_local.isoformat()
-
-
-async def _async_cooling_forecast(
-    hass: HomeAssistant, config: dict[str, Any], runtime: dict[str, Any]
-) -> list[dict[str, Any]]:
-    """Hourly forecast via weather.get_forecasts, cached in the runtime for
-    COOLING_FORECAST_TTL_S. Never raises: no entity / no response / a broken
-    integration all leave the cache empty with an error string the panel shows."""
-    cfg = _cooling_cfg(config)
-    entity = cfg["weatherEntity"]
-    cache = runtime.setdefault("forecast", {})
-    if not entity:
-        cache.clear()
-        return []
-    now_ts = datetime.now(timezone.utc).timestamp()
-    if cache.get("entity") == entity and cache.get("hours") and now_ts - float(cache.get("at", 0)) < COOLING_FORECAST_TTL_S:
-        return cache["hours"]
-    outdoor = _cooling_outdoor_now(hass, entity)
-    hours: list[dict[str, Any]] = []
-    error = ""
-    try:
-        response = await hass.services.async_call(
-            "weather", "get_forecasts", {"type": "hourly"},
-            target={"entity_id": entity}, blocking=True, return_response=True,
-        )
-        payload = response.get(entity) if isinstance(response, dict) else None
-        if not isinstance(payload, dict) and isinstance(response, dict) and len(response) == 1:
-            payload = next(iter(response.values()))
-        items = payload.get("forecast") if isinstance(payload, dict) else None
-        hours = cooling_engine.parse_forecast(items, outdoor["unit"])
-        if not hours:
-            error = f"{entity} returned no usable hourly forecast"
-    except Exception as err:  # noqa: BLE001 — a dead weather integration must not break the tick
-        error = f"could not read the forecast from {entity}: {err}"
-        _LOGGER.warning("Cooling headroom: %s", error)
-    cache.update({"entity": entity, "at": now_ts, "hours": hours, "error": error})
-    return hours
-
-
 def cooling_snapshot(
     hass: HomeAssistant, config: dict[str, Any], now_local: datetime,
     runtime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Everything the panel shows, computed once. Never raises: a missing
     sensor is an ``issues`` entry and a null result, not an exception. With a
-    runtime (the tick's, or the WS reading it) the cached forecast becomes the
-    24 h projection, the day kind, vent advice and the dehumidifier plan."""
+    runtime (the tick's, or the WS reading it), actuator holds and hysteresis
+    are applied to decisions based on current sensor readings."""
     cfg = _cooling_cfg(config)
     entities = _cooling_entities(config)
     target_c, target_source = _cooling_target(config, now_local)
@@ -24649,26 +24490,13 @@ def cooling_snapshot(
         "whatIf": cooling_engine.what_if_table(water_c, cfg["referenceVpdKpa"], cfg["bands"]),
     }
 
-    # --- Layer 2: outdoors, the projection, the plan --------------------------
+    # --- Layer 2: current outdoor conditions and live decisions -------------
     weather = cfg["weatherEntity"]
     outdoor = _cooling_outdoor_now(hass, weather)
     if weather and not outdoor["available"]:
         issues["weather"] = f"weather entity ({weather}) is unavailable"
     dew_now = result["dewC"] if result else None
-    offsets = cooling_engine.smooth_offsets(
-        runtime.get("offsets") if isinstance(runtime, dict) else None,
-        room_c, dew_now, outdoor["outC"], outdoor["outDewC"])
-    if isinstance(runtime, dict) and room_c is not None and outdoor["outC"] is not None:
-        runtime["offsets"] = offsets
-    cache = runtime.get("forecast") if isinstance(runtime, dict) else None
-    hours = cache.get("hours") if isinstance(cache, dict) else None
-    if isinstance(cache, dict) and cache.get("error"):
-        issues["forecast"] = cache["error"]
-    learning = runtime.get("learning") if isinstance(runtime, dict) else None
-    by_hour = learning.get("byHour") if isinstance(learning, dict) else None
-    projection = cooling_engine.project(
-        hours or [], now_local, cfg["lookaheadHours"], water_c, target_c, offsets,
-        cfg["fanGateC"], cfg["referenceVpdKpa"], cfg["bands"], by_hour) if hours else None
+    # Outdoor conditions are used only to assess ventilation now.
     dehum = cfg["dehumidifier"]
     vent_cfg = cfg["vent"]
     window_open = _cooling_window_open(hass, vent_cfg["windowEntity"], issues)
@@ -24681,8 +24509,7 @@ def cooling_snapshot(
                                         vent_fan["state"] == "on" or window_open is True,
                                         vent_cfg["coolVent"], vent_cfg["coolGapC"],
                                         vent_cfg["coolMinOutdoorC"])
-    decision = cooling_engine.vent_decision(advice, needed, projection, now_local, vent_cfg["nightPurge"],
-                                            window_open, water_c, target_c, vent_cfg["purgeFloorC"])
+    decision = cooling_engine.vent_decision(advice, needed, None, now_local, False, window_open, water_c, target_c)
     # Re-read now the plan exists, so the panel gets the hold that explains a
     # plug disagreeing with it. The first read above only needed the raw state.
     vent_fan = _cooling_actuator_state(
@@ -24695,14 +24522,11 @@ def cooling_snapshot(
     # names (losing / ceiling) — the same shape as fanNeededLatch.
     plan_latched = runtime.get("planLatch") if isinstance(runtime, dict) else None
     plan = cooling_engine.dehumidifier_plan(
-        result, needed, projection, now_local, dehum["leadHours"], target_c, vent_active,
+        result, needed, None, now_local, 0, target_c, vent_active,
         dehum["losingOverC"], dehum["maxRh"], water_source == "sensor", plan_latched)
     snap.update({
         "weather": {"entity": weather, **{k: outdoor[k] for k in ("outC", "outRh", "outDewC", "available")}},
-        "offsets": offsets,
-        "learned": {**cooling_engine.learning_summary(by_hour),
-                    "since": (learning.get("since") if isinstance(learning, dict) else "") or ""},
-        "projection": projection,
+        "projection": None,  # Older panels must not display a cached indoor forecast.
         "vent": advice,
         "ventDecision": decision,
         "ventActive": vent_active,
@@ -24803,9 +24627,9 @@ _COOLING_ROLES = {
 def _cooling_desired(snap: dict[str, Any], role: str) -> tuple[bool, str]:
     if role == "vent":
         d = snap.get("ventDecision") or {}
-        return bool(d.get("shouldRun")), str(d.get("reason", ""))
+        return bool(d.get("shouldRun")) and d.get("kind") in cooling_engine.VENT_RUN_KINDS, str(d.get("reason", ""))
     plan = snap.get("plan") or {}
-    return bool(plan.get("shouldRun")), str(plan.get("reason", ""))
+    return bool(plan.get("shouldRun")) and plan.get("kind") in ("now", "losing", "ceiling"), str(plan.get("reason", ""))
 
 
 async def _async_cooling_actuator_reconcile(
@@ -24924,13 +24748,8 @@ async def _async_cooling_tick_body(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], cfg: dict[str, Any],
     runtime: dict[str, Any], now_local: datetime,
 ) -> None:
-    await _async_cooling_forecast(hass, config, runtime)
-    await _async_cooling_learning_load(hass, runtime)
     snap = cooling_snapshot(hass, config, now_local, runtime)
     runtime["snapshot"] = snap
-    _cooling_learn(runtime, now_local, snap["roomC"], snap["result"]["dewC"] if snap["result"] else None,
-                   snap["weather"]["outC"], snap["weather"]["outDewC"])
-    await _async_cooling_learning_save(hass, runtime)
     result = snap["result"]
     previous_band = runtime.get("warnBand")
     activity: list[tuple[str, str]] = []
@@ -24956,16 +24775,15 @@ async def _async_cooling_tick_body(
     # the keeper hears "the fans are gone, do X" once, not twice.
     plan = snap["plan"]
     dehum = cfg["dehumidifier"]
-    plan_key = (plan["kind"] if plan["kind"] in ("now", "unrescuable", "losing", "ceiling")
-                else f"{plan['kind']}:{plan.get('startAt') or ''}")
+    plan_key = plan["kind"]
     plan_sent = False
-    if dehum["mode"] != "off" and plan["kind"] in ("now", "ahead", "scheduled", "unrescuable", "losing", "ceiling"):
+    if dehum["mode"] != "off" and plan["kind"] in ("now", "unrescuable", "losing", "ceiling"):
         if runtime.get("planKey") != plan_key:
             runtime["planKey"] = plan_key
             vent = snap["vent"]
             if plan["kind"] == "unrescuable":
-                title = "Chiller day — the dehumidifier cannot save this afternoon"
-                message = f"{plan['reason'].capitalize()}. Drop the room load, open up early, or plan a chiller."
+                title = "Room too hot for dehumidification"
+                message = f"{plan['reason'].capitalize()}. Check the room and tank cooling."
             elif dehum["mode"] == "auto" and snap["dehumidifier"]["controlling"]:
                 title = "Dehumidifier plan"
                 message = f"OpenReef will run the dehumidifier: {plan['reason']}."
@@ -24976,7 +24794,7 @@ async def _async_cooling_tick_body(
                 message += f" Better still, {vent['reason']}."
             if band_note:
                 message = f"{band_note[2]} {message}"
-            if cfg["notify"] and plan["kind"] != "scheduled":
+            if cfg["notify"]:
                 plan_sent = await _async_cooling_notify_once(
                     hass, config, f"plan_{plan['kind']}", COOLING_NOTIFY_COOLDOWN_S, title, message)
             activity.append((f"Dehumidifier: {plan['reason']}" + (" — vent instead" if vent.get("advised") else ""),
@@ -25026,8 +24844,8 @@ async def _async_cooling_tick_body(
         snap["ventActive"] = vent_active
         # runtime["planLatch"] is still last tick's kind here — it is stamped below.
         snap["plan"] = cooling_engine.dehumidifier_plan(
-            snap["result"], snap["fanNeeded"], snap["projection"], now_local,
-            dehum["leadHours"], snap["targetC"], vent_active,
+            snap["result"], snap["fanNeeded"], None, now_local,
+            0, snap["targetC"], vent_active,
             dehum["losingOverC"], dehum["maxRh"], snap["waterSource"] == "sensor", runtime.get("planLatch"))
     runtime["planLatch"] = snap["plan"]["kind"]
     await _async_cooling_actuator_reconcile(hass, config, snap, runtime, now_local, activity, "dehumidifier")
@@ -25067,9 +24885,8 @@ async def _async_schedule_cooling_tick(
 
     # First enable: read now rather than in five minutes. Every later reschedule
     # (each config save re-runs the schedulers) leaves the cadence alone. While
-    # HA is still booting the weather integration may not be up — a blocking
-    # get_forecasts there stalls our setup — so the first read waits for the
-    # started event (the unsub sits in the same slot, so a clear cancels it).
+    # HA is still booting the sensors may not be up, so the first read waits
+    # for the started event (the unsub sits in the same slot).
     first = not (hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME) or {}).get("snapshot")
     if first and not getattr(hass, "is_running", True):
         async def _started(_event: Any) -> None:
@@ -25185,30 +25002,6 @@ async def websocket_cooling_dehumidifier(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     await _async_cooling_manual(hass, connection, msg, "dehumidifier")
-
-
-@websocket_api.websocket_command({
-    vol.Required("type"): "openreef/cooling_learning",
-    vol.Required("action"): vol.In(["reset"]),
-})
-@websocket_api.require_admin
-@websocket_api.async_response
-async def websocket_cooling_learning(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
-) -> None:
-    """Forget the per-hour learned offsets (the sensor moved, the room changed)."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(COOLING_RUNTIME, {})
-    runtime["learning"] = {"byHour": {}, "since": "", "dirty": True, "savedAt": 0}
-    runtime.pop("offsets", None)
-    await _async_cooling_learning_save(hass, runtime, force=True)
-    config = _config_from_entry(entry)
-    _append_activity(config, "Cooling headroom: learned per-hour offsets forgotten — learning again from now", "info")
-    await _async_save_config(hass, entry, config)
-    connection.send_result(msg["id"], {"success": True})
 
 
 @websocket_api.websocket_command({
@@ -26523,7 +26316,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cooling_simulate)
     websocket_api.async_register_command(hass, websocket_cooling_dehumidifier)
     websocket_api.async_register_command(hass, websocket_cooling_vent)
-    websocket_api.async_register_command(hass, websocket_cooling_learning)
     websocket_api.async_register_command(hass, websocket_spawning_execution_resume)
     websocket_api.async_register_command(hass, websocket_generate_spawning_program)
     websocket_api.async_register_command(hass, websocket_lighting_window)
@@ -26765,9 +26557,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
     _clear_cooling_tick(hass)
     _clear_cultures_tick(hass)
-    _cooling_rt = hass.data.setdefault(DOMAIN, {}).get(COOLING_RUNTIME)
-    if isinstance(_cooling_rt, dict):
-        await _async_cooling_learning_save(hass, _cooling_rt, force=True)
     hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
     beta_feedback.async_stop(hass)  # BETA-FEEDBACK: remove after beta
     _store = hass.data.setdefault(DOMAIN, {})

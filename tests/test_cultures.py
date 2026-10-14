@@ -4,7 +4,7 @@ stale-save guard.
 
 Covers: cultures.py pure maths (species presets, chore clocks anchored on
 seed/restart, establishing vs producing, crash, tint-driven feed advice, the
-heatwave line, the measured jug, the fail-closed bottle clock), the
+measured temperature warnings, the measured jug, the fail-closed bottle clock), the
 normaliser (junk tolerance, caps, unknown species, the jar cap), every WS
 action's ledger side-effects, and _nps_preserve_runtime carrying the
 server-written state through a whole-config save.
@@ -940,26 +940,6 @@ def test_stage_c_runtime_survives_a_stale_save():
 # --------------------------------------------------------------------------- #
 # V2 Stage D (0.7.128): never zero, lineage, the heat guard, the card
 # --------------------------------------------------------------------------- #
-def _projection(peaks):
-    """Fake cooling projection rows: (hours_from_now, roomC) pairs."""
-    return [{"at": _iso(NOW + timedelta(hours=h)), "roomC": c} for h, c in peaks]
-
-
-def test_heat_guard_reads_the_forecast_against_the_species_band():
-    assert cultures.heat_guard([], "tigriopus", NOW)["available"] is False
-    assert cultures.heat_guard("junk", "tigriopus", NOW)["status"] == "unknown"
-    clear = cultures.heat_guard(_projection([(1, 22.0), (6, 24.5), (12, 23.0)]), "tigriopus", NOW)
-    assert clear["status"] == "clear" and clear["peakC"] == 24.5
-    watch = cultures.heat_guard(_projection([(1, 22.0), (8, 27.2), (12, 25.0)]), "tigriopus", NOW)
-    assert watch["status"] == "watch" and "above the 26 °C band" in watch["line"]
-    warn = cultures.heat_guard(_projection([(1, 24.0), (5, 27.0), (9, 28.4), (15, 30.1), (30, 33.0)]), "tigriopus", NOW)
-    assert warn["status"] == "warn" and warn["hoursUntil"] == 9.0 and warn["peakC"] == 30.1, "the 30 h row is outside the day"
-    assert "passes 28 °C in ~9 h" in warn["line"] and "extra air" in warn["line"]
-    # Rotifers warn later — their line is 30 °C.
-    assert cultures.heat_guard(_projection([(9, 28.4), (15, 29.5)]), "rotifer_L", NOW)["status"] == "watch"
-    assert cultures.heat_guard(_projection([(9, 28.4), (15, 30.5)]), "rotifer_L", NOW)["status"] == "warn"
-
-
 def test_stagger_tint_strip_and_continuity():
     a = _jar(started_ago_days=20, lastRestartAt=_iso(NOW - timedelta(days=9)), now=NOW)
     b = _jar(started_ago_days=12, lastRestartAt=_iso(NOW - timedelta(days=2)), now=NOW)
@@ -1007,7 +987,7 @@ def test_ws_seed_and_split_write_the_lineage_and_continuity():
     backup = {b["species"]: b for b in p["backup"]}
     assert backup["rotifer_L"]["running"] == 2 and backup["rotifer_L"]["backedUp"] and backup["rotifer_L"]["continuityDays"] == 15.0
     assert "tigriopus" not in backup and p["guardAvailable"] is False
-    assert by_id["c1"]["guard"]["available"] is False, "no cooling projection — the guard says so"
+    assert "guard" not in by_id["c1"], "room forecasts are retired"
     # The last crash of a species clears its continuity.
     run(integration.websocket_cultures_crash(hass, conn, {"id": 4, "jar_id": "c2"}))
     run(integration.websocket_cultures_crash(hass, conn, {"id": 5, "jar_id": "c1"}))
@@ -1033,28 +1013,21 @@ def test_ws_restart_can_seed_b_from_the_same_crop():
     assert any("B was not seeded" in str(a.get("message", "")) for a in activity)
 
 
-def test_heat_guard_push_fires_once_a_day_from_the_cooling_projection():
+def test_daily_culture_reminders_do_not_send_forecast_heat_warnings():
     entry = _entry(jars={"c1": _jar(started_ago_days=10), "c2": _jar(species="tigriopus", started_ago_days=40)},
-                   maintenance={"tasks": {}, "completions": {}, "reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}})
+                   maintenance={"seeded": True, "tasks": {"check": {"label": "Check equipment", "cadenceDays": 1, "enabled": True}},
+                                "completions": {}, "reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}})
     hass = FakeHass(entries=[entry])
     hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": [
-        {"at": _iso(REAL + timedelta(hours=2)), "roomC": 25.0}, {"at": _iso(REAL + timedelta(hours=8)), "roomC": 28.6},
-        {"at": _iso(REAL + timedelta(hours=14)), "roomC": 27.0}]}}}
-    config = _config(entry)
-    sent = run(integration._async_cultures_heat_guard_push(hass, config, "mobile_app_phone"))
-    assert sent == 1, "the pods warn at 28, the rotifers do not"
-    call = hass.services.calls[-1]
-    assert call.data["title"] == "OpenReef: heat ahead for the Tigriopus copepods" and "passes 28 °C in ~8 h" in call.data["message"]
-    assert config["nps"]["cultures"]["guard"]["notified"]["tigriopus"]
-    assert run(integration._async_cultures_heat_guard_push(hass, config, "mobile_app_phone")) == 0, "once a day"
-    conn = FakeConnection()
-    entry.options = {**entry.options, CONF_SETTINGS: config}
-    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
-    p = conn.results[-1].payload
-    assert p["guardAvailable"]
-    by_id = {j["id"]: j for j in p["jars"]}
-    assert by_id["c2"]["guard"]["status"] == "warn" and by_id["c1"]["guard"]["status"] == "watch"
-    assert {b["species"]: b["guard"]["status"] for b in p["backup"]} == {"rotifer_L": "watch", "tigriopus": "warn"}
+        {"at": _iso(REAL + timedelta(hours=1)), "roomC": 40}]}}}
+    run(integration._async_fire_maintenance_reminder(hass, entry, REAL))
+    pushes = [c for c in hass.services.calls if c.domain == "notify"]
+    assert pushes, "normal due reminders still run"
+    assert not any("heat ahead" in str(c.data).lower() or "openreef_culture_guard" in str(c.data) for c in pushes)
+    assert not any("Heat guard:" in a.get("message", "") for a in _config(entry).get("activity", []))
+
+
+def test_culture_continuity_and_legacy_stamps_survive_a_stale_save():
     # The stamps and the continuity survive a stale save.
     stored = {"nps": {"cultures": {"enabled": True, "jars": {}, "continuity": {"rotifer_L": {"since": _iso(REAL)}},
                                    "guard": {"notified": {"tigriopus": _iso(REAL)}}}}}
@@ -1304,36 +1277,24 @@ def test_rig_state_pencils_in_b_beside_one_running_cone():
     assert establishing["cones"][1]["name"] == "B" and establishing["stage"] == "establishing"
 
 
-def test_heat_guard_shifts_by_the_racks_own_offset():
-    proj = [{"at": _iso(REAL), "roomC": 24.0}, {"at": _iso(REAL + timedelta(hours=8)), "roomC": 27.0}]
-    assert cultures.rack_offset_c(proj, 26.0, REAL) == 2.0
-    assert cultures.rack_offset_c(proj, None, REAL) is None and cultures.rack_offset_c([], 26.0, REAL) is None
-    assert cultures.rack_offset_c([proj[1]], 26.0, REAL) is None, "no projection row for now, no offset"
-    assert cultures.rack_offset_c(proj, 40.0, REAL) == 5.0 and cultures.rack_offset_c(proj, 10.0, REAL) == -5.0, "clamped"
-    plain = cultures.heat_guard(proj, "tigriopus", REAL)
-    shifted = cultures.heat_guard(proj, "tigriopus", REAL, offset_c=2.0)
-    assert plain["status"] == "watch" and plain["offsetC"] == 0.0 and plain["line"].startswith("room peaks")
-    assert shifted["status"] == "warn" and shifted["offsetC"] == 2.0 and shifted["peakC"] == 29.0
-    assert shifted["line"].startswith("the rack passes 28 °C in ~8 h") and "rack +2.0 °C over the room" in shifted["line"]
-    assert cultures.heat_guard(proj, "tigriopus", REAL, offset_c=0.3)["offsetC"] == 0.0, "under half a degree is noise"
-    assert cultures.heat_guard(proj, "tigriopus", REAL, offset_c=99)["status"] == "watch", "an absurd offset is ignored"
-    assert cultures.heat_guard([], "tigriopus", REAL, offset_c=2.0)["available"] is False
-    # The summary: the rack sensor's lead over the projection's room shifts
-    # every guard, and says so on the payload.
-    entry = _entry(jars={"c2": _jar(species="tigriopus", started_ago_days=40)}, temp_entity="sensor.bench")
-    hass = FakeHass(entries=[entry], states={"sensor.bench": "26.0"})
-    hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": proj}}}
+def test_cultures_temperature_advice_uses_sensors_and_ignores_cached_room_predictions():
+    entry = _entry(jars={"c1": _jar(started_ago_days=10), "c2": _jar(species="tigriopus", started_ago_days=40)},
+                   temp_entity="sensor.bench")
+    hass = FakeHass(entries=[entry])
+    hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": [
+        {"at": _iso(REAL), "roomC": 24}, {"at": _iso(REAL + timedelta(hours=8)), "roomC": 40}]}}}
     conn = FakeConnection()
-    run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
-    p = conn.results[-1].payload
-    assert p["rackOffsetC"] == 2.0 and p["jars"][0]["guard"]["status"] == "warn" and p["backup"][0]["guard"]["status"] == "warn"
-    no_sensor = _entry(jars={"c2": _jar(species="tigriopus", started_ago_days=40)})
-    hass2 = FakeHass(entries=[no_sensor])
-    hass2.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": proj}}}
-    conn2 = FakeConnection()
-    run(integration.websocket_cultures_summary(hass2, conn2, {"id": 1}))
-    p2 = conn2.results[-1].payload
-    assert p2["rackOffsetC"] is None and p2["jars"][0]["guard"]["status"] == "watch"
+    for value in (23.0, 27.3, 30.5, "unavailable"):
+        hass.states.set("sensor.bench", str(value))
+        run(integration.websocket_cultures_summary(hass, conn, {"id": 1}))
+        payload = conn.results[-1].payload
+        assert payload["guardAvailable"] is False and payload["rackOffsetC"] is None
+        assert all("guard" not in item for item in payload["backup"])
+        for jar in payload["jars"]:
+            expected = cultures.temperature_advice(None if value == "unavailable" else value, jar["species"])
+            assert jar["temp"]["available"] == expected["available"]
+            assert jar["temp"]["status"] == expected["status"]
+            assert "guard" not in jar
 
 
 def test_acclimation_plan_keeps_every_step_inside_five_ppt():
@@ -2354,10 +2315,6 @@ def test_risk_line_carries_the_light_the_f2_the_cycles_the_backup_and_the_starte
     fresh = _phyto_jar(started_ago_days=2, now=NOW, lastTint="pale", starterOpenedAt=_iso(NOW - timedelta(days=30)))
     st = cultures.culture_state(fresh, NOW)
     assert "starter bottle is past its four weeks" in cultures.risk_line(fresh, st, ok_temp, NOW)["reason"]
-    # The heat guard speaks the alga's copy; an animal's jar keeps its own.
-    proj = [{"at": _iso(NOW + timedelta(hours=3)), "roomC": 29.5}]
-    assert "shade it, move it off the sunlit shelf" in cultures.heat_guard(proj, "nanno", NOW)["line"]
-    assert "a 50 % change ready" in cultures.heat_guard(proj, "tigriopus", NOW)["line"]
     # The rig's lamp follows the light.
     rig = cultures.rig_state([{"id": "c1", "name": "Nanno A", "kind": "phyto", "vesselKind": "bottle", "volumeL": 4,
                                "state": {"status": "producing", "workingL": 1.25, "cycle": {"day": 3, "ofDays": 8, "percent": 40}},
@@ -2558,7 +2515,7 @@ def test_ws_apply_learned_moves_the_split_interval_and_switches_to_daily():
     assert conn.errors[-1].code == "unknown_field"
 
 
-def test_ws_summary_reads_the_vessel_sensor_the_sun_and_the_lamp_and_the_guard_speaks_phyto():
+def test_ws_summary_reads_the_vessel_sensor_the_sun_and_the_lamp():
     now = datetime.now(timezone.utc)
     jar = _phyto_jar(started_ago_days=12, lastTint="green")
     jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": "sensor.nanno_water"}
@@ -2589,15 +2546,6 @@ def test_ws_summary_reads_the_vessel_sensor_the_sun_and_the_lamp_and_the_guard_s
     run(integration.websocket_cultures_summary(hass, conn, {"id": 2}))
     j = conn.results[-1].payload["jars"][0]
     assert j["temp"]["tempC"] == 24.0 and j["temp"]["source"] == "rack"
-    # The heat guard's push for the alga carries the alga's sentence.
-    hass.data.setdefault(integration.DOMAIN, {})[integration.COOLING_RUNTIME] = {"snapshot": {"projection": {"hours": [
-        {"at": _iso(now + timedelta(hours=4)), "roomC": 29.4}]}}}
-    config = _config(entry)
-    assert run(integration._async_cultures_heat_guard_push(hass, config, "mobile_app_phone")) == 1
-    call = hass.services.calls[-1]
-    assert call.data["title"] == "OpenReef: heat ahead for the Nannochloropsis (phyto)"
-    assert "shade it, move it off the sunlit shelf" in call.data["message"] and "The alga declines abruptly near 30 °C" in call.data["message"]
-    assert "ammonia" not in call.data["message"]
 
 
 def test_shelf_nudge_says_what_the_vessel_is_doing_about_an_empty_bottle():

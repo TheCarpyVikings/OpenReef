@@ -285,6 +285,31 @@ test("the feed strip draws two lanes, the ladder, the chips, the queue and the h
   } finally { restore(); }
 });
 
+test("completed any-time feeds plot at their logged time and stack with nearby feeds", async () => {
+  const panel = await npsPanel();
+  const events = panel._nps.summary.timeline.events;
+  const rotifers = { ...events.find((e) => e.id === "shelf:chips:0"), id: "cultures-bottle:0",
+    source: "cultures-bottle", productId: "", name: "Rotifers from the bottle", ml: 250,
+    actualMl: 250, status: "done", doneAt: 627 };
+  const neighbour = { ...rotifers, id: "brine:nearby", source: "brine", name: "Live brine", at: 630, doneAt: 630 };
+  const midnight = { ...rotifers, id: "cultures-bottle:midnight", doneAt: 0 };
+  events.push(rotifers, neighbour, midnight);
+  for (const compact of [false, true]) {
+    const html = panel._npsTimelineSvg({ compact });
+    const svg = html.slice(html.indexOf("<svg"), html.indexOf("</svg>"));
+    const mark = (id) => svg.match(new RegExp(`data-id="${id}"><title>[^<]*</title><circle cx="([\\d.]+)" cy="([\\d.]+)"[^>]*fill="([^"]+)"`));
+    const rot = mark(rotifers.id), near = mark(neighbour.id), zero = mark(midnight.id);
+    assert(rot && rot[3] !== "none", "the logged 250 ml rotifer feed must be a solid timeline mark");
+    assert(Math.abs(Number(rot[1]) - (30 + 627 / 1440 * 382)) < 0.01, "plot the 10:27 completion");
+    assert(near && Math.abs(Number(rot[2]) - Number(near[2])) >= 11, "completed any-time feeds take part in collision stacking");
+    assert(zero && Number(zero[1]) === 30, "a midnight completion is a real time, not an empty slot");
+    assert(svg.includes("Rotifers from the bottle · 250 ml · done · 10:27"), "the tooltip gives the actual time");
+    assert(!html.slice(html.indexOf("</svg>")).includes(`data-id="${rotifers.id}"`), "the feed is not duplicated as an any-time chip");
+    assert(html.includes("Zoo · 5 ml · any time · due now"), "an unfinished any-time feed remains a chip");
+  }
+  assert(rotifers.at === null, "rendering keeps the original any-time schedule intact");
+});
+
 test("tapping a mark opens its dose card with the right actions, and the actions call the right commands", async () => {
   const restore = freezeTime(NOW);
   try {

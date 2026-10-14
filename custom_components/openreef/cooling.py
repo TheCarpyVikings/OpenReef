@@ -216,22 +216,13 @@ def warning_copy(result: dict[str, Any], target_c: float | None) -> tuple[str, s
 
 
 # --------------------------------------------------------------------------- #
-# Layer 2 — the 24 h projection, the day kind, vent advice, the dehumidifier plan
+# Layer 2 — current vent advice and the dehumidifier plan
 # --------------------------------------------------------------------------- #
 
-from datetime import datetime, timedelta, timezone  # noqa: E402
-
-# Indoor-vs-outdoor offsets when nothing has been measured yet: a tank room
-# runs warmer and wetter than the street. Replaced by the live difference
-# (smoothed) as soon as both sides read.
-DEFAULT_OFFSET_T_C = 2.0
-DEFAULT_OFFSET_DEW_C = 3.0
-OFFSET_T_RANGE = (-3.0, 12.0)
-OFFSET_DEW_RANGE = (-3.0, 12.0)
-OFFSET_ALPHA = 0.3                  # EMA weight of the newest live difference
+from datetime import datetime  # noqa: E402
 
 # "Unrescuable": the fans are already gone AND the room is far over target —
-# a dehumidifier's own heat would land in the peak. Chiller day, not a job.
+# a dehumidifier's own heat could worsen the current conditions.
 UNRESCUABLE_OVER_TARGET_C = 4.0
 UNRESCUABLE_INDEX = 0.10
 
@@ -247,8 +238,6 @@ LOSING_HYST_C = 0.2
 CEILING_HYST_RH = 5.0
 
 VENT_DEW_GAP_C = 2.0                # vent only while outdoor dew ≤ indoor dew − this
-PURGE_BAND_C = 2.0                  # night-purge hours sit within this of the coolest hour
-PURGE_MAX_HOURS = 8                 # …and never longer than a night
 VENT_TEMP_SLACK_C = 1.0             # …and outdoor air is no warmer than room + this
 
 # Deadbands. Every gate here is bang-bang against a live sensor, and the thing
@@ -274,32 +263,10 @@ VENT_DEW_NEUTRAL_HYST_C = 0.3       # free-cooling needs dew-neutral air; this m
 VENT_COOL_MIN_OUTDOOR_C = 10.0      # never free-cool on air colder than this (0 = no floor)
 PURGE_WATER_FLOOR_C = 2.0           # stop the night purge once the TANK is this far below target
 
-DAY_KINDS = ("quiet", "dry-heat", "humid-heat", "chiller")
-DAY_KIND_COPY = {
-    "quiet": "Quiet day — the fans aren't needed",
-    "dry-heat": "Dry-heat day — the fans will cope",
-    "humid-heat": "Humid-heat day — dehumidify ahead of the afternoon",
-    "chiller": "Chiller day — neither fans nor dehumidifier will hold it",
-}
-
-
 def rh_from_dew(temp_c: float, dew_c: float) -> float:
     """Relative humidity % from dry-bulb and dew point (clamped 1–100)."""
     rh = 100.0 * saturation_vapour_pressure_kpa(dew_c) / saturation_vapour_pressure_kpa(temp_c)
     return min(100.0, max(1.0, rh))
-
-
-def _parse_when(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        dt = value
-    elif isinstance(value, str) and value:
-        try:
-            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    else:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _to_c(value: Any, unit: str) -> float | None:
@@ -308,145 +275,6 @@ def _to_c(value: Any, unit: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return (v - 32.0) * 5.0 / 9.0 if "F" in str(unit).upper() else v
-
-
-def parse_forecast(items: Any, temp_unit: str = "°C") -> list[dict[str, Any]]:
-    """HA hourly forecast entries → [{at, outC, outRh, outDewC}], tolerant of
-    fields an integration omits: a missing dew point is computed from the
-    humidity, a missing humidity from the dew point; an hour with neither, or
-    no temperature, is dropped. Sorted by time."""
-    out: list[dict[str, Any]] = []
-    if not isinstance(items, list):
-        return out
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        at = _parse_when(item.get("datetime"))
-        temp = _to_c(item.get("temperature"), temp_unit)
-        if at is None or temp is None:
-            continue
-        rh = None
-        try:
-            if item.get("humidity") is not None:
-                rh = float(item["humidity"])
-        except (TypeError, ValueError):
-            rh = None
-        dew = _to_c(item.get("dew_point"), temp_unit) if item.get("dew_point") is not None else None
-        if dew is None and rh is None:
-            continue
-        if dew is None:
-            dew = dew_point_c(temp, rh)
-        if rh is None:
-            rh = rh_from_dew(temp, dew)
-        out.append({"at": at, "outC": round(temp, 2), "outRh": round(min(100.0, max(1.0, rh)), 1),
-                    "outDewC": round(dew, 2)})
-    out.sort(key=lambda h: h["at"])
-    return out
-
-
-def smooth_offsets(previous: dict[str, Any] | None, room_c: float | None, dew_c: float | None,
-                   out_c: float | None, out_dew_c: float | None) -> dict[str, float]:
-    """Indoor-minus-outdoor offsets, exponentially smoothed across ticks.
-    Falls back to the previous (or default) pair when either side is missing."""
-    prev_t = DEFAULT_OFFSET_T_C
-    prev_dew = DEFAULT_OFFSET_DEW_C
-    if isinstance(previous, dict):
-        try:
-            prev_t = float(previous.get("offsetT", prev_t))
-            prev_dew = float(previous.get("offsetDew", prev_dew))
-        except (TypeError, ValueError):
-            pass
-    if room_c is not None and out_c is not None:
-        prev_t = (1 - OFFSET_ALPHA) * prev_t + OFFSET_ALPHA * (float(room_c) - float(out_c))
-    if dew_c is not None and out_dew_c is not None:
-        prev_dew = (1 - OFFSET_ALPHA) * prev_dew + OFFSET_ALPHA * (float(dew_c) - float(out_dew_c))
-    prev_t = min(OFFSET_T_RANGE[1], max(OFFSET_T_RANGE[0], prev_t))
-    prev_dew = min(OFFSET_DEW_RANGE[1], max(OFFSET_DEW_RANGE[0], prev_dew))
-    return {"offsetT": round(prev_t, 2), "offsetDew": round(prev_dew, 2)}
-
-
-def project(hours: list[dict[str, Any]], now: datetime, lookahead_h: float, water_c: float,
-            target_c: float, offsets: dict[str, float], gate_c: float,
-            reference_vpd_kpa: float = REFERENCE_VPD_KPA,
-            bands: dict[str, Any] | None = None,
-            offsets_by_hour: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Each forecast hour, indoors: room = outdoor + offsetT, dew = outdoor dew
-    + offsetDew — the learned slot for that hour of day when it has enough
-    samples, else the global smoothed pair — then the same evaluate() the live
-    reading gets. Returns None when there is nothing inside the window."""
-    if not hours:
-        return None
-    start = now - timedelta(hours=1)
-    end = now + timedelta(hours=float(lookahead_h))
-    off_t = float(offsets.get("offsetT", DEFAULT_OFFSET_T_C))
-    off_dew = float(offsets.get("offsetDew", DEFAULT_OFFSET_DEW_C))
-    tz = now.tzinfo
-    rows: list[dict[str, Any]] = []
-    learned_rows = 0
-    for h in hours:
-        at = h["at"]
-        if at < start or at > end:
-            continue
-        local_hour = (at.astimezone(tz) if tz else at).hour
-        slot_t, slot_dew, learned = offsets_for_hour(offsets_by_hour, local_hour, offsets)
-        learned_rows += 1 if learned else 0
-        room = float(h["outC"]) + (slot_t if learned else off_t)
-        dew = min(float(h["outDewC"]) + (slot_dew if learned else off_dew), room - 0.1)   # air cannot be past saturation
-        rh = rh_from_dew(room, dew)
-        r = evaluate(water_c, room, rh, reference_vpd_kpa, bands)
-        needed = fan_needed(room, None, target_c, gate_c)
-        affected = needed and r["band"] in WARN_BANDS
-        unrescuable = affected and room >= target_c + UNRESCUABLE_OVER_TARGET_C and r["index"] < UNRESCUABLE_INDEX
-        rows.append({
-            "at": at.isoformat(), "outC": h["outC"], "outDewC": h["outDewC"],
-            "roomC": round(room, 1), "rh": round(rh), "dewC": round(dew, 1),
-            "index": r["index"], "band": r["band"], "fanNeeded": needed,
-            "affected": affected, "unrescuable": unrescuable, "learned": learned,
-        })
-    if not rows:
-        return None
-    needed_rows = [r for r in rows if r["fanNeeded"]]
-    affected_rows = [r for r in rows if r["affected"]]
-    worst = min(needed_rows, key=lambda r: r["index"]) if needed_rows else None
-    if any(r["unrescuable"] for r in rows):
-        kind = "chiller"
-    elif affected_rows:
-        kind = "humid-heat"
-    elif needed_rows:
-        kind = "dry-heat"
-    else:
-        kind = "quiet"
-    # Night-purge window: a contiguous run around the coolest hour, growing
-    # toward the cooler neighbour while it stays within PURGE_BAND_C of the
-    # minimum, capped at PURGE_MAX_HOURS. (Taking every hour within the band
-    # made a flat forecast's window span the whole day.)
-    coolest_i = min(range(len(rows)), key=lambda i: rows[i]["outC"])
-    coolest = rows[coolest_i]
-    limit = float(coolest["outC"]) + PURGE_BAND_C
-    lo = hi = coolest_i
-    while hi - lo + 1 < PURGE_MAX_HOURS:
-        can_l = lo - 1 >= 0 and float(rows[lo - 1]["outC"]) <= limit
-        can_r = hi + 1 < len(rows) and float(rows[hi + 1]["outC"]) <= limit
-        if not can_l and not can_r:
-            break
-        if can_l and (not can_r or float(rows[lo - 1]["outC"]) <= float(rows[hi + 1]["outC"])):
-            lo -= 1
-        else:
-            hi += 1
-    purge = [r["at"] for r in rows[lo:hi + 1]]
-    return {
-        "hours": rows,
-        "worst": {"at": worst["at"], "index": worst["index"], "band": worst["band"]} if worst else None,
-        "firstAffectedAt": affected_rows[0]["at"] if affected_rows else None,
-        "lastAffectedAt": affected_rows[-1]["at"] if affected_rows else None,
-        "affectedHours": len(affected_rows),
-        "neededHours": len(needed_rows),
-        "dayKind": kind,
-        "dayKindLabel": DAY_KIND_COPY[kind],
-        "purgeWindow": {"from": purge[0], "to": purge[-1], "outC": coolest["outC"]} if purge else None,
-        "offsets": {"offsetT": round(off_t, 2), "offsetDew": round(off_dew, 2)},
-        "learnedHours": learned_rows,
-    }
 
 
 def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
@@ -532,11 +360,6 @@ def vent_advice(room_c: float | None, dew_c: float | None, out_c: float | None,
             "freecoolReason": freecool_reason}
 
 
-def _hhmm(iso: str | None) -> str:
-    dt = _parse_when(iso)
-    return dt.astimezone().strftime("%H:%M") if dt else "?"
-
-
 def dehumidifier_plan(live: dict[str, Any] | None, live_needed: bool, projection: dict[str, Any] | None,
                       now: datetime, lead_h: float, target_c: float,
                       vent_active: bool = False, losing_over_c: float = 0.0, max_rh: float = 0.0,
@@ -546,15 +369,11 @@ def dehumidifier_plan(live: dict[str, Any] | None, live_needed: bool, projection
     ``latched`` is the kind this returned last tick, and only relaxes the
     stop side of the gate it names (losing / ceiling).
 
-    kinds, in priority order: now (fans already down), unrescuable (chiller
-    day — its heat would land in the peak), losing (fans on, tank still over
-    target by ``losing_over_c``, band under good — needs a real probe),
-    ahead (inside the lead window of a projected hit), ceiling (room RH over
-    ``max_rh`` — a house rule, not gated on cooling), scheduled (a hit is
-    coming, not yet time), none. vented overrides every running kind: the
-    room is being vented with drier outdoor air, and drying air you blow out
-    of the window is waste."""
-    plan = _dehumidifier_plan_raw(live, live_needed, projection, now, lead_h, target_c,
+    Decisions use current fan performance, measured tank temperature and
+    humidity. Legacy projection/lead arguments are ignored. Venting overrides
+    a running plan so we do not dehumidify air being exchanged outdoors.
+    """
+    plan = _dehumidifier_plan_raw(live, live_needed, None, now, 0, target_c,
                                   losing_over_c, max_rh, water_known, latched)
     if vent_active and plan["shouldRun"]:
         return {"shouldRun": False, "kind": "vented", "startAt": plan.get("startAt"), "until": plan.get("until"),
@@ -608,106 +427,37 @@ def _dehumidifier_plan_raw(live: dict[str, Any] | None, live_needed: bool, proje
         if room >= target_c + UNRESCUABLE_OVER_TARGET_C and float(live.get("index", 0)) < UNRESCUABLE_INDEX:
             return {"shouldRun": False, "kind": "unrescuable", "startAt": None, "until": None,
                     "reason": (f"room {room:.1f} °C at {live.get('rh', 0):.0f} % — a dehumidifier cannot "
-                               "rescue this afternoon; this is a chiller day")}
+                               "restore cooling safely under these current conditions")}
         pct = round(float(live.get("index", 0)) * 100)
-        until = projection.get("lastAffectedAt") if projection else None
-        return {"shouldRun": True, "kind": "now", "startAt": now.isoformat(), "until": until,
+        return {"shouldRun": True, "kind": "now", "startAt": now.isoformat(), "until": None,
                 "reason": f"the fans are down to {pct} % right now"}
     losing = _losing(live, live_needed, target_c, losing_over_c, water_known, latched == "losing")
     if losing:
         losing["startAt"] = now.isoformat()
-        losing["until"] = projection.get("lastAffectedAt") if projection else None
         return losing
-    scheduled = None
-    if projection and projection.get("firstAffectedAt"):
-        first = _parse_when(projection["firstAffectedAt"])
-        last = _parse_when(projection.get("lastAffectedAt")) or first
-        start = first - timedelta(hours=float(lead_h))
-        until = last + timedelta(hours=1)
-        worst = projection.get("worst") or {}
-        pct = round(float(worst.get("index", 0)) * 100)
-        if start <= now <= until:
-            return {"shouldRun": True, "kind": "ahead", "startAt": start.isoformat(), "until": until.isoformat(),
-                    "reason": f"fan headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}"}
-        if now < start:
-            scheduled = {"shouldRun": False, "kind": "scheduled", "startAt": start.isoformat(), "until": until.isoformat(),
-                         "reason": (f"start by {_hhmm(start.isoformat())} — headroom drops to {pct} % "
-                                    f"from {_hhmm(projection['firstAffectedAt'])}")}
-    # The house rule sits under a present cooling need and above a forecast
-    # that has not started: "scheduled" is a not-yet and must not hide a
-    # ceiling breach that wants the plug on now.
     ceiling = _ceiling(live, max_rh, latched == "ceiling")
     if ceiling:
         ceiling["startAt"] = now.isoformat()
         return ceiling
-    if scheduled:
-        return scheduled
-    hours = projection.get("hours") if projection else None
-    span = f"the next {len(hours)} h" if hours else "the forecast"
     return {"shouldRun": False, "kind": "none", "startAt": None, "until": None,
-            "reason": f"no hour in {span} where the fans are needed and losing"}
+            "reason": "current readings do not call for dehumidification"}
 
 
 # --------------------------------------------------------------------------- #
-# Layer 3 — the intake fan: when venting is worth running, and the night purge
+# Layer 3 — the intake fan: when venting is worth running now
 # --------------------------------------------------------------------------- #
 
-VENT_RUN_KINDS = ("cool", "freecool", "predry", "purge")
-
-
-def in_purge_window(projection: dict[str, Any] | None, now: datetime) -> bool:
-    window = projection.get("purgeWindow") if projection else None
-    if not window:
-        return False
-    start = _parse_when(window.get("from"))
-    end = _parse_when(window.get("to"))
-    if start is None or end is None:
-        return False
-    return start <= now <= end + timedelta(hours=1)
-
-
-def _purge_water_ok(water_c: float | None, target_c: float | None, floor_c: float) -> bool:
-    """The night purge's low-temperature stop. `cool` and `freecool` both end
-    when fan_needed releases; the purge fires precisely when fan_needed is
-    already false, so without this it runs its whole window (up to
-    PURGE_MAX_HOURS) and stops only if outdoor turns warmer than the room.
-
-    The floor is on the WATER, not the room. A reef room sits several degrees
-    under the tank's target every night — that is normal, and it is exactly when
-    a purge is worth running — so a room-versus-target test would block every
-    legitimate purge. What actually matters is the tank, and the honest scope of
-    this guard is small: the heater is the real defence, and this only bites if
-    it has failed or is undersized. Two lines for that is worth it. With no probe
-    bound, water falls back to the target and the test passes — no probe, no
-    block."""
-    if water_c is None or target_c is None:
-        return True
-    try:
-        floor = float(floor_c)
-    except (TypeError, ValueError):
-        floor = PURGE_WATER_FLOOR_C
-    return float(water_c) > float(target_c) - floor
+VENT_RUN_KINDS = ("cool", "freecool")
 
 
 def vent_decision(advice: dict[str, Any], fan_needed: bool, projection: dict[str, Any] | None,
                   now: datetime, night_purge: bool, window_open: bool | None,
                   water_c: float | None = None, target_c: float | None = None,
                   purge_floor_c: float = PURGE_WATER_FLOOR_C) -> dict[str, Any]:
-    """Should the intake fan be pulling outdoor air in right now, and why.
-
-    Two routes in, and only for a reason. Drying (``advice["advised"]`` — outdoor
-    is drier by dewGapC and no warmer): cool (the room needs cooling now) and
-    predry (a losing hour is coming — dry the room for free first). Sensible
-    cooling (``advice["freecool"]`` — outdoor is materially cooler and no wetter):
-    freecool (the room needs cooling now) and purge (the coolest outdoor hours
-    ahead of a day that needs the fans). Priority is cool → freecool → predry →
-    purge: a present need beats a future preparation, and a route that both dries
-    and cools beats one that only cools.
-
-    A bound window sensor reading closed blocks it (kind ``blocked``) — the panel
-    and the notification say "open the window" instead of running a fan against
-    glass. Winter takes care of itself: a cool room with nothing coming has no
-    reason."""
+    """Vent only for a current cooling need and suitable outdoor readings.
+    A closed window blocks the fan. Legacy projection/night-purge arguments
+    are ignored so old callers cannot restart forecast-driven ventilation.
+    """
     if not advice.get("known"):
         return {"shouldRun": False, "kind": "none", "wants": None, "reason": advice.get("reason", "no outdoor reading")}
     kind = None
@@ -720,19 +470,6 @@ def vent_decision(advice: dict[str, Any], fan_needed: bool, projection: dict[str
         kind = "freecool"
         reason = (f"the room is {advice['coolerBy']:.1f} °C hotter than outside "
                   f"({advice['outdoorC']:.1f} °C) and no wetter — free cooling")
-    elif advice.get("advised") and projection and projection.get("firstAffectedAt"):
-        worst = projection.get("worst") or {}
-        pct = round(float(worst.get("index", 0)) * 100)
-        kind = "predry"
-        reason = (f"pre-drying the room with outdoor air (dew point {advice['outdoorDewC']:.1f} °C) — "
-                  f"headroom drops to {pct} % from {_hhmm(projection['firstAffectedAt'])}")
-    elif (night_purge and advice.get("freecool") and projection
-            and projection.get("dayKind") != "quiet" and in_purge_window(projection, now)
-            and _purge_water_ok(water_c, target_c, purge_floor_c)):
-        window = projection.get("purgeWindow") or {}
-        kind = "purge"
-        reason = (f"night purge — the coolest outdoor air ({advice['outdoorC']:.1f} °C) until "
-                  f"{_hhmm(window.get('to'))}, ahead of a {projection.get('dayKind')} day")
     if kind is None:
         # Prefer the free-cooling refusal when there was one: "cooler but wetter"
         # explains a declined obvious opportunity, where the dew-gap line alone
@@ -748,77 +485,3 @@ def vent_decision(advice: dict[str, Any], fan_needed: bool, projection: dict[str
         return {"shouldRun": False, "kind": "blocked", "wants": kind,
                 "reason": f"{reason} — but the window is closed"}
     return {"shouldRun": True, "kind": kind, "wants": kind, "reason": reason}
-
-
-# --------------------------------------------------------------------------- #
-# Learned per-hour offsets — indoor-minus-outdoor by hour of day, built from
-# OpenReef's own five-minute readings and persisted across restarts. The
-# forecast projection uses the slot for each hour once it has enough samples;
-# the global smoothed pair stays the fallback for hours not yet learned.
-# --------------------------------------------------------------------------- #
-
-LEARN_MIN_SAMPLES = 6          # half an hour of ticks before a slot is trusted
-LEARN_MAX_SAMPLES = 84         # capped-count running mean ≈ a 7-day memory at 12 ticks/hour
-
-
-def learn_slot(table: dict[str, Any] | None, hour: int, delta_t: float, delta_dew: float) -> dict[str, Any]:
-    """Fold one reading into hour ``hour`` (0–23). Running mean while the count
-    grows; once capped, an EMA with weight 1/LEARN_MAX_SAMPLES — recent days
-    outweigh old ones without ever forgetting a whole season at once."""
-    table = dict(table) if isinstance(table, dict) else {}
-    key = str(int(hour) % 24)
-    slot = table.get(key) if isinstance(table.get(key), dict) else {}
-    try:
-        n = int(slot.get("n", 0))
-        t = float(slot.get("t", 0.0))
-        dew = float(slot.get("dew", 0.0))
-    except (TypeError, ValueError):
-        n, t, dew = 0, 0.0, 0.0
-    dt_ = min(OFFSET_T_RANGE[1], max(OFFSET_T_RANGE[0], float(delta_t)))
-    dd = min(OFFSET_DEW_RANGE[1], max(OFFSET_DEW_RANGE[0], float(delta_dew)))
-    n_eff = min(n, LEARN_MAX_SAMPLES - 1)
-    t = (t * n_eff + dt_) / (n_eff + 1)
-    dew = (dew * n_eff + dd) / (n_eff + 1)
-    # Four decimals: the capped EMA moves by 1/84 of the difference per tick, so
-    # two-decimal storage would stall it a quarter of a degree off.
-    table[key] = {"n": min(n + 1, LEARN_MAX_SAMPLES), "t": round(t, 4), "dew": round(dew, 4)}
-    return table
-
-
-def offsets_for_hour(table: dict[str, Any] | None, hour: int,
-                     fallback: dict[str, float]) -> tuple[float, float, bool]:
-    """(offsetT, offsetDew, learned) for an hour of day."""
-    slot = table.get(str(int(hour) % 24)) if isinstance(table, dict) else None
-    if isinstance(slot, dict):
-        try:
-            if int(slot.get("n", 0)) >= LEARN_MIN_SAMPLES:
-                return float(slot["t"]), float(slot["dew"]), True
-        except (TypeError, ValueError, KeyError):
-            pass
-    return (float(fallback.get("offsetT", DEFAULT_OFFSET_T_C)),
-            float(fallback.get("offsetDew", DEFAULT_OFFSET_DEW_C)), False)
-
-
-def learning_summary(table: dict[str, Any] | None) -> dict[str, Any]:
-    """What the panel says about the ledger: how many hours are trusted, how
-    much data sits behind it, and the per-hour rows for the strip."""
-    rows = []
-    learned = 0
-    samples = 0
-    for h in range(24):
-        slot = table.get(str(h)) if isinstance(table, dict) else None
-        n = 0
-        t = dew = None
-        if isinstance(slot, dict):
-            try:
-                n = int(slot.get("n", 0))
-                t = float(slot.get("t"))
-                dew = float(slot.get("dew"))
-            except (TypeError, ValueError):
-                n, t, dew = 0, None, None
-        ok = n >= LEARN_MIN_SAMPLES
-        learned += 1 if ok else 0
-        samples += n
-        rows.append({"h": h, "n": n, "t": t, "dew": dew, "learned": ok})
-    return {"hoursLearned": learned, "samples": samples,
-            "days": round(samples / (12.0 * 24.0), 1), "byHour": rows}
