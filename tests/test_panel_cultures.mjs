@@ -451,7 +451,7 @@ test("the tile carries the risk line, the sign taps and the egg-ratio check; the
     const html = panel._culturesTab();
     assert(html.includes('data-culture-risk="act"') && html.includes("⚠ two harvests missed"), "the risk line is missing");
     assert(html.includes("→ harvest"), "harvest debt must turn the feed advice into harvest first");
-    assert(html.includes("restart due · a crash sign"), "the restart chip must say why it came forward");
+    assert(html.includes("restart or large water change due · a warning sign"), "the care chip must give both options and say why it came forward");
     ["foam", "milky", "smell", "surface"].forEach((sg) => assert(html.includes(`data-action="cultures-sign" data-id="c1" data-sign="${sg}"`), `${sg} tap missing`));
     assert(html.includes('data-cultures-egg="c1"'), "the egg-ratio input is missing");
     assert(html.includes("Rotifers A: two harvests missed"), "the Due-now card must carry the act reason");
@@ -1935,6 +1935,45 @@ test("water-care previews update in place and use the restart's own phyto quanti
   panel._culturesCareDrafts["c1-restart"].ml = "";
   panel._culturesUpdateWaterCarePreview("c1", "restart");
   assert(button.disabled && line.textContent.includes("Enter the actual refill amount"), "blank quantity replaces the recipe with a useful prompt");
+});
+
+test("rotifer care shows both options and the exact warning-clear threshold", async () => {
+  const jar = { ...waterCareJar(), largeWaterChange: { pct: 50, minMl: 2250 },
+    due: ["restart"], risk: { level: "act", reason: "foam on the surface since the last restart or large water change" },
+    state: { ...jarSummary().state, restart: { ...clock(true, 0), reason: "sign" } } };
+  const panel = await culturesPanel({}, summaryFixture([jar]));
+  const html = panel._culturesTab();
+  assert(html.includes("restart or large water change due · a warning sign"), "both care options appear on the warning");
+  assert(html.includes("Review a restart or large water change"), "next action offers both paths");
+  assert(html.includes("50% (2250 ml of 4.5 L)"), "the actual working volume determines the threshold");
+  assert(html.includes("Sift or siphon out detritus while retaining the rotifers"), "the cleanup step is explicit");
+  assert(html.includes("Smaller changes do not add together") && html.includes("not confirmed recovery"), "the resolution policy is explained");
+  for (const ml of [2249, 2250, 4500]) {
+    const preview = panel._culturesWaterCareDraft(jar, "water-change", { ml });
+    assert(preview.valid, "small changes are still recordable");
+    assert(preview.line.includes(ml < 2250 ? "warning stays active" : "Clears the earlier care warning"), `threshold feedback for ${ml} ml`);
+  }
+  const line = {}, button = {};
+  panel.shadowRoot = { querySelector: (sel) => sel.includes("care-preview") ? line : sel.includes("care-complete") ? button : null };
+  panel._culturesCareDrafts = { "c1-water-change": { ml: "2249" } };
+  panel._culturesUpdateWaterCarePreview("c1", "water-change");
+  assert(line.textContent.includes("warning stays active") && !button.disabled, "typing gives immediate threshold feedback");
+  panel._culturesCareDrafts["c1-water-change"].ml = "2250";
+  panel._culturesUpdateWaterCarePreview("c1", "water-change");
+  assert(line.textContent.includes("Clears the earlier care warning"), "crossing the boundary updates the feedback");
+  assert(!panel._culturesWaterCareDraft(jar, "restart").line.includes("care warning"), "restart keeps its own recipe");
+});
+
+test("care cycle resets independently of culture age and heat still takes priority", async () => {
+  const jar = { ...waterCareJar(), due: [], state: { ...jarSummary().state, ageDays: 20, daysSinceRestart: 20, daysSinceCare: 0, percent: 0 } };
+  const panel = await culturesPanel({}, summaryFixture([jar]));
+  const html = panel._culturesTab();
+  assert(html.includes("<strong>producing</strong> · day 20") && html.includes("day 0 / 14"), "culture age and care cycle remain distinct");
+  assert(!html.includes("restart or large water change due"), "resolved care has no due chip");
+  jar.due = ["restart"];
+  jar.temp = { act: true, status: "critical", tempC: 34 };
+  jar.risk = { level: "act", reason: "room 34 °C — check culture temperature" };
+  assert(panel._cultureNextTitle(jar) === "Check this culture before harvesting", "heat warnings still take priority");
 });
 
 runTests();

@@ -1268,6 +1268,7 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "eggRatio": _awc_num(item.get("eggRatio"), 0, 0, 100) if item.get("eggRatio") is not None else None,
                 "fed": bool(item.get("fed", item.get("event") == "feed")),
                 **({"plainWater": True} if item.get("plainWater") is True else {}),
+                **({"clearsSigns": True} if item.get("clearsSigns") is True else {}),
                 "tankMl": _awc_num(item.get("tankMl"), 0, 0, 20000) if item.get("tankMl") is not None else None,
                 # Where THIS harvest went (0.7.161): bottle, tank or soak — or
                 # a phyto split's first destination (drip, vessel). Blank on
@@ -1364,6 +1365,7 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 "lastFeedSkippedAt": _awc_str(raw_state.get("lastFeedSkippedAt"), 40),
                 "lastHarvestAt": _awc_str(raw_state.get("lastHarvestAt"), 40),
                 "lastWaterChangeAt": _awc_str(raw_state.get("lastWaterChangeAt"), 40),
+                "lastLargeWaterChangeAt": _awc_str(raw_state.get("lastLargeWaterChangeAt"), 40),
                 "lastTint": tint if tint in cultures_engine.tints_for(species) else "",
                 "crashedAt": _awc_str(raw_state.get("crashedAt"), 40),
                 "seededFrom": _awc_str(raw_state.get("seededFrom"), 24),
@@ -18697,6 +18699,7 @@ def _cultures_seed_jar(config: dict[str, Any], jar: dict[str, Any], now: datetim
     state.update({
         "startedAt": now.isoformat(), "lastRestartAt": now.isoformat(),
         "lastFedAt": now.isoformat(), "lastHarvestAt": "", "lastWaterChangeAt": "",
+        "lastLargeWaterChangeAt": "",
         "lastTint": cultures_engine.phyto_seed_tint(species), "crashedAt": "",
         "seededFrom": "bottle" if from_bottle else seeded_from,
         "lastSignAt": "", "lastSign": "",
@@ -18797,10 +18800,14 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             phyto_payload["densityAdvice"] = feed_advice
         else:
             phyto_payload = _cultures_animal_phyto_payload(config, cultures, jid, jar, st, mix_ppt, now)
-            feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"], st["harvest"],
+            feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"], st.get("waterExchange", st["harvest"]),
                                                       cad["harvestIntervalDays"] * 24.0, jar["species"])
             if st["restart"].get("reason") in ("sign", "slow") or st["waterChange"].get("reason") == "sign":
                 feed_advice = {"action": "check", "reason": "warning signs recorded — check activity, aeration and water quality before feeding or harvesting"}
+                if preset["kind"] == "rotifer":
+                    care = cultures_engine.large_water_change_guide(jar)
+                    feed_advice["reason"] += (f". Restart in a clean vessel or change at least {care['pct']:g}% "
+                                              f"({care['minMl']} ml), remove detritus and recheck; log any signs that remain")
         product = products.get(jar["feed"]["productId"]) if jar["feed"]["productId"] else None
         feed_pause = _cultures_feed_pause_reason(config, jar, now) if not phyto else ""
         if feed_pause:
@@ -18869,6 +18876,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             "arrival": cultures_engine.acclimation_plan(jar["starterPpt"], jar["salinityPpt"], jar["starterMl"]),
             "waterChangeGuide": cultures_engine.refill_guide(
                 jar["volumeL"], cad["waterChangePct"], jar["salinityPpt"], mix_ppt),
+            "largeWaterChange": cultures_engine.large_water_change_guide(jar),
             # The ROTIFER fridge bottle (the cultures block's own); a phyto
             # vessel's bottle is a shelf product — ``homeBottle`` above.
             "hasBottle": awc_engine._f(preset["bottleShelfDays"]) > 0 and not phyto,
@@ -20257,10 +20265,15 @@ async def websocket_cultures_water_change(
         connection.send_error(msg["id"], "invalid_volume" if "totalMl" not in guide else "salinity_unavailable", guide["reason"])
         return
     jar["state"]["lastWaterChangeAt"] = now.isoformat()
-    if cultures_engine.cadence_for(jar["species"], jar.get("cadence"))["restartIntervalDays"] <= 0:
-        jar["state"]["lastSignAt"] = ""      # the pods' sign is answered by the change
+    care = cultures_engine.large_water_change_guide(jar)
+    large_change = bool(care and guide["totalMl"] >= care["minMl"])
+    if large_change:
+        jar["state"]["lastLargeWaterChangeAt"] = now.isoformat()
+    clears_signs = large_change or cultures_engine.species_kind(jar["species"]) == "copepod"
+    if clears_signs:
+        jar["state"]["lastSignAt"] = ""
         jar["state"]["lastSign"] = ""
-    _cultures_history(jar, "water_change", now, ml=guide["totalMl"])
+    _cultures_history(jar, "water_change", now, ml=guide["totalMl"], clearsSigns=clears_signs)
     _cultures_log_completion(config, jar_id, "water_change", now,
                              f"Logged automatically — {guide['totalMl']} ml changed on the Cultures tab")
     _append_activity(config, f"{jar['name']}: {guide['totalMl']} ml water change", "control")
@@ -20714,7 +20727,7 @@ def _cultures_push_plan(summary: dict[str, Any]) -> list[dict[str, Any]]:
         actions.append({"action": f"OPENREEF_CULTURE_LATER:{jid}", "title": "Later"})
         advice = (jar.get("feedAdvice") or {}).get("reason") or ""
         restart_reason = (st.get("restart") or {}).get("reason")
-        why = ("a crash sign since the last restart" if restart_reason == "sign"
+        why = ("a warning sign since the last restart or large water change" if restart_reason == "sign"
                else "the water is clearing slower and slower" if restart_reason == "slow"
                else advice)
         risk = jar.get("risk") or {}
@@ -20722,7 +20735,7 @@ def _cultures_push_plan(summary: dict[str, Any]) -> list[dict[str, Any]]:
             why = risk.get("reason") or why
         plan.append({
             "jarId": jid,
-            "title": f"OpenReef: {name} — {' + '.join(chore_word.get(d, d) for d in due)}?",
+            "title": f"OpenReef: {name} — {' + '.join('restart or large water change' if d == 'restart' and jar.get('kind') == 'rotifer' else chore_word.get(d, d) for d in due)}?",
             "message": (why[:1].upper() + why[1:]) if why else "Look at the water, then tap.",
             "actions": actions[:3],
             "tag": f"openreef_culture_{jid}",

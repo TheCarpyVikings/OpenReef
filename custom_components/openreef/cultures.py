@@ -51,9 +51,11 @@ HARVEST_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "soak")
 # bottle, straight into the tank, the drip's jar, a second vessel (B), or —
 # Stage C — a rotifer cone as its feed (a DRAW, see PHYTO_DRAW_MAX_PCT).
 SPLIT_DESTINATIONS: tuple[str, ...] = ("bottle", "tank", "drip", "vessel", "cone")
-# Crash signs the keeper can tap (doc §8.5): each one is a restart (rotifers)
+# Warning signs the keeper can tap: each one is a restart or large water change (rotifers)
 # or a water change (pods) due NOW, whatever the calendar says.
 SIGNS: tuple[str, ...] = ("foam", "milky", "smell", "surface")
+# Reminder-resolution policy, not a measured recovery or survival threshold.
+ROTIFER_LARGE_WATER_CHANGE_PCT = 50.0
 # A phyto vessel's signs (§5.3): each brings the fresh vessel forward and
 # blocks the split until a tint tap says green or dark again.
 PHYTO_SIGNS: tuple[str, ...] = ("yellow", "brown", "cloudy", "clumping", "foam", "smell", "settling")
@@ -162,7 +164,8 @@ SPECIES: tuple[dict[str, Any], ...] = (
              "activity when clear, and check before adding food when still green. Before a harvest: air off, settle, bleed "
              "the tip to waste, then 25 % a day through the 50 µm net — the water you take out IS "
              "the water change; refill with matched water. Sieve the whole cone into a clean one "
-             "every fortnight as a preventive routine; investigate milkiness, persistent foam or smell. "
+             "every fortnight as a preventive routine, or carry out a large water change and remove detritus; "
+             "investigate milkiness, persistent foam or smell and recheck after care. "
              "First harvest is conditional on density and activity, not age alone. Check water quality "
              "and replace evaporation with RODI. Feed dose depends on the product and population."},
     {"id": "tigriopus", "name": "Tigriopus copepods", "kind": "copepod",
@@ -380,6 +383,13 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     out["daysSinceRestart"] = round(since_restart, 1)
     if species["kind"] == "phyto":
         return _phyto_state(jar, state, species, cad, started, restart_anchor, now, out)
+    # A substantial water change answers the care reminder without claiming a
+    # clean vessel, a new culture, feeding, or a harvested crop.
+    care_anchor = restart_anchor
+    large_change = _parse_iso(state.get("lastLargeWaterChangeAt")) if species["kind"] == "rotifer" else None
+    if large_change is not None and max(started, restart_anchor) <= large_change <= now:
+        care_anchor = large_change
+    out["daysSinceCare"] = round(max(0.0, (now - care_anchor).total_seconds() / 86400.0), 1)
     establishing = age_days < _f(species["firstHarvestDays"])
     out["status"] = "establishing" if establishing else "producing"
 
@@ -404,24 +414,26 @@ def culture_state(jar: dict[str, Any], now: datetime) -> dict[str, Any]:
     else:
         out["harvest"] = _due(started.isoformat(), None,
                               timedelta(days=_f(species["firstHarvestDays"])), now)
+    out["waterExchange"] = out["harvest"]
+    if care_anchor > restart_anchor and (last_harvest is None or care_anchor > last_harvest):
+        out["waterExchange"] = _due(care_anchor.isoformat(), None,
+                                    timedelta(days=cad["harvestIntervalDays"]), now)
     if cad["restartIntervalDays"] > 0:
-        out["restart"] = _due(restart_anchor.isoformat(), None,
+        out["restart"] = _due(care_anchor.isoformat(), None,
                               timedelta(days=cad["restartIntervalDays"]), now)
         out["restart"]["reason"] = "cap" if out["restart"]["due"] else None
-        out["percent"] = round(min(100.0, 100.0 * since_restart / cad["restartIntervalDays"]))
+        out["percent"] = round(min(100.0, 100.0 * (now - care_anchor).total_seconds() / 86400.0 / cad["restartIntervalDays"]))
     if cad["waterChangeIntervalDays"] > 0:
         out["waterChange"] = _due(state.get("lastWaterChangeAt"), state.get("startedAt"),
                                   timedelta(days=cad["waterChangeIntervalDays"]), now)
-    # Restart on a SIGN, not a date (doc §8.5): a crash-sign tap since the last
-    # restart, or the water clearing much slower than it used to two feeds
-    # running, brings the restart forward. A species without a restart (pods)
-    # turns the sign into a water change instead.
+    # A sign or repeated slow clearing since the last care brings care
+    # forward. Small changes do not dismiss it or accumulate towards it.
     sign_at = _parse_iso(state.get("lastSignAt"))
-    signed = sign_at is not None and restart_anchor <= sign_at <= now
+    signed = sign_at is not None and care_anchor <= sign_at <= now
     wc_anchor = _parse_iso(state.get("lastWaterChangeAt")) or started
     slow = False
     samples = clearing_samples([row for at, row in _chronological(jar.get("history"))
-                                if restart_anchor <= at <= now])
+                                if care_anchor <= at <= now])
     if len(samples) >= 4:
         baseline = sum(samples[2:5]) / len(samples[2:5])
         slow = baseline > 0 and samples[0] > SLOW_FACTOR * baseline and samples[1] > SLOW_FACTOR * baseline
@@ -1419,6 +1431,15 @@ def water_care_guide(jar: dict[str, Any], mix_ppt: Any, ml: Any = None, *,
     return refill_guide(amount / 1000, 100, jar.get("salinityPpt"), mix_ppt, phyto_ml, phyto_ppt)
 
 
+def large_water_change_guide(jar: dict[str, Any]) -> dict[str, Any]:
+    """The single measured change that resolves a rotifer care reminder."""
+    if species_kind(jar.get("species")) != "rotifer":
+        return {}
+    capacity = round(_f(jar.get("volumeL")) * 1000)
+    return {"pct": ROTIFER_LARGE_WATER_CHANGE_PCT,
+            "minMl": math.ceil(capacity * ROTIFER_LARGE_WATER_CHANGE_PCT / 100)}
+
+
 def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0,
                  phyto_ml: Any = None, phyto_ppt: Any = None) -> dict[str, Any]:
     """The measured jug: how much water a fill / harvest / water change moves,
@@ -1825,6 +1846,8 @@ def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
         if not sign_done and str(row.get("sign") or "") in ALL_SIGNS:
             out["lastSign"], out["lastSignAt"] = str(row["sign"]), stamp
             sign_done = True
+        if event == "water_change" and row.get("clearsSigns") is True:
+            sign_done = True
         if event in ("seeded", "restart"):
             if not tint_done and event == "restart" and row.get("plainWater"):
                 out["lastTint"] = ""
@@ -2101,9 +2124,10 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
     elif t_status == "hot":
         watch.append(f"room {temp.get('tempC')} °C — over the warning line")
     harvest = st.get("harvest") or {}
+    exchange = st.get("waterExchange") or harvest
     interval_h = _f(cad.get("harvestIntervalDays")) * 24.0
     if harvest.get("due") and st.get("status") == "producing":
-        if species_preset(jar.get("species"))["kind"] == "rotifer" and interval_h > 0 and _f(harvest.get("hoursOverdue")) >= interval_h:
+        if species_preset(jar.get("species"))["kind"] == "rotifer" and interval_h > 0 and _f(exchange.get("hoursOverdue")) >= interval_h:
             act.append("two harvests missed — check water quality and harvest/refill if the population is healthy")
         else:
             watch.append("harvest overdue")
@@ -2112,7 +2136,7 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
     water = st.get("waterChange") or {}
     if sign and (restart.get("reason") == "sign" or water.get("reason") == "sign"):
         act.append(f"{SIGN_WORDS.get(sign, sign)} since the last "
-                   f"{'restart' if restart.get('reason') == 'sign' else 'water change'}")
+                   f"{'restart or large water change' if restart.get('reason') == 'sign' else 'water change'}")
     if st.get("clearingSlow"):
         watch.append("clearing is slowing — check activity, temperature and feeding amounts")
     for at, row in _chronological(jar.get("history")):

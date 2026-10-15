@@ -14647,8 +14647,12 @@ const rigSteps = [
     const rodiMl = ml - phytoMl - mixMl;
     const parts = [`${mixMl} ml of ${mixPpt} ppt water`, `${rodiMl} ml RODI`];
     if (source) parts.unshift(`${phytoMl} ml of ${phytoPpt} ppt phyto from ${source.name}`);
+    const care = !restart && jar.kind === "rotifer" ? jar.largeWaterChange : null;
+    const careLine = care?.minMl > 0 ? (ml >= care.minMl
+      ? " Clears the earlier care warning and starts the next care interval. Recheck and log any signs that remain."
+      : ` Below ${care.minMl} ml (${care.pct}%) — the earlier care warning stays active.`) : "";
     return { valid: true, ml, mixMl, rodiMl, phytoMl, sourceId: source?.id || "",
-      line: `${parts.join(" + ")} → ${ml} ml at ${target} ppt.` };
+      line: `${parts.join(" + ")} → ${ml} ml at ${target} ppt.${careLine}` };
   }
 
   _culturesWaterCareForm(jar, kind, extra = "") {
@@ -14658,6 +14662,7 @@ const rigSteps = [
     const preview = this._culturesWaterCareDraft(jar, kind, draft);
     const max = Math.round(Number(jar.volumeL) * 1000);
     const amount = draft.ml ?? (restart ? max : jar.waterChangeGuide?.totalMl || "");
+    const care = !restart && jar.kind === "rotifer" ? jar.largeWaterChange : null;
     const attrs = (field) => `data-cultures-care-jar="${esc(jar.id)}" data-cultures-care-kind="${kind}" data-cultures-care-field="${field}"`;
     const sources = jar.phytoSources || [];
     const phyto = restart && sources.length ? `<label class="culture-field">Refill phyto<select ${attrs("sourceId")}>
@@ -14666,13 +14671,15 @@ const rigSteps = [
     const feed = restart && jar.feed?.productId ? `<label class="culture-tick"><input type="checkbox" ${attrs("fed")} ${draft.fed ? "checked" : ""} ${draft.sourceId ? "disabled" : ""}> Also log ${esc(jar.feed.doseMl)} ml of ${esc(jar.feed.productName || "linked food")} fed after refilling</label>` : "";
     return `<div class="culture-notes"><small>${restart
       ? `1. Prepare a clean vessel. Set the final refill volume; this becomes the culture's working volume (currently ${esc(jar.volumeL)} L).`
-      : "1. Enter the volume being replaced. If you have already drained it, enter the amount you removed."}</small></div>
+      : "1. Enter the volume being replaced. If you have already drained it, enter the amount you removed."}</small>
+      ${care?.minMl > 0 ? `<small>One water change of at least ${esc(care.pct)}% (${esc(care.minMl)} ml of ${esc(jar.volumeL)} L) resolves the earlier care warning. Smaller changes do not add together. This records care, not confirmed recovery.</small>` : ""}</div>
       <div class="culture-form"><label class="culture-field">${restart ? "Final refill" : "Water replaced"}<span class="unit"><input type="number" min="${restart ? 200 : 1}" max="${max}" step="1" value="${esc(amount)}" ${attrs("ml")}><small class="muted">ml</small></span></label>${phyto}</div>
       <div class="feeding-next"><p class="eyebrow">2. Prepare the fresh water</p><strong data-cultures-care-preview="${esc(key)}" aria-live="polite">${esc(preview.line)}</strong>
       <small class="muted">Mix separately and check the salinity and temperature before refilling.</small></div>
       <div class="culture-notes"><small>${restart
       ? `3. Sieve the culture through the ${esc(jar.sieveUm)} µm mesh, discard the old water and transfer the culture into the clean vessel with the prepared refill.`
-      : "3. Replace the removed water with the prepared refill. Log completion once the water change is finished."}</small>
+      : `3. ${jar.kind === "rotifer" ? "Sift or siphon out detritus while retaining the rotifers. " : ""}Replace the removed water with the prepared refill. Log completion once the water change is finished.`}</small>
+      ${care?.minMl > 0 ? "<small>Recheck activity, aeration and water quality afterward. Log any signs that persist or return; consider a clean-vessel restart if the culture continues to deteriorate. Culture age and the actual restart record stay intact.</small>" : ""}
       ${restart ? "<small>The restart resets the restart and water-exchange clocks. Record feeding below if you also fed.</small>" : "<small>This records the water replaced and the mixed-water stock used. Feeding and harvest records stay separate.</small>"}</div>
       <div class="culture-form">${feed}${extra}</div>
       <div class="button-row"><button class="primary compact-button" data-action="cultures-care-complete" data-id="${esc(jar.id)}" data-kind="${kind}" ${!preview.valid || this._culturesCareBusy?.[key] ? "disabled" : ""}>${this._culturesCareBusy?.[key] ? "Saving…" : restart ? "Log completed restart" : "Log completed water change"}</button></div>`;
@@ -14964,8 +14971,8 @@ const rigSteps = [
       const restartId = `culture_${jid}_restart`;
       if (restartDays > 0) {
         tasks[restartId] = {
-          ...(tasks[restartId] || { label: `Restart ${name} in a clean jar`, enabled: true, notify: true,
-            notes: "Sieve the whole culture through the mesh into a clean jar with fresh water; wash the old jar. This reduces waste and contamination; no calendar guarantees a crash-free culture." }),
+          ...(tasks[restartId] || { label: preset.kind === "rotifer" ? `${name}: restart or large water change` : `Restart ${name} in a clean jar`, enabled: true, notify: true,
+            notes: "Review the culture's care guide: prepare a clean vessel, or for rotifers record a large water change and remove detritus. Recheck activity and water quality afterward." }),
           cadenceDays: restartDays, criticalAfterDays: restartDays + 7,
           cadenceHours: restartDays * 24, criticalAfterHours: (restartDays + 7) * 24,
         };
@@ -15379,7 +15386,7 @@ const rigSteps = [
     const glyph = status === "crashed" ? "☠" : jar?.kind === "copepod" ? "🦐" : status === "none" ? "" : "•";
     const caption = status === "none" ? "empty"
       : status === "crashed" ? "crashed"
-        : jar?.state?.percent != null ? `day ${Math.round(jar.state.daysSinceRestart || 0)} / ${Math.round(jar.state.cadence?.restartIntervalDays || jar.cadence?.restartIntervalDays || 14)}`
+        : jar?.state?.percent != null ? `day ${Math.round(jar.state.daysSinceCare ?? jar.state.daysSinceRestart ?? 0)} / ${Math.round(jar.state.cadence?.restartIntervalDays || jar.cadence?.restartIntervalDays || 14)}`
           : `day ${Math.round(jar.state?.ageDays || 0)}`;
     return `
       <svg viewBox="0 0 104 124" style="width:96px;flex:0 0 auto;" role="img" aria-label="${this._escape(jar?.speciesName || "Culture")} — ${this._escape(status)}">
@@ -15408,6 +15415,7 @@ const rigSteps = [
 
   _culturesChoreWord(jar, key) {
     if (jar && jar.kind === "phyto") return ({ look: "look", harvest: "split", restart: "fresh vessel", refresh: "refresh the backup" })[key] || key;
+    if (jar?.kind === "rotifer" && key === "restart") return "restart or large water change";
     return ({ feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look" })[key] || key;
   }
 
@@ -15444,6 +15452,7 @@ const rigSteps = [
 
   _cultureNextTitle(jar) {
     if (!["producing", "establishing"].includes(jar.state?.status)) return "Prepare a clean vessel to seed";
+    if (jar.kind === "rotifer" && (jar.due || []).includes("restart") && !jar.temp?.act) return "Review a restart or large water change";
     if (jar.risk?.level === "act" || jar.state?.harvestBlocked) return "Check this culture before harvesting";
     if (jar.kind === "phyto") {
       if (jar.densityAdvice?.action === "split_now") return "Ready to split — dark colour confirmed";
@@ -15464,7 +15473,6 @@ const rigSteps = [
     const sum = st.summary || {};
     const jars = Array.isArray(sum.jars) ? sum.jars : [];
     const bottle = sum.bottle || {};
-    const chore = { feed: "feed", harvest: "harvest", restart: "restart", waterChange: "water change", look: "look", refresh: "refresh the backup" };
     const anyPhyto = jars.some((j) => j.kind === "phyto");
     const onlyPhyto = jars.length > 0 && jars.every((j) => j.kind === "phyto");
 
@@ -15576,10 +15584,10 @@ const rigSteps = [
       const status = s.status || "none";
       const running = status === "producing" || status === "establishing";
       const due = j.due || [];
-      const reasonWord = { sign: "a crash sign", slow: "clearing slowly", cap: "" };
+      const reasonWord = { sign: "a warning sign", slow: "clearing slowly", cap: "" };
       const chips = due.map((d) => {
         const reason = d === "restart" ? reasonWord[s.restart?.reason] : d === "waterChange" && s.waterChange?.reason === "sign" ? "a crash sign" : "";
-        return `<span class="pill warning" style="font-size:11px;">${this._escape(chore[d])} due${reason ? ` · ${this._escape(reason)}` : ""}</span>`;
+        return `<span class="pill warning" style="font-size:11px;">${this._escape(this._culturesChoreWord(j, d))} due${reason ? ` · ${this._escape(reason)}` : ""}</span>`;
       }).join(" ");
       const statusLine = ({
         producing: `<strong>producing</strong> · day ${this._escape(String(Math.round(s.ageDays || 0)))}`,
@@ -15623,7 +15631,7 @@ const rigSteps = [
         ? `<small style="color:${j.risk.level === "act" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-risk="${this._escape(j.risk.level)}">${j.risk.level === "act" ? "⚠ " : "👀 "}${this._escape(j.risk.reason || "")}</small>`
         : "";
       const signs = running ? `
-        <div class="culture-field" title="A crash sign brings the ${j.kind === "copepod" ? "water change" : "restart"} forward — tap the one you see"><span>Signs</span>
+        <div class="culture-field" title="A warning sign brings the ${j.kind === "copepod" ? "water change" : "restart or large water change"} forward — tap the one you see"><span>Signs</span>
           <div class="culture-signs">${(sum.signs || []).map((sg) => `<button class="secondary compact-button"${j.lastSign === sg.id ? ' style="border-color:var(--error-color,#e5484d);"' : ""} data-action="cultures-sign" data-id="${this._escape(j.id)}" data-sign="${this._escape(sg.id)}">${this._escape(sg.id)}</button>`).join("")}</div>
         </div>
         <label class="culture-field" title="Optional measured percentage of females carrying eggs. Follow the trend alongside activity and water quality; a percentage alone cannot predict a crash.">Egg ratio<span class="unit"><input type="number" min="0" max="100" step="1" placeholder="%" data-cultures-egg="${this._escape(j.id)}"><small class="muted">observe the trend</small></span></label>` : "";
