@@ -188,7 +188,7 @@ test("the Cultures tab renders the rack: a producing jar with its taps, an empty
     assert(html.includes('data-action="cultures-harvested"'), "the daily tap is missing");
     assert(html.includes('data-action="cultures-fed"'), "the Fed tap is missing");
     assert(html.includes('data-action="cultures-restart"'), "a rotifer jar must offer Restarted");
-    assert(!html.includes('data-action="cultures-water-change"'), "rotifers have no water-change chore");
+    assert(html.includes('data-action="cultures-water-change"'), "rotifers can open a measured water-change guide");
     assert(html.includes('data-action="cultures-split"'), "a dense producing jar must offer Split into B");
     assert(html.includes('data-cultures-tint="c1"'), "the tint select is missing");
     assert(html.includes("harvest 625 ml"), "the measured jug is missing");
@@ -591,7 +591,7 @@ test("never zero: the Jars card says backup or not, and the restart seeds B by d
     const calls = [];
     panel._callWS = async (msg) => { calls.push(msg); return {}; };
     panel._culturesLoadSummary = async () => {};
-    panel._culturesRestart("c1");
+    await panel._culturesCompleteWaterCare("c1", "restart");
     await new Promise((r) => setTimeout(r, 0));
     assert(calls[0].type === "openreef/cultures_restart" && calls[0].split === false, "no DOM tick in the harness → split false, never a silent split");
     // Two running rotifer jars: backed up, stagger advice on the tile, no default split tick.
@@ -740,7 +740,7 @@ test("the demo view stages a rack, refuses every tap, and hands the real rack ba
     await panel._culturesCall({ type: "openreef/cultures_log", jar_id: "a", fed: true });
     assert(calls.length === 0 && panel._cultures.message.startsWith("Demo view — the buttons are for show"), "a tap in the demo is for show");
     panel._culturesLog("a", true, true);
-    panel._culturesRestart("a");
+    await panel._culturesCompleteWaterCare("a", "restart");
     await panel._culturesLoadSummary(true);
     assert(calls.length === 0, "no refresh, no WS in the demo");
     panel._culturesSeedReminders();
@@ -1511,7 +1511,8 @@ test("Stage C animal tile: the phyto refill row, the three-way jug line, the sti
     panel._culturesLog(cid, true, true);
     assert(sent.type === "openreef/cultures_log" && sent.harvested === true && sent.phyto_from === "vessel:n1" && !("phyto_ml" in sent), `the harvest carries the source: ${JSON.stringify(sent)}`);
     box.value = "200";
-    panel._culturesRestart(cid);
+    panel._culturesCareDrafts = { [`${cid}-restart`]: { sourceId: "vessel:n1", phytoMl: "200" } };
+    await panel._culturesCompleteWaterCare(cid, "restart");
     assert(sent.type === "openreef/cultures_restart" && sent.phyto_from === "vessel:n1" && sent.phyto_ml === 200, `the restart carries it too: ${JSON.stringify(sent)}`);
     picked.value = "";
     panel._culturesLog(cid, true, true);
@@ -1850,6 +1851,90 @@ test("feeding details preserve explicit open and closed choices through refresh"
   panel._feedingOpen("culture-n1-recipe");
   assert(details[0].open && focused, "Review opens and focuses the existing recipe without rebuilding its inputs");
   assert(panel._feedingDetails("culture-n1-recipe", "Recipe", "recipe").includes(' open'), "Review also persists its open state");
+});
+
+test("phyto readiness stays quiet while growing and asks for a fresh colour before splitting", async () => {
+  for (const fresh of [true, false]) {
+    const jar = phytoJar({ tint: "green", due: [], densityAdvice: { action: fresh ? "wait" : "check", reason: "Still green — readiness not yet confirmed" },
+      state: { ...phytoJar().state, colourObservation: { fresh }, harvest: clock(false, 0, false) } });
+    const panel = await culturesPanel({}, phytoSummary(jar));
+    const html = panel._culturesTab();
+    assert(!html.includes("split due"), "the card never recommends a calendar split for green phyto");
+    assert(html.includes(fresh ? "Not ready to split" : "Colour check needed"), "readiness explains what is missing");
+    assert(html.includes(fresh ? "Colour checked today — check again tomorrow" : "Check the colour today"), "a logged green colour counts as today's check");
+    assert(html.includes('data-feeding-details="culture-n1-recipe">'), "the split recipe stays closed while growing");
+    assert(/data-action="cultures-split-phyto"[^>]*disabled/.test(html), "the split button waits for dark");
+  }
+  const panel = await culturesPanel({}, phytoSummary());
+  assert(panel._culturesTab().includes("Ready to split — dark colour confirmed"), "dark unlocks the next action");
+});
+
+function waterCareJar() {
+  return jarSummary({ volumeL: 4.5, salinityPpt: 27, mixPpt: 35,
+    restartGuide: { totalMl: 4500, mixMl: 3471, rodiMl: 1029, targetPpt: 27, mixPpt: 35 },
+    waterChangeGuide: { totalMl: 0, targetPpt: 27, mixPpt: 35 } });
+}
+
+test("water change and restart have independent guided recipes and explicit completion", async () => {
+  const panel = await culturesPanel({}, summaryFixture([waterCareJar()]));
+  let calls = 0;
+  panel._callWS = async () => { calls++; };
+  const html = panel._culturesTab();
+  assert(html.includes('data-feeding-details="culture-c1-water-change"') && html.includes('data-feeding-details="culture-c1-restart"'), "both guides are accessible to rotifers");
+  assert(html.includes(">Restart</button>") && html.includes(">Water change</button>"), "entry buttons describe starting a guided action");
+  assert(!html.includes(">Restarted</button>") && !html.includes(">Water changed</button>"), "entry buttons do not claim completion");
+  assert(html.includes("3471 ml of 35 ppt water + 1029 ml RODI → 4500 ml at 27 ppt."), "restart shows the full 4.5 L recipe");
+  assert(html.includes("Log completed water change") && html.includes("Log completed restart"), "completion is a separate deliberate tap");
+  assert(html.includes("If you have already drained it"), "an in-progress water change can start at its measured refill");
+  assert(calls === 0, "viewing the guides does not write anything");
+  const preview = panel._culturesWaterCareDraft(waterCareJar(), "water-change", { ml: "1000" });
+  assert(preview.valid && preview.mixMl === 771 && preview.rodiMl === 229, "one litre of 27 ppt water uses the measured mix");
+  for (const ml of ["", "0", "-1", "4501", "1.5", "NaN", "Infinity"]) {
+    assert(!panel._culturesWaterCareDraft(waterCareJar(), "water-change", { ml }).valid, `bad amount ${ml} is refused`);
+  }
+  const impossible = waterCareJar();
+  impossible.mixPpt = 20;
+  assert(!panel._culturesWaterCareDraft(impossible, "restart").valid, "dilution cannot raise 20 ppt to 27 ppt");
+});
+
+test("guided care sends the edited amount, keeps harvest phyto separate, and blocks double submission", async () => {
+  const panel = await culturesPanel({}, summaryFixture([waterCareJar()]));
+  panel.shadowRoot = { querySelector: () => null };
+  panel._culturesCareDrafts = { "c1-water-change": { ml: "1250" }, "c1-restart": { ml: "3500" } };
+  const calls = [];
+  let finish;
+  panel._culturesCall = async (msg) => { calls.push(msg); return new Promise((resolve) => { finish = resolve; }); };
+  const first = panel._culturesCompleteWaterCare("c1", "water-change");
+  await panel._culturesCompleteWaterCare("c1", "water-change");
+  assert(calls.length === 1 && calls[0].ml === 1250 && calls[0].type === "openreef/cultures_water_change", "one completion sends the actual changed amount");
+  finish(true);
+  await first;
+  assert(!panel._culturesCareDrafts["c1-water-change"], "successful completion clears the old amount");
+  assert(panel._culturesCareDrafts["c1-restart"].ml === "3500", "the restart draft stays independent");
+  panel._culturesCall = async (msg) => { calls.push(msg); return false; };
+  await panel._culturesCompleteWaterCare("c1", "restart");
+  assert(calls[1].type === "openreef/cultures_restart" && calls[1].ml === 3500 && calls[1].fed === false && !calls[1].phyto_from, "plain water never inherits harvest feed selections");
+  assert(panel._culturesCareDrafts["c1-restart"].ml === "3500", "a failed save retains the measured refill");
+  panel._culturesCareDrafts["c1-restart"].ml = "5000";
+  await panel._culturesCompleteWaterCare("c1", "restart");
+  assert(calls.length === 2, "invalid quantities cannot send a completion");
+});
+
+test("water-care previews update in place and use the restart's own phyto quantities", async () => {
+  const jar = waterCareJar();
+  jar.phytoSources = [{ id: "vessel:p", name: "Nanno", ppt: 35, ml: 1000, ready: true }];
+  jar.coneDoseMl = 300;
+  const panel = await culturesPanel({}, summaryFixture([jar]));
+  const line = {}, button = {}, feed = {};
+  panel.shadowRoot = { querySelector: (sel) => sel.includes("care-preview") ? line : sel.includes("care-complete") ? button : feed };
+  panel._render = () => { throw new Error("typing must not rebuild the form"); };
+  panel._culturesCareDrafts = { "c1-restart": { ml: "3500", sourceId: "vessel:p", phytoMl: "300" } };
+  panel._culturesUpdateWaterCarePreview("c1", "restart");
+  assert(line.textContent === "300 ml of 35 ppt phyto from Nanno + 2400 ml of 35 ppt water + 800 ml RODI → 3500 ml at 27 ppt.", line.textContent);
+  assert(!button.disabled && feed.disabled, "phyto is included once and replaces the separate feed checkbox");
+  panel._culturesCareDrafts["c1-restart"].ml = "";
+  panel._culturesUpdateWaterCarePreview("c1", "restart");
+  assert(button.disabled && line.textContent.includes("Enter the actual refill amount"), "blank quantity replaces the recipe with a useful prompt");
 });
 
 runTests();

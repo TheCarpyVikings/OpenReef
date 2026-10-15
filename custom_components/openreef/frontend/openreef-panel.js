@@ -2098,10 +2098,10 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-harvested-only") this._culturesLog(id, false, true);
       if (action === "cultures-harvest-tank") this._culturesLog(id, false, true, "tank");
       if (action === "cultures-harvest-bottle") this._culturesLog(id, false, true, "bottle");
-      if (action === "cultures-restart") this._culturesRestart(id);
+      if (action === "cultures-restart") this._feedingOpen(`culture-${id}-restart`);
+      if (action === "cultures-care-complete") this._culturesCompleteWaterCare(id, target.dataset.kind);
       if (action === "cultures-share-card") this._culturesShareCard(id);
-      if (action === "cultures-water-change") this._culturesCall({ type: "openreef/cultures_water_change", jar_id: id },
-        "Water change logged.");
+      if (action === "cultures-water-change") this._feedingOpen(`culture-${id}-water-change`);
       if (action === "cultures-split") this._culturesCall({ type: "openreef/cultures_split", jar_id: id },
         "Split — jar B is seeded and out of phase. Save nothing; it is already on the rack.");
       if (action === "cultures-crash") this._culturesCall({ type: "openreef/cultures_crash", jar_id: id },
@@ -2224,6 +2224,15 @@ class OpenReefPanel extends HTMLElement {
       const id = target.dataset.id;
       const field = target.dataset.field;
       const value = target.type === "checkbox" ? target.checked : target.type === "number" ? Number(target.value) : target.value;
+
+      if (target.dataset.culturesCareField) {
+        const jarId = target.dataset.culturesCareJar, kind = target.dataset.culturesCareKind;
+        this._culturesCareDrafts ||= {};
+        const draft = this._culturesCareDrafts[`${jarId}-${kind}`] ||= {};
+        draft[target.dataset.culturesCareField] = target.type === "checkbox" ? target.checked : target.value;
+        this._culturesUpdateWaterCarePreview(jarId, kind);
+        return;
+      }
 
       const cultureRecipeId = target.dataset.culturesSplitMl || target.dataset.culturesWorkingAfter
         || target.dataset.culturesF2 || target.dataset.culturesPhytoFrom || target.dataset.culturesPhytoMl
@@ -14067,20 +14076,23 @@ const rigSteps = [
     if (this._cultures.demo) {
       this._cultures.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
       this._render();
-      return;
+      return false;
     }
     // The feed strip reads the bottle's rows too — a Fed from a strip card
     // must fill its mark on the next paint.
     if (msg && (msg.type === "openreef/cultures_bottle" || (msg.type === "openreef/cultures_log" && msg.harvested)
       || msg.type === "openreef/cultures_split" || msg.type === "openreef/cultures_fresh_vessel" || msg.type === "openreef/cultures_seed")) setTimeout(() => this._npsLoadSummary?.(true), 0);
+    let succeeded = false;
     try {
       await this._callWS(msg);
       this._cultures.message = okMessage || "";
       this._cultures.error = "";
+      succeeded = true;
     } catch (err) {
       this._cultures.error = (err && err.message) || "That didn't work — try again.";
     }
     this._culturesLoadSummary(true);
+    return succeeded;
   }
 
   // The daily tap: the tint the keeper saw (a select beside the jar) plus
@@ -14132,7 +14144,7 @@ const rigSteps = [
       return;
     }
     if (phyto) {
-      this._culturesCall(msg, "Colour logged — nothing else moved. Dark means split. Wrong colour? Undo it from the journal for a day.");
+      this._culturesCall(msg, "Colour logged — readiness follows your observation. Check again tomorrow while it grows. Wrong colour? Undo it from the journal for a day.");
       return;
     }
     this._culturesCall(msg, harvested
@@ -14599,24 +14611,122 @@ const rigSteps = [
       `Backup refreshed from ${from} — the old culture to waste, a fresh litre on the sill; ${from} topped up like for like.`);
   }
 
-  // Restart — and, by default when the rack has no backup, seed B from the
-  // same crop (never zero, doc §8.8 #4): the net is already in hand.
-  _culturesRestart(jarId) {
-    const box = this.shadowRoot?.querySelector(`[data-cultures-split="${jarId}"]`);
-    const split = !!(box && box.checked);
-    const msg = { type: "openreef/cultures_restart", jar_id: jarId, split };
-    // Phyto in the new water (Stage C): the tile's source and ml, if picked.
-    const phytoFrom = this.shadowRoot?.querySelector(`[data-cultures-phyto-from="${jarId}"]`);
-    if (phytoFrom && phytoFrom.value) {
-      msg.phyto_from = String(phytoFrom.value);
-      const phytoBox = this.shadowRoot?.querySelector(`[data-cultures-phyto-ml="${jarId}"]`);
-      const phytoMl = phytoBox && phytoBox.value !== "" ? Number(phytoBox.value) : NaN;
-      if (Number.isFinite(phytoMl) && phytoMl > 0) msg.phyto_ml = phytoMl;
+  _culturesWaterCareDraft(jar, kind, draft = {}) {
+    const restart = kind === "restart";
+    const guide = (restart ? jar.restartGuide : jar.waterChangeGuide) || {};
+    const max = Math.round(Number(jar.volumeL) * 1000);
+    const minimum = restart ? 200 : 1;
+    const ml = Number(draft.ml ?? (restart ? max : guide.totalMl || ""));
+    const target = Number(guide.targetPpt ?? jar.salinityPpt);
+    const mixPpt = Number(jar.mixPpt ?? guide.mixPpt ?? jar.restartGuide?.mixPpt ?? 35);
+    const invalid = (line) => ({ valid: false, line, ml });
+    if (!Number.isInteger(ml) || ml < minimum || ml > max)
+      return invalid(`Enter the actual ${restart ? "refill" : "water-change"} amount, from ${minimum} to ${max} ml.`);
+    if (![target, mixPpt].every(Number.isFinite) || target < 0 || mixPpt <= 0)
+      return invalid("Check the culture and mixing-station salinities in settings.");
+    let phytoMl = 0, phytoPpt = 0, source;
+    if (restart && draft.sourceId) {
+      source = (jar.phytoSources || []).find((item) => item.id === draft.sourceId);
+      if (!source?.ready) return invalid("Selected phyto is unavailable — choose a ready source or plain water.");
+      phytoMl = Number(draft.phytoMl === "" || draft.phytoMl == null ? jar.coneDoseMl : draft.phytoMl);
+      phytoPpt = Number(source.ppt);
+      if (!Number.isInteger(phytoMl) || phytoMl <= 0 || !Number.isFinite(phytoPpt) || phytoPpt < 0)
+        return invalid("Enter a positive whole-ml phyto amount and check its salinity.");
+      if (phytoMl > Number(source.ml)) return invalid(`Only ${source.ml} ml is available from ${source.name}.`);
+      if (phytoMl > ml) return invalid(`The phyto amount exceeds the ${ml} ml refill.`);
+    } else if (restart && draft.fed && jar.feed?.pauseReason) {
+      return invalid(jar.feed.pauseReason);
     }
-    this._culturesCall(msg,
-      split ? "Restart logged — check the rack for B and its restart dates."
-        : msg.phyto_from ? "Restart logged — the new water carried the phyto; the fortnight clock rewinds."
-          : "Restart logged — the fortnight clock rewinds.");
+    const salt = ml * target - phytoMl * phytoPpt;
+    const rawMix = salt / mixPpt;
+    if (salt < 0 || rawMix > ml - phytoMl)
+      return invalid(`Cannot make this ${target} ppt refill with ${mixPpt} ppt mix${source ? " and the selected phyto amount" : ""}. Adjust the source or amount.`);
+    // Match Python's whole-ml, ties-to-even rounding in refill_guide.
+    const floor = Math.floor(rawMix);
+    const mixMl = rawMix - floor === 0.5 ? floor + floor % 2 : Math.round(rawMix);
+    const rodiMl = ml - phytoMl - mixMl;
+    const parts = [`${mixMl} ml of ${mixPpt} ppt water`, `${rodiMl} ml RODI`];
+    if (source) parts.unshift(`${phytoMl} ml of ${phytoPpt} ppt phyto from ${source.name}`);
+    return { valid: true, ml, mixMl, rodiMl, phytoMl, sourceId: source?.id || "",
+      line: `${parts.join(" + ")} → ${ml} ml at ${target} ppt.` };
+  }
+
+  _culturesWaterCareForm(jar, kind, extra = "") {
+    const esc = (value) => this._escape(String(value ?? ""));
+    const restart = kind === "restart", key = `${jar.id}-${kind}`;
+    const draft = this._culturesCareDrafts?.[key] || {};
+    const preview = this._culturesWaterCareDraft(jar, kind, draft);
+    const max = Math.round(Number(jar.volumeL) * 1000);
+    const amount = draft.ml ?? (restart ? max : jar.waterChangeGuide?.totalMl || "");
+    const attrs = (field) => `data-cultures-care-jar="${esc(jar.id)}" data-cultures-care-kind="${kind}" data-cultures-care-field="${field}"`;
+    const sources = jar.phytoSources || [];
+    const phyto = restart && sources.length ? `<label class="culture-field">Refill phyto<select ${attrs("sourceId")}>
+      <option value="">none — plain water</option>${sources.map((src) => `<option value="${esc(src.id)}" ${draft.sourceId === src.id ? "selected" : ""} ${src.ready ? "" : "disabled"}>${esc(src.name)}${src.ready ? "" : " (not ready)"}</option>`).join("")}</select></label>
+      <label class="culture-field">Phyto amount<span class="unit"><input type="number" min="1" step="1" placeholder="${esc(jar.coneDoseMl || "")}" value="${esc(draft.phytoMl ?? "")}" ${attrs("phytoMl")}><small class="muted">ml, included in total</small></span></label>` : "";
+    const feed = restart && jar.feed?.productId ? `<label class="culture-tick"><input type="checkbox" ${attrs("fed")} ${draft.fed ? "checked" : ""} ${draft.sourceId ? "disabled" : ""}> Also log ${esc(jar.feed.doseMl)} ml of ${esc(jar.feed.productName || "linked food")} fed after refilling</label>` : "";
+    return `<div class="culture-notes"><small>${restart
+      ? `1. Prepare a clean vessel. Set the final refill volume; this becomes the culture's working volume (currently ${esc(jar.volumeL)} L).`
+      : "1. Enter the volume being replaced. If you have already drained it, enter the amount you removed."}</small></div>
+      <div class="culture-form"><label class="culture-field">${restart ? "Final refill" : "Water replaced"}<span class="unit"><input type="number" min="${restart ? 200 : 1}" max="${max}" step="1" value="${esc(amount)}" ${attrs("ml")}><small class="muted">ml</small></span></label>${phyto}</div>
+      <div class="feeding-next"><p class="eyebrow">2. Prepare the fresh water</p><strong data-cultures-care-preview="${esc(key)}" aria-live="polite">${esc(preview.line)}</strong>
+      <small class="muted">Mix separately and check the salinity and temperature before refilling.</small></div>
+      <div class="culture-notes"><small>${restart
+      ? `3. Sieve the culture through the ${esc(jar.sieveUm)} µm mesh, discard the old water and transfer the culture into the clean vessel with the prepared refill.`
+      : "3. Replace the removed water with the prepared refill. Log completion once the water change is finished."}</small>
+      ${restart ? "<small>The restart resets the restart and water-exchange clocks. Record feeding below if you also fed.</small>" : "<small>This records the water replaced and the mixed-water stock used. Feeding and harvest records stay separate.</small>"}</div>
+      <div class="culture-form">${feed}${extra}</div>
+      <div class="button-row"><button class="primary compact-button" data-action="cultures-care-complete" data-id="${esc(jar.id)}" data-kind="${kind}" ${!preview.valid || this._culturesCareBusy?.[key] ? "disabled" : ""}>${this._culturesCareBusy?.[key] ? "Saving…" : restart ? "Log completed restart" : "Log completed water change"}</button></div>`;
+  }
+
+  _culturesUpdateWaterCarePreview(jarId, kind) {
+    const jar = (this._cultures?.summary?.jars || []).find((item) => item.id === jarId);
+    if (!jar) return;
+    const key = `${jarId}-${kind}`, draft = this._culturesCareDrafts?.[key] || {};
+    const preview = this._culturesWaterCareDraft(jar, kind, draft);
+    const line = this.shadowRoot?.querySelector(`[data-cultures-care-preview="${key}"]`);
+    if (line) line.textContent = preview.line;
+    const button = this.shadowRoot?.querySelector(`[data-action="cultures-care-complete"][data-id="${jarId}"][data-kind="${kind}"]`);
+    if (button) button.disabled = !preview.valid || !!this._culturesCareBusy?.[key];
+    const feed = this.shadowRoot?.querySelector(`[data-cultures-care-jar="${jarId}"][data-cultures-care-kind="${kind}"][data-cultures-care-field="fed"]`);
+    if (feed) feed.disabled = !!draft.sourceId;
+  }
+
+  async _culturesCompleteWaterCare(jarId, kind) {
+    if (!["restart", "water-change"].includes(kind)) return;
+    const jar = (this._cultures?.summary?.jars || []).find((item) => item.id === jarId);
+    if (!jar || jar.kind === "phyto") return;
+    const key = `${jarId}-${kind}`, draft = this._culturesCareDrafts?.[key] || {};
+    if (this._culturesCareBusy?.[key]) return;
+    const preview = this._culturesWaterCareDraft(jar, kind, draft);
+    if (!preview.valid) {
+      this._cultures.error = preview.line;
+      this._render();
+      return;
+    }
+    const restart = kind === "restart";
+    const msg = { type: restart ? "openreef/cultures_restart" : "openreef/cultures_water_change", jar_id: jarId, ml: preview.ml };
+    if (restart) {
+      msg.fed = !preview.sourceId && !!draft.fed;
+      msg.split = !!this.shadowRoot?.querySelector(`[data-cultures-split="${jarId}"]`)?.checked;
+      if (preview.sourceId) Object.assign(msg, { phyto_from: preview.sourceId, phyto_ml: preview.phytoMl });
+    }
+    this._culturesCareBusy ||= {};
+    this._culturesCareBusy[key] = true;
+    this._culturesUpdateWaterCarePreview(jarId, kind);
+    try {
+      const saved = await this._culturesCall(msg, `${restart ? "Restart" : "Water change"} logged — ${preview.ml} ml refilled.${msg.split ? " Check the rack for the backup culture." : ""}`);
+      if (saved) {
+        if (this._culturesCareDrafts) delete this._culturesCareDrafts[key];
+        this._feedingDetailsOpen ||= {};
+        this._feedingDetailsOpen[`culture-${key}`] = false;
+        const details = this.shadowRoot?.querySelector(`[data-feeding-details="culture-${key}"]`);
+        if (details) details.open = false;
+      }
+    } finally {
+      delete this._culturesCareBusy[key];
+      this._culturesUpdateWaterCarePreview(jarId, kind);
+      this._render();
+    }
   }
 
   // The culture card (doc §8.8 #9): the jar as a thing with a history you
@@ -15336,8 +15446,9 @@ const rigSteps = [
     if (!["producing", "establishing"].includes(jar.state?.status)) return "Prepare a clean vessel to seed";
     if (jar.risk?.level === "act" || jar.state?.harvestBlocked) return "Check this culture before harvesting";
     if (jar.kind === "phyto") {
-      if (jar.densityAdvice?.action === "split_now") return "Review a split and refill";
+      if (jar.densityAdvice?.action === "split_now") return "Ready to split — dark colour confirmed";
       if ((jar.due || []).includes("refresh")) return "Review the backup refresh";
+      if (jar.state?.colourObservation?.fresh && jar.densityAdvice?.action === "wait") return "Colour checked today — check again tomorrow";
       return "Check the colour today";
     }
     if (jar.feed?.pauseReason) return "Check the feed supply";
@@ -15559,8 +15670,8 @@ const rigSteps = [
         running && !j.feed?.pauseReason ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
         running && due.includes("feed") ? `<button class="secondary compact-button" data-action="cultures-skip-feed" data-id="${this._escape(j.id)}" title="Looked, not feeding: logs the water and skips this feed — the reminder holds until the next slot, no phyto moves, and the clearing time stays honest">Skip feed</button>` : "",
         status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="${j.feed?.pauseReason ? "cultures-harvested-only" : "cultures-harvested"}" data-id="${this._escape(j.id)}" title="Logs today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}${j.feed?.pauseReason ? "; the linked food is unavailable" : " and a feed"}">${j.feed?.pauseReason ? "Harvested" : "Harvested + fed"}</button>` : "",
-        running && s.restart?.available ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Sieve the whole jar into a clean one with fresh water">Restarted</button>` : "",
-        running && (s.waterChange?.available || s.waterChangeOnDemand) ? `<button class="${due.includes("waterChange") ? "primary" : "secondary"} compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? `On a sign — drift, any ammonia, cloudy water: ${this._escape(String(j.waterChangeGuide?.totalMl || 0))} ml out, fresh in` : "The scheduled change"}">Water changed</button>` : "",
+        running ? `<button class="secondary compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Open the clean-vessel restart guide and refill calculator">Restart</button>` : "",
+        running ? `<button class="secondary compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? "On a sign — review the water-change amount and recipe" : "Choose the actual water-change amount and prepare the refill"}">Water change</button>` : "",
         status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a second culture; check the dates to stagger its restart">Split into B</button>` : "",
         running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${this._escape(j.id)}">Crashed</button>` : "",
         status !== "none" ? `<button class="secondary compact-button" data-action="cultures-share-card" data-id="${this._escape(j.id)}" title="A picture of this jar's story — species, age, generation, the restart ring, the last 14 days of water">Share card</button>` : "",
@@ -15570,8 +15681,9 @@ const rigSteps = [
       const withdrawalWarning = j.harvestGuide?.warning ? `<small style="color:var(--warning-color,#f5a524)">${this._escape(j.harvestGuide.warning)}</small>` : "";
       const everyday = ["cultures-looked", "cultures-fed", "cultures-skip-feed"];
       const harvestActions = ["cultures-harvested", "cultures-harvested-only"];
-      const careActions = ["cultures-restart", "cultures-water-change", "cultures-split", "cultures-crash"];
-      const otherActions = [...everyday, ...harvestActions, ...careActions];
+      const careActions = ["cultures-split", "cultures-crash"];
+      const waterActions = ["cultures-restart", "cultures-water-change"];
+      const otherActions = [...everyday, ...harvestActions, ...careActions, ...waterActions];
       return `
         <article class="culture-tile" data-culture="${this._escape(j.id)}">
           <div class="feeding-card-head">
@@ -15588,12 +15700,17 @@ const rigSteps = [
           <div class="feeding-alerts">${risk}${tempLine}${j.feed?.pauseReason ? `<small class="awc-hint">${this._escape(j.feed.pauseReason)}</small>` : ""}</div>
           ${tintSelect ? `<div class="culture-form">${tintSelect}</div>` : ""}
           ${this._feedingActions(buttons, everyday)}
+          ${this._feedingActions(buttons, waterActions)}
           ${status === "producing" ? `<div class="button-row">${this._feedingReview(`culture-${j.id}-recipe`, "Review harvest & refill")}</div>` : ""}
           ${!running ? `<div class="culture-notes">${fillLine}</div>${this._feedingActions(buttons, otherActions, true)}` : ""}
           ${running ? this._feedingDetails(`culture-${j.id}-recipe`, "Harvest & refill recipe",
             `<div class="culture-notes">${guide}${withdrawalWarning}</div><div class="culture-form">${harvestFields}${phytoRow}</div>${phytoLine}${this._feedingActions(buttons, harvestActions)}`, due.includes("harvest")) : ""}
-          ${running ? this._feedingDetails(`culture-${j.id}-care`, "Signs, water care & backup",
-            `<div class="culture-form">${signs}${splitTick}</div>${this._feedingActions(buttons, careActions)}`, due.includes("restart") || due.includes("waterChange")) : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-water-change`, "Water change",
+            this._culturesWaterCareForm(j, "water-change"), due.includes("waterChange")) : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-restart`, "Restart",
+            this._culturesWaterCareForm(j, "restart", splitTick), due.includes("restart")) : ""}
+          ${running ? this._feedingDetails(`culture-${j.id}-care`, "Signs & backup",
+            `<div class="culture-form">${signs}</div>${this._feedingActions(buttons, careActions)}`, due.includes("restart") || due.includes("waterChange")) : ""}
           ${running ? this._feedingDetails(`culture-${j.id}-history`, "Growth & culture history",
             `<div class="culture-notes">${learnedLines}${lineageLine}</div>${this._feedingActions(buttons, otherActions, true)}`) : ""}
         </article>`;
@@ -15824,9 +15941,13 @@ const rigSteps = [
     const s = j.state || {};
     const status = s.status || "none";
     const running = status === "producing" || status === "establishing";
-    const due = j.due || [];
+    const splitReady = j.tint === "dark" && j.densityAdvice?.action === "split_now"
+      && !s.harvestBlocked && s.colourObservation?.fresh !== false;
+    const due = (j.due || []).filter((key) => key !== "harvest" || splitReady);
     const reasonWord = { dark: "it reads dark", cycles: `${esc(s.cyclesSinceFresh ?? "")} splits since the last`, sign: "a sign", backup: `${esc(Math.round(s.ageDays || 0))} days on the sill` };
-    const chips = due.map((d) => {
+    const readiness = running && !splitReady
+      ? `<span class="pill" style="font-size:11px;">${s.harvestBlocked ? "Splitting on hold" : s.colourObservation?.fresh === false ? "Colour check needed" : "Not ready to split"}</span>` : "";
+    const chips = readiness + due.map((d) => {
       const reason = d === "harvest" ? reasonWord[s.harvest?.reason] : d === "restart" ? reasonWord[s.restart?.reason] : d === "refresh" ? reasonWord[s.refresh?.reason] : "";
       return `<span class="pill warning" style="font-size:11px;">${esc(this._culturesChoreWord(j, d))} due${reason ? ` · ${reason}` : ""}</span>`;
     }).join(" ");
@@ -15848,7 +15969,7 @@ const rigSteps = [
           </select></label>` : "";
     const secchiField = running ? `
         <label class="culture-field" title="Optional: the depth at which a mark on a white stick disappears in the culture. Nothing is inferred from it yet — the readings accrue for the printable stick (Stage C).">Secchi<span class="unit"><input type="number" min="0" max="60" step="0.5" placeholder="cm" data-cultures-secchi="${esc(j.id)}"><small class="muted">cm · optional</small></span></label>` : "";
-    const canSplit = running && !s.harvestBlocked;
+    const canSplit = running && splitReady;
     const drips = Array.isArray(j.drips) ? j.drips : [];
     const cones = Array.isArray(j.cones) ? j.cones : [];
     const refresh = j.refresh || {};
@@ -15858,7 +15979,7 @@ const rigSteps = [
           ? `<small class="muted">${extra}</small>`
           : `<input type="number" min="0" step="10" placeholder="ml" style="width:78px;" data-cultures-dest-${dest}-ml="${esc(j.id)}" value="${ml ? esc(ml) : ""}"><small class="muted">ml${extra}</small>`}</span></div>`;
     const doseMl = Number(hb.handDose?.ml) || 0;
-    const splitForm = canSplit ? `
+    const splitForm = running && !s.harvestBlocked ? `
         <label class="culture-field" title="What comes out — the split percentage of the working volume by default (${esc(Math.round(guide.removalPct || 0))} %). More than 70 % leaves a thin seed.">Out<span class="unit"><input type="number" min="0" step="10" data-cultures-split-ml="${esc(j.id)}" value="${esc(Math.round(guide.outMl || 0))}"><small class="muted">ml</small></span></label>
         ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
         ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
@@ -15946,7 +16067,7 @@ const rigSteps = [
       !running && j.reseedFromBottle ? `<button class="secondary compact-button" data-action="cultures-seed-bottle" data-id="${esc(j.id)}" title="The fridge bottle is under a week old — a legitimate starter">Seed from the fridge bottle</button>` : "",
       ...(!running ? (j.reseedFrom || []).map((from) => `<button class="secondary compact-button" data-action="cultures-seed" data-id="${esc(j.id)}" data-from="${esc(from)}">Seed from ${esc((jars.find((x) => x.id === from) || {}).name || from)}</button>`) : []),
       running ? `<button class="primary compact-button" data-action="cultures-looked" data-id="${esc(j.id)}" title="Logs the colour (and a Secchi reading if you typed one) — nothing else moves">Log observation</button>` : "",
-      running ? `<button class="${due.includes("harvest") && canSplit ? "primary" : "secondary"} compact-button" data-action="cultures-split-phyto" data-id="${esc(j.id)}" title="${canSplit ? "The harvest: out to the places ticked, fresh water and f/2 in, the colour back to pale" : "Blocked — off-colour or a sign on the record; a look that says green or dark unblocks it, a fresh vessel is the way out"}" ${canSplit ? "" : "disabled"}>Split</button>` : "",
+      running ? `<button class="${due.includes("harvest") && canSplit ? "primary" : "secondary"} compact-button" data-action="cultures-split-phyto" data-id="${esc(j.id)}" title="${canSplit ? "The harvest: out to the places ticked, fresh water and f/2 in, the colour back to pale" : "A recent dark observation with no unresolved warning signs is needed before splitting"}" ${canSplit ? "" : "disabled"}>Split</button>` : "",
       running ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-fresh-vessel" data-id="${esc(j.id)}" title="The same split, the seed into a sterilised container of new water + f/2 — every ${esc(s.restartCycles || 4)} splits, or on a sign${s.harvestBlocked ? "; an off-colour crop goes to waste, never the bottle" : ""}">Fresh vessel</button>` : "",
       running && refresh.isBackup && refresh.available ? `<button class="${due.includes("refresh") ? "primary" : "secondary"} compact-button" data-action="cultures-refresh-backup" data-id="${esc(j.id)}" title="A small split of ${esc(refresh.fromName)}: ${esc(refresh.starterMl || 250)} ml of its crop into this bottle with fresh water and f/2 — the old culture to waste">Refresh from ${esc(refresh.fromName)}</button>` : "",
       running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${esc(j.id)}">Crashed</button>` : "",

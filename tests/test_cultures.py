@@ -352,12 +352,14 @@ def test_ws_restart_rewinds_the_fortnight_not_the_age():
     assert entry.options[CONF_SETTINGS]["consumables"]["products"]["phyto"]["remainingMl"] == 295.0
 
 
-def test_ws_water_change_is_copepod_only():
+def test_ws_water_change_accepts_a_measured_rotifer_change_and_the_pod_default():
     entry = _entry(jars={"c1": _jar(started_ago_days=10), "c2": _jar(species="tigriopus", started_ago_days=10)})
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     run(integration.websocket_cultures_water_change(hass, conn, {"id": 1, "jar_id": "c1"}))
-    assert conn.errors[-1].code == "no_water_change"
+    assert conn.errors[-1].code == "invalid_volume", "rotifers need an explicitly measured volume"
+    run(integration.websocket_cultures_water_change(hass, conn, {"id": 3, "jar_id": "c1", "ml": 750}))
+    assert _cultures(entry)["jars"]["c1"]["history"][0]["ml"] == 750
     run(integration.websocket_cultures_water_change(hass, conn, {"id": 2, "jar_id": "c2"}))
     jar = _cultures(entry)["jars"]["c2"]
     assert jar["state"]["lastWaterChangeAt"]
@@ -1576,6 +1578,7 @@ def _phyto_jar(started_ago_days=None, now=None, **state):
     if started_ago_days is not None:
         jar["state"].update({"startedAt": _iso(base - timedelta(days=started_ago_days)),
                              "lastRestartAt": _iso(base - timedelta(days=started_ago_days)),
+                             "lastLookedAt": _iso(base - timedelta(hours=1)),
                              "lastTint": "pale", "workingL": 1.25, "cyclesSinceFresh": 0})
     jar["state"].update(state)
     return jar
@@ -1621,7 +1624,7 @@ def test_phyto_state_greens_then_reads_dark_and_the_split_clock_comes_forward():
     st = cultures.culture_state(jar, NOW)
     assert st["status"] == "establishing" and st["feed"]["available"] is False and st["waterChange"]["available"] is False
     assert st["look"]["available"] and st["look"]["due"], "a look a day"
-    assert st["harvest"]["available"] and not st["harvest"]["due"] and st["cycle"]["ofDays"] == 8 and st["cycle"]["day"] == 3.0
+    assert not st["harvest"]["available"] and not st["harvest"]["due"] and st["cycle"]["ofDays"] == 8 and st["cycle"]["day"] == 3.0
     assert st["workingL"] == 1.25 and st["cyclesSinceFresh"] == 0 and st["mode"] == "batch"
     assert st["nextChore"]["key"] == "look"
     # A DARK tap makes it producing and the split due — ready on a sign.
@@ -1633,7 +1636,7 @@ def test_phyto_state_greens_then_reads_dark_and_the_split_clock_comes_forward():
     # Held dark three days without a split: peak-held (a run that started
     # before the seed does not count — the seed is the floor).
     jar["history"] = [{"event": "tint", "at": _iso(NOW - timedelta(days=3, hours=1)), "tint": "dark"},
-                      {"event": "tint", "at": _iso(NOW - timedelta(days=1)), "tint": "dark"}]
+                      {"event": "tint", "at": _iso(NOW - timedelta(hours=1)), "tint": "dark"}]
     assert not cultures.culture_state(jar, NOW)["peakHeld"], "a tap before the seed is not this culture's"
     jar["state"]["startedAt"] = jar["state"]["lastRestartAt"] = _iso(NOW - timedelta(days=10))
     st = cultures.culture_state(jar, NOW)
@@ -1644,7 +1647,7 @@ def test_phyto_state_greens_then_reads_dark_and_the_split_clock_comes_forward():
     st = cultures.culture_state(jar, NOW)
     assert st["status"] == "producing" and st["cycle"]["day"] == 2.0 and st["cycle"]["percent"] == 25
     assert st["restart"]["due"] and st["restart"]["reason"] == "cycles" and st["percent"] == 100
-    assert not st["harvest"]["due"] and st["harvest"]["hoursUntil"] == 6 * 24
+    assert not st["harvest"]["due"] and st["harvestEstimate"]["hoursUntil"] == 6 * 24
     # A sign blocks the split until a later look says green or dark.
     jar["state"].update({"lastSignAt": _iso(NOW - timedelta(hours=5)), "lastSign": "yellow", "cyclesSinceFresh": 1})
     jar["history"] = [{"event": "sign", "at": _iso(NOW - timedelta(hours=5)), "sign": "yellow"}]

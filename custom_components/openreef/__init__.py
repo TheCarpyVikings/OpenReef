@@ -1267,6 +1267,7 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 **({"daylightH": round(_awc_num(item.get("daylightH"), 0, 0, 24), 1)} if item.get("daylightH") is not None else {}),
                 "eggRatio": _awc_num(item.get("eggRatio"), 0, 0, 100) if item.get("eggRatio") is not None else None,
                 "fed": bool(item.get("fed", item.get("event") == "feed")),
+                **({"plainWater": True} if item.get("plainWater") is True else {}),
                 "tankMl": _awc_num(item.get("tankMl"), 0, 0, 20000) if item.get("tankMl") is not None else None,
                 # Where THIS harvest went (0.7.161): bottle, tank or soak — or
                 # a phyto split's first destination (drip, vessel). Blank on
@@ -8838,6 +8839,16 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                             src_jar = src_jars.get(jid)
                             if not (isinstance(src_jar, dict) and isinstance(dst_jar, dict)):
                                 continue
+                            # A measured animal restart can change its working
+                            # volume. An older settings tab must not undo that.
+                            if cultures_engine.species_kind(src_jar.get("species")) != "phyto":
+                                dst_restart = _parse_datetime((dst_jar.get("state") or {}).get("lastRestartAt"))
+                                changed = any(row.get("event") == "restart" and row.get("workingMl") is not None
+                                              and (at := _parse_datetime(row.get("at"))) is not None
+                                              and (dst_restart is None or at > dst_restart)
+                                              for row in (src_jar.get("history") or []) if isinstance(row, dict))
+                                if changed:
+                                    dst_jar["volumeL"] = src_jar["volumeL"]
                             if isinstance(src_jar.get("state"), dict):
                                 dst_jar["state"] = deepcopy(src_jar["state"])
                             if isinstance(src_jar.get("history"), list):
@@ -18773,16 +18784,17 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
                     and str(jar["state"].get("lastTint") or "") in ("pale", "green"):
                 feed_advice = {**feed_advice, "reason": feed_advice["reason"]
                                + (f" · your stick says ~{secchi['daysToDark']:g} d" if secchi["daysToDark"] > 0 else " · your stick already reads dark")}
-            # Stage D: "split now" advice off the curve — the index at the dark
-            # band, or the days it says are left; the tap stays the record.
+            # Measurements can request a look; only a fresh dark colour tap
+            # can recommend a split.
             idx = learned.get("index") if isinstance(learned.get("index"), dict) else {}
             if idx.get("readsDark") and str(jar["state"].get("lastTint") or "") != "dark" and feed_advice.get("action") != "hold":
-                feed_advice = {**feed_advice, "action": "split_now",
-                               "reason": f"your index reads dark ({idx.get('lastOd'):g} ≥ {idx.get('darkOd'):g}) — look, then split"}
+                feed_advice = {**feed_advice, "action": "check",
+                               "reason": f"your index reads dark ({idx.get('lastOd'):g} ≥ {idx.get('darkOd'):g}) — check and log the colour before deciding"}
             elif idx.get("daysToDark") and feed_advice.get("action") in ("wait", "check"):
                 feed_advice = {**feed_advice, "reason": feed_advice["reason"] + f" · your index says ~{idx['daysToDark']:g} d"}
             phyto_payload = _cultures_phyto_payload(config, jid, jar, st, cad, preset, mix_ppt, tank_l, channels, now,
                                                     light=light, learned=learned)
+            phyto_payload["densityAdvice"] = feed_advice
         else:
             phyto_payload = _cultures_animal_phyto_payload(config, cultures, jid, jar, st, mix_ppt, now)
             feed_advice = cultures_engine.feed_advice(jar["state"]["lastTint"], st["feed"], st["harvest"],
@@ -20082,7 +20094,8 @@ async def websocket_cultures_undo(
 
 def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str,
                             source: str = "the Cultures tab", split: bool = False,
-                            phyto_ml: Any = None, phyto_from: str = "") -> tuple[str, str] | None:
+                            phyto_ml: Any = None, phyto_from: str = "", ml: Any = None,
+                            fed: bool = True) -> tuple[str, str] | None:
     """Sieve-and-restart: the whole jar through the mesh into a clean one with
     fresh water — the restart clock rewinds, the age does not, the sign that
     brought it forward is answered. Stage C: the new water may carry phyto
@@ -20098,50 +20111,61 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
     now = datetime.now(timezone.utc)
     if cultures_engine.culture_state(jar, now)["status"] in ("none", "crashed"):
         return "jar_idle", f"{jar['name']} is not running — seed it first"
+    guide = cultures_engine.water_care_guide(jar, _cultures_mix_ppt(config), ml, restart=True)
+    if guide.get("available") is False and ("totalMl" not in guide or not (awc_engine._f(phyto_ml) > 0 or phyto_from)):
+        return "invalid_volume" if "totalMl" not in guide else "salinity_unavailable", guide["reason"]
+    refill_ml = guide["totalMl"]
     phyto: dict[str, Any] | None = None
     if awc_engine._f(phyto_ml) > 0 or phyto_from:
         # A restart replaces the whole water, so the still-green rule does not
         # apply: the tint passed is blank on purpose.
         found = _cultures_phyto_source(config, cultures, jar, jar_id, phyto_from, phyto_ml,
-                                       awc_engine._f(jar["volumeL"]) * 1000.0, now, "")
+                                       refill_ml, now, "")
         if isinstance(found, tuple):
             return found
         phyto = found
-    guide = cultures_engine.refill_guide(jar["volumeL"], 100, jar["salinityPpt"], _cultures_mix_ppt(config),
-                                         phyto["ml"] if phyto else None, phyto["ppt"] if phyto else None)
+    guide = cultures_engine.water_care_guide(jar, _cultures_mix_ppt(config), refill_ml, restart=True,
+                                             phyto_ml=phyto["ml"] if phyto else None,
+                                             phyto_ppt=phyto["ppt"] if phyto else None)
     if guide.get("available") is False:
         return "salinity_unavailable", guide["reason"]
-    if phyto is None:
+    if phyto is None and fed:
         pause = _cultures_feed_pause_reason(config, jar, now)
         if pause:
             return "feed_unavailable", pause
     before = cultures_engine.culture_state(jar, now)
-    if split and not before["splitEligible"]:
+    if split and (before["status"] != "producing" or not before["splitEligible"]):
         split = False
         _append_activity(config, f"{jar['name']}: B was not seeded — use a mature culture without warning signs", "warning")
     jar["state"]["lastRestartAt"] = now.isoformat()
-    jar["state"]["lastFedAt"] = now.isoformat()
+    did_feed = fed or phyto is not None
+    if did_feed:
+        jar["state"]["lastFedAt"] = now.isoformat()
     # A complete water replacement also satisfies the water-exchange purpose
     # of the next harvest; it must not leave an old harvest debt behind.
     jar["state"]["lastHarvestAt"] = now.isoformat()
     jar["state"]["lastWaterChangeAt"] = now.isoformat()
-    jar["state"]["lastTint"] = "green"
+    jar["state"]["lastTint"] = "green" if did_feed else ""
+    jar["volumeL"] = refill_ml / 1000.0
     jar["state"]["lastSignAt"] = ""
     jar["state"]["lastSign"] = ""
-    if phyto is None:
+    if phyto is None and fed:
         _cultures_feed_debit(config, jar, jar_id)
-    elif phyto["kind"] == "bottle":
+    elif phyto is not None and phyto["kind"] == "bottle":
         _consumable_debit(phyto["product"], phyto["ml"], "dose", at=now, to="jar", jar_id=jar_id)
     _cultures_history(jar, "restart", now, ml=round(jar["volumeL"] * 1000),
                       tempC=_cultures_temp_c(hass, config, cultures),
                       purgeMl=round(jar["purgeMl"]) if jar["vesselKind"] in cultures_engine.PURGE_VESSELS and jar["purgeMl"] > 0 else None,
-                      fed=True if phyto is not None else None,
+                      fed=did_feed,
+                      plainWater=True if not did_feed else None,
+                      workingMl=refill_ml,
                       phytoMl=round(phyto["ml"], 1) if phyto is not None else None,
                       phytoFrom=phyto["ref"] if phyto is not None else None)
     _cultures_log_completion(config, jar_id, "restart", now,
                              f"Logged automatically — sieved into a clean jar from {source}")
-    _cultures_log_completion(config, jar_id, "feed", now,
-                             f"Fed during the clean-jar restart — {phyto['ml']:g} ml of phyto from {phyto['name']}" if phyto else "Fed during the clean-jar restart")
+    if did_feed:
+        _cultures_log_completion(config, jar_id, "feed", now,
+                                 f"Fed during the clean-jar restart — {phyto['ml']:g} ml of phyto from {phyto['name']}" if phyto else "Fed during the clean-jar restart")
     _cultures_log_completion(config, jar_id, "harvest", now, "Water replaced during the clean-jar restart")
     _cultures_log_completion(config, jar_id, "water_change", now, "Water replaced during the clean-jar restart")
     _append_activity(config, f"{jar['name']} restarted in a clean jar — the fortnight clock rewinds"
@@ -20152,7 +20176,9 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
     if split:
         # Never zero (doc §8.8 #4): the net is already in hand, so the restart
         # seeds B from the crop — a backup out of phase with no extra ceremony.
-        error, _into = _cultures_split_apply(hass, config, jar_id, "", now)
+        # Health was checked before replacing the water. A plain refill does
+        # not claim a green tint, but the retained crop can still seed B.
+        error, _into = _cultures_split_apply(hass, config, jar_id, "", now, check=False)
         if error is not None:
             _append_activity(config, f"{jar['name']}: could not seed B from the restart — {error[1]}", "warning")
     if phyto is not None and phyto["kind"] == "vessel":
@@ -20168,6 +20194,8 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/cultures_restart",
     vol.Required("jar_id"): str,
+    vol.Optional("ml"): vol.Any(int, float),
+    vol.Optional("fed"): bool,
     vol.Optional("split"): bool,
     # Stage C: phyto in the new water (FAO's batch method; default one tint).
     vol.Optional("phyto_ml"): vol.Any(int, float),
@@ -20185,7 +20213,8 @@ async def websocket_cultures_restart(
         return
     config = _config_from_entry(entry)
     error = _cultures_restart_apply(hass, config, str(msg.get("jar_id") or ""), split=bool(msg.get("split")),
-                                    phyto_ml=msg.get("phyto_ml"), phyto_from=str(msg.get("phyto_from") or ""))
+                                    phyto_ml=msg.get("phyto_ml"), phyto_from=str(msg.get("phyto_from") or ""),
+                                    ml=msg.get("ml"), fed=bool(msg.get("fed", True)))
     if error is not None:
         connection.send_error(msg["id"], error[0], error[1])
         return
@@ -20196,14 +20225,14 @@ async def websocket_cultures_restart(
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/cultures_water_change",
     vol.Required("jar_id"): str,
+    vol.Optional("ml"): vol.Any(int, float),
 })
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_cultures_water_change(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """The copepod jar's partial water change (rotifers never need one — the
-    harvest is the change)."""
+    """A measured water replacement for a running animal culture."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -20219,14 +20248,13 @@ async def websocket_cultures_water_change(
     if st["status"] in ("none", "crashed"):
         connection.send_error(msg["id"], "jar_idle", f"{jar['name']} is not running — seed it first")
         return
-    pct = st["cadence"]["waterChangePct"]
-    if pct <= 0:
+    if cultures_engine.species_kind(jar["species"]) == "phyto":
         connection.send_error(msg["id"], "no_water_change",
-                              f"{jar['name']} has no water-change chore — its harvest is the change")
+                              f"{jar['name']} is a phyto vessel — use its split and refill guide")
         return
-    guide = cultures_engine.refill_guide(jar["volumeL"], pct, jar["salinityPpt"], _cultures_mix_ppt(config))
+    guide = cultures_engine.water_care_guide(jar, _cultures_mix_ppt(config), msg.get("ml"))
     if guide.get("available") is False:
-        connection.send_error(msg["id"], "salinity_unavailable", guide["reason"])
+        connection.send_error(msg["id"], "invalid_volume" if "totalMl" not in guide else "salinity_unavailable", guide["reason"])
         return
     jar["state"]["lastWaterChangeAt"] = now.isoformat()
     if cultures_engine.cadence_for(jar["species"], jar.get("cadence"))["restartIntervalDays"] <= 0:

@@ -485,8 +485,8 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
     is the first cycle (seeded, not yet dark or a week old); ``producing`` from
     the first split, or the moment a tap says DARK (ready on a sign — the
     restart-on-a-sign shape inverted). Clocks: ``look`` (daily tint tap),
-    ``harvest`` (= the SPLIT: the interval since the last split, brought
-    forward by a dark tap), ``restart`` (= the FRESH VESSEL: ``restartCycles``
+    ``harvest`` (= the SPLIT: a fresh dark observation with no blocking sign),
+    ``restart`` (= the FRESH VESSEL: ``restartCycles``
     splits since the last one, or a sign). No feed, no water change."""
     history = jar.get("history")
     age_days = max(0.0, (now - started).total_seconds() / 86400.0)
@@ -500,15 +500,26 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
     establishing = last_split is None and age_days < first_days and tint != "dark"
     out["status"] = "establishing" if establishing else "producing"
     interval = max(0.5, _f(cad.get("harvestIntervalDays"), 8.0))
-    if last_split is not None:
-        out["harvest"] = _due(last_split.isoformat(), None, timedelta(days=interval), now)
-    else:
-        out["harvest"] = _due(started.isoformat(), None, timedelta(days=first_days), now)
-    out["harvest"]["reason"] = "cap" if out["harvest"]["due"] else None
-    if tint == "dark" and not establishing:
-        out["harvest"].update({"available": True, "due": True, "hoursUntil": 0.0,
-                               "at": now.isoformat() if not out["harvest"].get("due") else out["harvest"]["at"],
-                               "reason": "dark"})
+    # A growth estimate is a check-in, never evidence that a split is ready.
+    out["harvestEstimate"] = _due(split_anchor.isoformat(), None,
+                                   timedelta(days=interval if last_split else first_days), now)
+    out["harvest"]["reason"] = None
+    # A measurement/photo can update lastLookedAt without observing the colour.
+    # Read the actual colour journal so it cannot refresh an old dark reading.
+    colour_rows = [(at, row) for at, row in _chronological(history)
+                   if row.get("tint") in PHYTO_TINTS and not row.get("draw")]
+    colour_at = (colour_rows[-1][0] if colour_rows and colour_rows[-1][1].get("tint") == tint
+                 else None)
+    if not colour_rows and not history:
+        colour_at = _parse_iso(state.get("lastLookedAt"))  # legacy state-only records
+    if tint not in PHYTO_TINTS:
+        colour_at = None
+    if colour_at is not None and not max(split_anchor, fresh_anchor) <= colour_at <= now:
+        colour_at = None
+    colour_age = (now - colour_at).total_seconds() / 3600.0 if colour_at else None
+    out["colourObservation"] = {"at": colour_at.isoformat() if colour_at else None,
+                                "fresh": colour_age is not None and colour_age < PHYTO_LOOK_H,
+                                "hoursSince": round(colour_age, 1) if colour_age is not None else None}
     restart_cycles = _f(cad.get("restartCycles"))
     backup_of = str(state.get("backupOf") or "")
     out["backupOf"] = backup_of
@@ -517,13 +528,11 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
     if backup_of:
         # B (doc §5.8, Stage B): a windowsill bottle seeded by A's split and
         # refreshed from A every restartCycles splits (a week at the least).
-        # The calendar never asks B for a split — only a dark look does.
+        # Backup renewal has its own clock; splitting still needs a dark look.
         refresh_days = max(BACKUP_REFRESH_MIN_DAYS, interval * (restart_cycles if restart_cycles > 0 else 4.0))
         out["refresh"] = _due(None, started.isoformat(), timedelta(days=refresh_days), now)
         out["refresh"]["reason"] = "backup" if out["refresh"]["due"] else None
         out["refresh"]["everyDays"] = round(refresh_days, 1)
-        if out["harvest"].get("reason") == "cap":
-            out["harvest"].update({"due": False, "reason": None, "hoursOverdue": 0.0})
     # A sign since the last fresh vessel brings it forward and blocks the
     # split until a tint tap after the sign says green or dark (doc §5.3).
     sign_at = _parse_iso(state.get("lastSignAt"))
@@ -563,7 +572,18 @@ def _phyto_state(jar: dict[str, Any], state: dict[str, Any], species: dict[str, 
     out["restartCycles"] = restart_cycles
     out["workingL"] = round(_f(state.get("workingL")) or _f(jar.get("volumeL")), 2)
     out["mode"] = str(jar.get("mode") or "batch") if str(jar.get("mode") or "") in PHYTO_MODES else "batch"
-    out["splitEligible"] = (not establishing and tint in ("green", "dark") and not out["harvestBlocked"])
+    # Explicit measured transfers may use green phyto; recommendations and
+    # default food doses require observed readiness.
+    out["splitEligible"] = not establishing and tint in ("green", "dark") and not out["harvestBlocked"]
+    out["splitReady"] = out["splitEligible"] and tint == "dark" and out["colourObservation"]["fresh"]
+    if out["splitReady"]:
+        out["harvest"].update({"available": True, "due": True, "at": colour_at.isoformat(),
+                               "hoursUntil": 0.0, "hoursOverdue": 0.0, "reason": "dark"})
+    if not out["colourObservation"]["fresh"]:
+        out["look"] = _due(colour_at.isoformat() if colour_at else None, started.isoformat(),
+                            timedelta(hours=PHYTO_LOOK_H), now)
+        if colour_at is None:
+            out["look"].update({"due": True, "at": now.isoformat(), "hoursUntil": 0.0})
     chores = []
     for key in ("look", "harvest", "restart", "refresh"):
         clock = out[key]
@@ -593,6 +613,8 @@ def density_advice(tint: Any, st: dict[str, Any], days_to_dark: Any = None) -> d
         return {"action": "hold",
                 "reason": ("off-colour — do not harvest into anything; check the smell, the light and the "
                            "temperature. Not recovered in two days? mark it crashed and reseed from B")}
+    if "colourObservation" in st and not st["colourObservation"].get("fresh"):
+        return {"action": "check", "reason": "check the colour before deciding — a new observation is needed"}
     if tint == "dark":
         if st.get("peakHeld"):
             return {"action": "split_now",
@@ -600,11 +622,13 @@ def density_advice(tint: Any, st: dict[str, Any], days_to_dark: Any = None) -> d
                                "peak turns; split now, or dose more of it")}
         return {"action": "split_now", "reason": "dark — split now: the bottle, the tank, the drip"}
     if tint == "green":
+        if remaining <= 0.5:
+            return {"action": "wait", "reason": "still green — readiness not yet confirmed; taking longer than estimated, review growing conditions"}
         return {"action": "wait", "reason": f"growing — dark in ~{remaining:.0f} d" + (" (your own record)" if _f(days_to_dark) > 0 else "")}
     if tint == "pale":
         if days_since < 3:
             return {"action": "wait", "reason": "pale — recovering after the split; light and air, nothing else"}
-        if days_since >= expect:
+        if remaining <= 0.5:
             return {"action": "check", "reason": f"still pale at day {days_since:.0f} — check the light, the air and whether f/2 went in"}
         return {"action": "wait", "reason": f"pale — greening; dark in ~{remaining:.0f} d if the light holds"}
     return {"action": "check", "reason": "no colour logged yet — look at it against a white card"}
@@ -1381,6 +1405,20 @@ def temperature_advice(temp_c: Any, species_id: Any) -> dict[str, Any]:
             "act": t >= _f(base["actC"]), **base}
 
 
+def water_care_guide(jar: dict[str, Any], mix_ppt: Any, ml: Any = None, *,
+                     restart: bool = False, phyto_ml: Any = None, phyto_ppt: Any = None) -> dict[str, Any]:
+    """The measured replacement, shared by the guided water change and restart."""
+    capacity = round(_f(jar.get("volumeL")) * 1000)
+    if ml is None:
+        pct = 100 if restart else cadence_for(jar.get("species"), jar.get("cadence"))["waterChangePct"]
+        ml = round(capacity * pct / 100)
+    amount = _f(ml, -1)
+    minimum = 200 if restart else 1  # the culture settings' minimum working volume
+    if isinstance(ml, bool) or not minimum <= amount <= capacity or amount != round(amount):
+        return {"available": False, "reason": f"Enter the actual fresh-water volume in whole ml, from {minimum} to {capacity} ml."}
+    return refill_guide(amount / 1000, 100, jar.get("salinityPpt"), mix_ppt, phyto_ml, phyto_ppt)
+
+
 def refill_guide(volume_l: Any, pct: Any, target_ppt: Any, mix_ppt: Any = 35.0,
                  phyto_ml: Any = None, phyto_ppt: Any = None) -> dict[str, Any]:
     """The measured jug: how much water a fill / harvest / water change moves,
@@ -1754,7 +1792,8 @@ def clearing_samples(history: Any) -> list[float]:
             if 0 < hours <= 7 * 24:
                 samples.append(round(hours, 1))
             fed_at = None
-        if row.get("event") in ("feed", "seeded", "restart") or row.get("fed") is True:
+        if (row.get("event") in ("feed", "seeded")
+                or (row.get("event") == "restart" and not row.get("plainWater")) or row.get("fed") is True):
             fed_at = at
     samples.reverse()
     return samples
@@ -1775,7 +1814,8 @@ def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
         stamp = at.isoformat()
         if event == "crashed":
             break
-        if not out["lastFedAt"] and (event in ("feed", "seeded", "restart") or row.get("fed") is True):
+        if not out["lastFedAt"] and (event in ("feed", "seeded")
+                                     or (event == "restart" and not row.get("plainWater")) or row.get("fed") is True):
             out["lastFedAt"] = stamp
         if not out["lastFeedSkippedAt"] and row.get("skipped"):
             out["lastFeedSkippedAt"] = stamp
@@ -1786,6 +1826,8 @@ def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
             out["lastSign"], out["lastSignAt"] = str(row["sign"]), stamp
             sign_done = True
         if event in ("seeded", "restart"):
+            if not tint_done and event == "restart" and row.get("plainWater"):
+                out["lastTint"] = ""
             tint_done = sign_done = True            # green water, no sign — the ceremony's word
         if out["lastFedAt"] and out["lastFeedSkippedAt"] and tint_done and sign_done:
             break
@@ -2014,8 +2056,8 @@ def risk_line(jar: dict[str, Any], st: dict[str, Any], temp: dict[str, Any], now
             act.append(f"{SIGN_WORDS.get(sign, sign)} since the last fresh vessel — the split waits for a green or dark look")
         if st.get("peakHeld"):
             watch.append(f"held dark for {_f(st.get('darkDays')):g} days without a split — a culture held at peak turns")
-        harvest = st.get("harvest") or {}
-        if harvest.get("reason") == "cap" and _f(harvest.get("hoursOverdue")) >= 72 and tint not in ("dark", "off"):
+        harvest = st.get("harvestEstimate") or {}
+        if harvest.get("due") and _f(harvest.get("hoursOverdue")) >= 72 and tint not in ("dark", "off"):
             watch.append(f"not dark at day {_f(st.get('daysSinceSplit')):g} — light, heat, or f/2 skipped at the last split?")
         # Stage B (doc §5.10): the light, the f/2 at the last split, the fresh
         # vessel overdue by cycles, the backup's refresh, the starter's month.
@@ -2250,7 +2292,8 @@ def feed_timeline(history: Any, now: datetime, days: int = TIMELINE_DAYS) -> dic
                 spans.append({"fedAt": fed_at.isoformat(), "clearAt": at.isoformat(),
                               "hours": round(hours, 1), "open": False})
             fed_at = None
-        if row.get("event") in ("feed", "seeded", "restart") or row.get("fed") is True:
+        if (row.get("event") in ("feed", "seeded")
+                or (row.get("event") == "restart" and not row.get("plainWater")) or row.get("fed") is True):
             fed_at = at
     if fed_at is not None and fed_at >= since:
         hours = (now - fed_at).total_seconds() / 3600.0
