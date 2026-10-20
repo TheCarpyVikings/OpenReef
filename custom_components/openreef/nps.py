@@ -1218,18 +1218,18 @@ def rack_rhythm(
     leximin ranks the candidates, but shaving a lesser gap while the widest
     still outruns the shelf changes nothing the tank can feel.
 
-    The measure starts at the first load the keeper can still MOVE — batches
-    already incubating are committed, and the hole a clustered pair leaves
-    behind them is the same under every plan. That hole is real, and it is
-    ``next_hatch_suggestion``'s to report (``blocked``/``lateHours``, 0.7.154);
-    counting it here would headline a number no choice can change and drown
-    the rhythm underneath it. ``fromAt`` says where the window opens.
+    ``fromAt`` is the first load the keeper can still MOVE. Include the gap
+    leading INTO that load: delaying a restart can lengthen this transition
+    even when the later spacing improves. Only gaps ending before this
+    boundary are committed and left to ``next_hatch_suggestion`` to report.
+    A delay must improve the widest gap including the transition; an
+    unavoidable first gap must not be hidden by a better later rhythm.
 
     Plans are then ranked LEXIMIN — the gap list sorted widest-first, compared
     element by element — so a plan that ties on the worst gap but evens out
     everything below it still wins. The window runs one full cycle PAST the
-    reported horizon, counting every gap that STARTS inside it, so a delay can
-    never flatter itself by pushing a load out of view.
+    reported horizon, counting gaps that overlap the adjustable window, so
+    a delay cannot flatter itself by pushing a load out of view.
 
     ``matched`` is the honest fallback when no delay helps: unequal clocks can
     lock a rhythm that no phase shift can open (36 h and 24 h repeat every
@@ -1297,16 +1297,17 @@ def rack_rhythm(
             start = start + timedelta(hours=entry["clock"])
         return got
 
-    # The window opens at the earliest load still on the table — everything
-    # before it is already in a cone and cannot be re-timed.
+    # The earliest adjustable load is a fixed boundary for every candidate.
+    # Its preceding gap is adjustable too: the current load may be fixed,
+    # but delaying the next one can leave the container empty in between.
     cutoff = min(e["free"] + timedelta(hours=e["clock"] + HATCH_HARVEST_BUFFER_H)
                  for e in entries)
 
     def gaps_of(loads: list[datetime]) -> list[float]:
-        """Every movable gap that STARTS inside the horizon, widest first."""
+        """Include the transition into the first adjustable load."""
         ordered = sorted(loads)
         gaps = [(b - a).total_seconds() / 3600.0
-                for a, b in zip(ordered, ordered[1:]) if cutoff <= a <= end]
+                for a, b in zip(ordered, ordered[1:]) if b >= cutoff and a <= end]
         gaps.sort(reverse=True)
         return gaps
 

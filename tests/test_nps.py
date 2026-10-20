@@ -1118,21 +1118,52 @@ def test_rack_rhythm_leaves_an_even_rack_alone():
     assert r["worstGapHours"] == 18.0 and r["fix"] is None and r["matched"] is None
 
 
-def test_rack_rhythm_finds_the_delay_that_evens_a_clustered_rack():
-    # The case the feature exists for: two 36 h cones only 3.4 h apart. They
-    # satisfy vessels_needed and still leave a 32.6 h hole — 8.6 h longer than
-    # the brine lasts. Holding one back half a cycle closes it.
+def test_rack_rhythm_does_not_delay_past_the_current_batches_supply():
+    # Reece's screenshot: two 36 h hatches, 14.2 h and 0.7 h underway.
+    # Their current loads arrive at +22.8 and +36.3 h. Restarting promptly
+    # brings the next load at +58.8 h, within the 24 h supply window.
+    # The old "hold Hatchery 1 back 31.5 h" suggestion moved that load to
+    # +90.3 h, leaving Hatchery 2's following load (+72.3 h) to bridge a
+    # 36 h interval: 12 h with no supply. Later 18 h spacing hid that gap.
+    vessels = _rack(("v1", "Hatchery 1", 36, 14.2),
+                    ("v2", "Hatchery 2", 36, 0.7))
+    rhythm = nps.rack_rhythm(NOW, vessels, 24)
+    assert rhythm["status"] == "tight"
+    assert rhythm["worstGapHours"] == 22.5
+    assert rhythm["fix"] is None, "do not prescribe a delay that hides the transition gap"
+    # The separate next-start deadline remains valid for this same rack.
+    plan = nps.next_hatch_suggestion(
+        NOW, 36, _iso(NOW - timedelta(hours=0.8)), 24, 750, None, vessels,
+        chain_shelf_hours=24, free_at_iso=_iso(NOW + timedelta(hours=21.8)),
+        load_volume_ml=750)
+    assert plan["hoursUntil"] == 23.3 and plan["chainVessel"] == "v2"
+    assert plan["supplyGapHours"] == 0 and plan["lateHours"] == 0
+
+
+def test_rack_rhythm_does_not_hide_a_clustered_racks_transition_gap():
+    # Two 36 h cones only 3.4 h apart leave 32.6 h between the last current
+    # load and the next possible load. Delaying a restart cannot close that
+    # hole, even if later cycles could be spaced 18 h apart.
     r = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8),
                                    ("v2", "Hatchery 2", 36, 21.4)), 24)
     assert nps.vessels_needed(36, 24) == 2      # the COUNT was never the problem
     assert r["status"] == "dry" and r["worstGapHours"] == 32.6
+    assert r["fix"] is None, "a better later rhythm must not hide the initial 8.6 h supply gap"
+
+
+def test_rack_rhythm_can_even_the_rack_when_the_transition_is_covered():
+    # Current loads arrive at +7 and +31 h. Holding Hatchery 1's next
+    # start back 6 h moves its next load from +43 to +49 h. The transition
+    # is then 18 h, followed by Hatchery 2 at +67 h and Hatchery 1 at +85 h.
+    r = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 30),
+                                   ("v2", "Hatchery 2", 36, 6)), 24)
+    assert r["status"] == "tight" and r["worstGapHours"] == 24
     fix = r["fix"]
-    assert fix["vesselId"] == "v2" and abs(fix["delayHours"] - 14.5) < 0.6, fix
-    assert fix["gapAfterHours"] < 24 and fix["idle"] is False
-    # The prescription is real: applying it lands the rack in the clear.
-    after = nps.rack_rhythm(NOW, _rack(("v1", "Hatchery 1", 36, 24.8),
-                                       ("v2", "Hatchery 2", 36, 21.4 - fix["delayHours"])), 24)
-    assert after["status"] == "even", after
+    assert fix["vesselId"] == "v1" and fix["delayHours"] == 6, fix
+    assert fix["gapAfterHours"] == 18 and fix["idle"] is False
+    next_load = 6 + fix["delayHours"] + 36 + nps.HATCH_HARVEST_BUFFER_H
+    assert next_load == 49 and next_load - 31 <= r["shelfHours"]
+    assert 67 - next_load == 18
 
 
 def test_rack_rhythm_delays_an_idle_cone_by_starting_it_later():
@@ -1165,10 +1196,8 @@ def test_rack_rhythm_says_so_when_no_delay_can_help():
 
 
 def test_rack_rhythm_measures_only_what_the_keeper_can_still_move():
-    # Batches already incubating are committed. The hole a clustered pair
-    # leaves BEHIND them belongs to next_hatch_suggestion (blocked/lateHours),
-    # not here — counting it would headline a number no choice can change and
-    # bury the fix underneath it.
+    # The first adjustable load remains the forecast boundary. The gap
+    # leading into it counts even though its preceding load is committed.
     vessels = _rack(("v1", "Hatchery 1", 36, 24.8), ("v2", "Hatchery 2", 36, 21.4))
     r = nps.rack_rhythm(NOW, vessels, 24)
     at = datetime.fromisoformat
@@ -1186,7 +1215,7 @@ def test_ws_summary_carries_the_rack_rhythm():
     entry = _v2_entry()
     cfg = entry.options[CONF_SETTINGS]
     vessels = cfg["nps"]["hatchery"]["vessels"]
-    for vid, clock, hours_in in (("v1", 36, 24.8), ("v2", 36, 21.4)):
+    for vid, clock, hours_in in (("v1", 36, 14.2), ("v2", 36, 0.7)):
         vessels[vid]["hatchHours"] = clock
         vessels[vid]["state"] = {
             "hatchStartedAt": (now - timedelta(hours=hours_in)).isoformat(),
@@ -1196,10 +1225,12 @@ def test_ws_summary_carries_the_rack_rhythm():
     run(integration.websocket_nps_summary(hass, conn, {"id": 1}))
     hatchery = conn.results[-1].payload["hatchery"]
     rhythm = hatchery["rackRhythm"]
-    # Two cones is enough by COUNT and still dry by PHASE — the whole point.
+    # The screenshot's next-start deadline and rhythm must not conflict.
     assert hatchery["vesselsNeeded"] == 2 and len(hatchery["vessels"]) == 2
-    assert rhythm["status"] == "dry" and rhythm["vesselCount"] == 2
-    assert rhythm["fix"]["vesselName"] == "Hatchery 2"
+    assert rhythm["status"] == "tight" and rhythm["vesselCount"] == 2
+    assert rhythm["worstGapHours"] == 22.5 and rhythm["fix"] is None
+    assert hatchery["nextStartVessel"] == "v1"
+    assert hatchery["nextHatch"]["hoursUntil"] == 23.3
     # Each cone is read on its OWN clock, exactly as the chain reads them.
     vessels["v2"]["hatchHours"] = 24
     vessels["v2"]["state"]["hatchHours"] = 24
