@@ -16507,7 +16507,7 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
     hatcheries the shared pair could only ever follow the batch that ripened
     soonest, so Hatchery 2 never got a reminder of its own).
 
-    ``started``: the 'start' chore was literally just done — log it (its next
+    ``started``: log the 'start' chore at the batch's actual start time (its next
     due lands one hatch-cycle out) and point the harvest reminder at the moment
     this hatch comes ripe (snoozed until start + hatchHours, so it pops due
     right then). ``harvested``: 'Hatched & loaded' — the harvest chore is done,
@@ -16532,14 +16532,17 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
     vessel_name = str(_nps_vessel_cfg(config, vessel_id).get("name") or vessel_id)
     if event == "started":
         if isinstance(start_task, dict):
+            started_at = _parse_datetime(
+                _nps_vessel_cfg(config, vessel_id).get("state", {}).get("hatchStartedAt"))
             _nps_hatch_log_completion(
-                maintenance, start_id, now,
+                maintenance, start_id, started_at or now,
                 f"Logged automatically — hatch started in {vessel_name} from the NPS tab",
             )
             # Marking it done clears any snooze (lockstep with the panel's _completeTask).
             start_task["snoozedUntil"] = None
-        if isinstance(harvest_task, dict) and ready_at is not None and ready_at > now:
-            harvest_task["snoozedUntil"] = ready_at.isoformat()
+        if isinstance(harvest_task, dict):
+            harvest_task["snoozedUntil"] = (
+                ready_at.isoformat() if ready_at is not None and ready_at > now else None)
     elif event == "harvested":
         if isinstance(harvest_task, dict):
             _nps_hatch_log_completion(
@@ -16705,13 +16708,14 @@ def _nps_canonical_reservoir(config: dict[str, Any]) -> dict[str, Any]:
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/nps_hatch_start",
     vol.Optional("vessel_id"): str,
+    vol.Optional("started_at"): str,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
 async def websocket_nps_hatch_start(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Stamp the incubation clock: cysts just went into a hatcher. v2: picks
+    """Stamp the actual incubation start, defaulting to now. v2: picks
     the first idle vessel (or the requested one) and stamps the CURRENT egg
     type + hours into the batch — later settings edits never rewrite a running
     countdown."""
@@ -16737,8 +16741,23 @@ async def websocket_nps_hatch_start(
                               "Every hatchery is mid-hatch — harvest or cancel one first")
         return
     now = datetime.now(timezone.utc)
+    started_at = now
+    if "started_at" in msg:
+        try:
+            started_at = datetime.fromisoformat(msg["started_at"].replace("Z", "+00:00"))
+            if started_at.tzinfo is None:
+                raise ValueError("Missing timezone")
+            started_at = started_at.astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            connection.send_error(msg["id"], "invalid_started_at",
+                                  "Choose a valid hatch start date and time with a timezone.")
+            return
+        if started_at > now:
+            connection.send_error(msg["id"], "future_started_at",
+                                  "The hatch start cannot be in the future.")
+            return
     state = vessels[target_id]["state"]
-    state["hatchStartedAt"] = now.isoformat()
+    state["hatchStartedAt"] = started_at.isoformat()
     # THIS hatchery's cysts and clock (0.7.147) — two vessels can run
     # different eggs on different clocks side by side.
     state["eggType"] = vessels[target_id]["eggType"]
@@ -16747,9 +16766,11 @@ async def websocket_nps_hatch_start(
     _nps_hatch_sync_reminders(config, now, "started", target_id)
     _append_activity(
         config,
-        f"Brine hatch started in {vessels[target_id]['name']} — the incubation clock is running",
+        (f"Brine hatch logged in {vessels[target_id]['name']} — started at {started_at.isoformat()}"
+         if "started_at" in msg else
+         f"Brine hatch started in {vessels[target_id]['name']} — the incubation clock is running"),
         "control")
-    # The cone was just filled with saltwater — that water came out of the
+    # Record the saltwater used to fill this cone, including a late log, from the
     # mixing station's vessel (doc §30), cone volume's worth.
     _mixing_hatchery_debit(hass, config, vessels[target_id]["volumeL"],
                            f"the hatch in {vessels[target_id]['name']}")

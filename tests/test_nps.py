@@ -1989,6 +1989,93 @@ def test_ws_hatch_start_syncs_the_reminders():
     assert not conn.errors
 
 
+def test_ws_hatch_start_earlier_uses_actual_time_for_countdown_and_reminders():
+    now = datetime.now(timezone.utc)
+    started = now - timedelta(hours=12)
+    entry = _rack_entry(now)
+    _mixing_station_for_hatchery(entry)
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    # The client's local time includes its offset; storage and clocks use UTC.
+    local_start = started.astimezone(timezone(timedelta(hours=1))).isoformat()
+    run(integration.websocket_nps_hatch_start(
+        hass, conn, {"id": 1, "vessel_id": "v2", "started_at": local_start}))
+    saved = entry.options[CONF_SETTINGS]
+    state = saved["nps"]["hatchery"]["vessels"]["v2"]["state"]
+    assert not conn.errors
+    assert state["hatchStartedAt"] == started.isoformat()
+    assert state["eggType"] == "decapsulated" and state["hatchHours"] == 16
+    assert not saved["nps"]["hatchery"]["vessels"]["v1"]["state"]["hatchStartedAt"]
+    clock = nps.hatch_state(state["hatchStartedAt"], state["hatchHours"], now)
+    assert clock["status"] == "incubating" and clock["hoursLeft"] == 4
+    maintenance = saved["maintenance"]
+    assert maintenance["completions"]["brine_hatch_start_v2"][0]["timestamp"] == started.isoformat()
+    assert not maintenance["completions"].get("brine_hatch_start")
+    assert maintenance["tasks"]["brine_hatch_harvest_v2"]["snoozedUntil"] == (
+        started + timedelta(hours=16)).isoformat()
+    assert _mix_litres(entry) == 39.3, "late logging accounts for the cone's water once"
+    assert any(started.isoformat() in row["message"] for row in saved["activity"])
+    # A repeat submission cannot restart the batch or debit the water twice.
+    before = _deepcopy(saved)
+    run(integration.websocket_nps_hatch_start(
+        hass, conn, {"id": 2, "vessel_id": "v2", "started_at": local_start}))
+    assert conn.errors[-1].code == "vessel_busy"
+    assert entry.options[CONF_SETTINGS] == before
+
+
+def test_ws_hatch_start_earlier_ready_or_overdue_clears_stale_harvest_snooze():
+    for elapsed, expected in ((37, "ready"), (72, "overdue")):
+        now = datetime.now(timezone.utc)
+        started = now - timedelta(hours=elapsed)
+        entry = _hatch_reminder_entry(
+            hatch_hours=36, harvest_snooze=_iso(now + timedelta(hours=48)))
+        hass = FakeHass(entries=[entry])
+        conn = FakeConnection()
+        run(integration.websocket_nps_hatch_start(
+            hass, conn, {"id": 1, "started_at": started.isoformat().replace("+00:00", "Z")}))
+        assert not conn.errors
+        saved = entry.options[CONF_SETTINGS]
+        assert saved["maintenance"]["tasks"]["brine_hatch_harvest"]["snoozedUntil"] is None
+        state = saved["nps"]["hatchery"]["vessels"]["v1"]["state"]
+        assert nps.hatch_state(state["hatchStartedAt"], state["hatchHours"], now)["status"] == expected
+        assert not state["readyNotifiedAt"], "the ready notification must remain eligible"
+        assert saved["maintenance"]["completions"]["brine_hatch_start"][0]["timestamp"] == started.isoformat()
+
+
+def test_ws_hatch_start_rejects_bad_or_future_time_without_saving():
+    now = datetime.now(timezone.utc)
+    for value, code in [
+        ("", "invalid_started_at"), ("invalid", "invalid_started_at"),
+        ("2026-02-30T21:00:00Z", "invalid_started_at"),
+        ("2026-08-12T21:00:00", "invalid_started_at"),
+        (None, "invalid_started_at"),
+        ((now + timedelta(hours=1)).isoformat(), "future_started_at"),
+    ]:
+        entry = _rack_entry(now)
+        _mixing_station_for_hatchery(entry)
+        before = _deepcopy(entry.options[CONF_SETTINGS])
+        hass = FakeHass(entries=[entry])
+        conn = FakeConnection()
+        run(integration.websocket_nps_hatch_start(
+            hass, conn, {"id": 1, "vessel_id": "v1", "started_at": value}))
+        assert conn.errors[-1].code == code, value
+        assert entry.options[CONF_SETTINGS] == before, "invalid starts must not alter any ledger"
+        assert not hass.services.calls
+
+
+def test_ws_hatch_start_earlier_rejects_unknown_vessel():
+    entry = _v2_entry()
+    before = _deepcopy(entry.options[CONF_SETTINGS])
+    hass = FakeHass(entries=[entry])
+    conn = FakeConnection()
+    run(integration.websocket_nps_hatch_start(hass, conn, {
+        "id": 1, "vessel_id": "missing",
+        "started_at": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
+    }))
+    assert conn.errors[-1].code == "unknown_vessel"
+    assert entry.options[CONF_SETTINGS] == before
+
+
 def test_ws_hatch_cancel_harvested_logs_the_chore():
     # "Hatched & loaded" chains a harvested cancel: the harvest chore is done.
     entry = _hatch_reminder_entry(harvest_snooze=_iso(NOW + timedelta(hours=30)),

@@ -675,14 +675,21 @@ test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue",
     };
     let html = withHatch({ status: "none" });
     assert(html.includes("Start hatch"), "empty hatchery missing its start button");
+    assert(html.includes("Started earlier?") && html.includes('data-nps-hatch-started-at="v1"'),
+      "idle hatchery needs an earlier-start form");
+    assert(html.includes('type="datetime-local"') && html.includes('max="2026-08-13T12:00"'),
+      "the form needs a local date/time with no future starts");
     html = withHatch({ status: "incubating", hoursElapsed: 15, hoursLeft: 9, percent: 62 });
+    assert(!html.includes('data-nps-hatch-started-at='), "running batches must not offer another start");
     assert(html.includes("15 / 24 h"), "incubating countdown missing");
     assert(html.includes("Harvest now"), "early harvest must be offered mid-incubation (instar I is the premium harvest)");
     assert(html.includes(">Cancel<"), "incubating missing cancel");
     assert(html.includes("nps-bub"), "incubating vessel has no bubbles");
     html = withHatch({ status: "ready", hoursElapsed: 24.5, hoursLeft: 0, percent: 100 });
+    assert(!html.includes('data-nps-hatch-started-at='), "ready batches must not offer another start");
     assert(html.includes("Hatched &amp; loaded"), "ready missing the harvest button");
     html = withHatch({ status: "overdue", hoursElapsed: 40, hoursLeft: 0, percent: 100 });
+    assert(!html.includes('data-nps-hatch-started-at='), "overdue batches must not offer another start");
     assert(html.includes("harvest now"), "overdue nag missing");
     noPlaceholders(html, "hatchery card");
     // The hatchery is core NPS — it renders even with the exchange OFF
@@ -692,6 +699,106 @@ test("the hatchery card walks its lifecycle: empty, incubating, ready, overdue",
     const ungated = withHatch({ status: "none" });
     assert(ungated.includes("Brine hatchery"), "hatchery hidden when the exchange is off");
     assert(ungated.includes("Start hatch"), "hatchery unusable when the exchange is off");
+  } finally { restore(); }
+});
+
+test("earlier hatch start converts local time to UTC and keeps each vessel's draft", async () => {
+  const restore = freezeTime(NOW);
+  const previousTZ = process.env.TZ;
+  process.env.TZ = "Europe/London";
+  try {
+    const panel = await npsPanel();
+    const calls = [];
+    panel._render = () => {};
+    panel._npsLoadSummary = () => {};
+    panel._callWS = async (msg) => { calls.push(msg); };
+    const handlers = {};
+    panel.addEventListener = () => {};
+    panel.shadowRoot = { addEventListener: (event, handler) => { handlers[event] = handler; } };
+    panel._attachEvents();
+    for (const [vessel, value] of [["v1", "2026-08-12T20:00"], ["v2", "2026-08-12T22:30"]]) {
+      handlers.input({ type: "input", target: { type: "datetime-local", value,
+        dataset: { npsHatchStartedAt: vessel } } });
+    }
+    assert(!panel._configDirty, "choosing an actual start must not dirty the settings");
+    panel._nps.summary.hatchery = { vessels: [
+      { id: "v1", name: "Hatchery 1", state: { status: "none" } },
+      { id: "v2", name: "Hatchery 2", state: { status: "none" } },
+    ] };
+    const html = panel._npsTab();
+    assert(html.includes('data-nps-hatch-started-at="v1" value="2026-08-12T20:00"')
+      && html.includes('data-nps-hatch-started-at="v2" value="2026-08-12T22:30"'),
+    "rendering must preserve each hatchery's draft");
+    assert(html.includes('max="2026-08-13T13:00"'), "the date limit must use local time");
+    panel.shadowRoot = { querySelector: (sel) => sel === '[data-nps-hatch-started-at="v2"]'
+      ? { value: "2026-08-12T22:30" } : null };
+    await panel._npsHatchStartEarlier("v2");
+    assert(calls.length === 1 && calls[0].type === "openreef/nps_hatch_start"
+      && calls[0].vessel_id === "v2" && calls[0].started_at === "2026-08-12T21:30:00.000Z",
+    "British summer time must be converted to the correct UTC instant");
+    assert(panel._npsHatchStartDrafts.v1 && !panel._npsHatchStartDrafts.v2,
+      "only the saved hatchery's draft is cleared");
+    assert(!panel._nps.error && !panel._npsHatchStartPending.v2);
+    let startNow;
+    panel._npsCall = (msg) => { startNow = msg; };
+    handlers.click({ target: { closest: () => ({
+      dataset: { action: "nps-hatch-start", id: "v1" },
+    }) } });
+    assert(startNow.type === "openreef/nps_hatch_start" && startNow.vessel_id === "v1"
+      && !("started_at" in startNow), "Start hatch must still use the server's current time");
+  } finally { process.env.TZ = previousTZ; restore(); }
+});
+
+test("earlier hatch start rejects missing invalid and future times", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    let calls = 0;
+    panel._callWS = async () => { calls += 1; };
+    for (const value of ["", "invalid", "2026-08-13T13:00"]) {
+      panel.shadowRoot = { querySelector: () => ({ value }) };
+      await panel._npsHatchStartEarlier("v1");
+      assert(panel._nps.error && calls === 0, "invalid dates must never reach the server");
+    }
+  } finally { restore(); }
+});
+
+test("earlier hatch start preserves the draft on failure and prevents duplicate submissions", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._render = () => {};
+    panel._npsLoadSummary = () => {};
+    panel.shadowRoot = { querySelector: () => ({ value: "2026-08-12T22:30" }) };
+    let rejectSave;
+    let calls = 0;
+    panel._callWS = () => {
+      calls += 1;
+      return new Promise((resolve, reject) => { rejectSave = reject; });
+    };
+    const pending = panel._npsHatchStartEarlier("v1");
+    await panel._npsHatchStartEarlier("v1");
+    assert(calls === 1, "a second tap must not send a duplicate start");
+    rejectSave(new Error("Hatchery 1 is already mid-hatch"));
+    await pending;
+    assert(panel._nps.error === "Hatchery 1 is already mid-hatch");
+    assert(panel._npsHatchStartDrafts.v1 === "2026-08-12T22:30" && !panel._npsHatchStartPending.v1,
+      "failed saves must retain the selected time and release the saving state");
+  } finally { restore(); }
+});
+
+test("earlier hatch start in demo mode makes no changes", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const panel = await npsPanel();
+    panel._nps.demo = true;
+    panel._render = () => {};
+    panel.shadowRoot = { querySelector: () => ({ value: "2026-08-12T22:30" }) };
+    let calls = 0;
+    panel._callWS = async () => { calls += 1; };
+    await panel._npsHatchStartEarlier("v1");
+    assert(calls === 0 && panel._nps.message.includes("Demo view"));
   } finally { restore(); }
 });
 

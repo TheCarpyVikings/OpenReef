@@ -2054,6 +2054,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-hatch-start") this._npsCall(
         id ? { type: "openreef/nps_hatch_start", vessel_id: id } : { type: "openreef/nps_hatch_start" },
         "Hatch started — the incubation clock is running.");
+      if (action === "nps-hatch-start-earlier") this._npsHatchStartEarlier(id);
       if (action === "nps-hatch-cancel") this._npsCall(
         id ? { type: "openreef/nps_hatch_cancel", vessel_id: id } : { type: "openreef/nps_hatch_cancel" },
         "Hatch cancelled — the hatcher stands down.");
@@ -2437,6 +2438,11 @@ class OpenReefPanel extends HTMLElement {
         const draftId = target.dataset.id;
         this._maintenanceDrafts[draftId] = this._maintenanceDrafts[draftId] || {};
         this._maintenanceDrafts[draftId][target.dataset.maintDraft] = target.value;
+        return;
+      }
+      if (target.dataset.npsHatchStartedAt) {
+        this._npsHatchStartDrafts ||= {};
+        this._npsHatchStartDrafts[target.dataset.npsHatchStartedAt] = target.value;
         return;
       }
       if (scope === "tank") this._config.tank[field] = value;
@@ -11018,6 +11024,46 @@ class OpenReefPanel extends HTMLElement {
     this._npsLoadSummary(true);
   }
 
+  async _npsHatchStartEarlier(vesselId) {
+    if (this._npsHatchStartPending?.[vesselId]) return;
+    const input = this.shadowRoot.querySelector(`[data-nps-hatch-started-at="${vesselId}"]`);
+    const value = input?.value || "";
+    this._npsHatchStartDrafts ||= {};
+    this._npsHatchStartDrafts[vesselId] = value;
+    const started = new Date(value);
+    if (!value || !Number.isFinite(started.getTime()) || (input.checkValidity && !input.checkValidity())) {
+      this._nps.error = "Choose a valid start date and time.";
+      this._render();
+      return;
+    }
+    if (started.getTime() > Date.now()) {
+      this._nps.error = "The hatch start cannot be in the future.";
+      this._render();
+      return;
+    }
+    if (this._nps.demo) {
+      this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
+      this._render();
+      return;
+    }
+    this._npsHatchStartPending ||= {};
+    this._npsHatchStartPending[vesselId] = true;
+    this._render();
+    try {
+      await this._callWS({
+        type: "openreef/nps_hatch_start", vessel_id: vesselId, started_at: started.toISOString(),
+      });
+      delete this._npsHatchStartDrafts[vesselId];
+      this._nps.message = `Hatch logged — started ${started.toLocaleString()}. The countdown uses that time.`;
+      this._nps.error = "";
+    } catch (err) {
+      this._nps.error = (err && err.message) || "Could not log the hatch start — try again.";
+    } finally {
+      this._npsHatchStartPending[vesselId] = false;
+    }
+    this._npsLoadSummary(true);
+  }
+
   async _npsCall(msg, okMessage) {
     if (this._nps.demo) {
       this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
@@ -13521,7 +13567,7 @@ class OpenReefPanel extends HTMLElement {
         : "";
       const buttons = [
         vs.status === "none" || !vs.status
-          ? `<button class="secondary compact-button" data-action="nps-hatch-start" data-id="${this._escape(v.id)}">Start hatch</button>` : "",
+          ? `<button class="secondary compact-button" data-action="nps-hatch-start" data-id="${this._escape(v.id)}"${this._npsHatchStartPending?.[v.id] ? " disabled" : ""}>Start hatch</button>` : "",
         vs.status === "incubating"
           ? `<button class="secondary compact-button" data-action="nps-hatch-loaded" data-id="${this._escape(v.id)}" title="Inspect for swimming nauplii before harvesting; the timer estimates hatch-out and does not measure it.${joinTitle}"${joinBlocked ? " disabled" : ""}>Harvest now</button>`
           : "",
@@ -13540,6 +13586,10 @@ class OpenReefPanel extends HTMLElement {
             <small>${hasBatch ? "The timer estimates hatch-out. Check for swimming nauplii before logging a harvest." : "Prepare the measured water and cysts, then log the start."}</small></div>
           ${joinLine ? `<div class="feeding-alerts">${joinLine}</div>` : ""}
           ${vs.status !== "incubating" ? this._feedingActions(buttons, ["nps-hatch-start", "nps-hatch-loaded"]) : ""}
+          ${!hasBatch ? this._feedingDetails(`hatchery-${v.id}-start`, "Started earlier?", `
+            <small>Forgot to log the start? Enter when you added the cysts. The countdown and harvest reminders will use that time.</small>
+            <label>Actual start (your local time)<input type="datetime-local" data-nps-hatch-started-at="${this._escape(v.id)}" value="${this._escape(this._npsHatchStartDrafts?.[v.id] || "")}" max="${this._escape(this._nowLocalInputValue())}" required></label>
+            <div class="button-row"><button class="secondary compact-button" data-action="nps-hatch-start-earlier" data-id="${this._escape(v.id)}"${this._npsHatchStartPending?.[v.id] ? " disabled" : ""}>${this._npsHatchStartPending?.[v.id] ? "Saving…" : "Log hatch start"}</button></div>`) : ""}
           ${this._feedingDetails(`hatchery-${v.id}-batch`, "Batch details & clock settings", `${settingsLine}${clockNote}${guide}${this._npsPouchLine(v)}`)}
           ${vs.status === "incubating" ? this._feedingDetails(`hatchery-${v.id}-harvest`, "Record an early harvest or cancel", `<small>Inspect the batch before recording an early harvest.</small>${this._feedingActions(buttons, ["nps-hatch-loaded", "nps-hatch-cancel"])}`) : ""}
         </article>`;
