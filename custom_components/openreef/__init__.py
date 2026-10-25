@@ -1287,6 +1287,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
                 # 0.7.191: a taken-back tap stays as a tombstone — never
                 # deleted, so a stale save cannot resurrect it.
                 **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {}),
+                **({"seedUndo": _cultures_seed_undo_record(item["seedUndo"])}
+                   if isinstance(item.get("seedUndo"), dict) else {}),
             })
         vessel_kind = str(raw_jar.get("vesselKind") or "")
         phyto = preset["kind"] == "phyto"
@@ -18905,7 +18907,7 @@ def _cultures_summary_payload(hass: HomeAssistant, config: dict[str, Any]) -> di
             # A crashed jar wants reseeding from a producing sibling of the
             # same species; a producing one can be split into an idle jar.
             "reseedFrom": [j for j in producing_by_species.get(jar["species"], []) if j != jid],
-            "history": list(jar["history"][:12]),
+            "history": [_cultures_journal_undo(config, jid, row, now) for row in jar["history"][:12]],
             # The feeding / water-tint timeline (0.7.184): a month of marks
             # and the clearing spans, the panel only draws them.
             "timeline": cultures_engine.feed_timeline(jar["history"], now),
@@ -19317,6 +19319,8 @@ async def websocket_cultures_seed(
             if parent["salinityPpt"] != jar["salinityPpt"]:
                 connection.send_error(msg["id"], "salinity_unavailable", "A sibling starter must match the target salinity for this seed recipe")
                 return
+    seed_before = _cultures_seed_state(jar) if phyto else None
+    mix_before = _cultures_seed_water(config) if phyto else None
     seed_guide = _cultures_seed_jar(config, jar, now, seeded_from, starter_ml=starter_ml, working_l=working_l,
                                     arrival_tint=arrival, starter_opened_at=str(msg.get("starter_opened_at") or ""),
                                     from_bottle=from_bottle)
@@ -19347,6 +19351,17 @@ async def websocket_cultures_seed(
     # NEW water only (the starter is the supplier's).
     _mixing_hatchery_debit(hass, config, _cultures_seed_mix_ml(config, jar, starter_ml, working_l) / 1000.0,
                            f"seeding {jar['name']}")
+    if phyto:
+        jar["history"][0]["seedUndo"] = {
+            "before": seed_before, "after": _cultures_seed_state(jar),
+            "mixBefore": mix_before, "mixAfter": _cultures_seed_water(config),
+            "products": [{"id": pid, "ml": item["ml"], "openedAt": product.get("openedAt", ""),
+                          "remainingMl": product.get("remainingMl", 0)}
+                         for pid, product in (config.get("consumables", {}).get("products", {})).items()
+                         for item in product.get("history", [])
+                         if item.get("kind") == "dose" and item.get("at") == now.isoformat()
+                         and item.get("to") == "jar" and item.get("jarId") == jar_id],
+        }
     config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
@@ -20003,6 +20018,206 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
     return None
 
 
+_CULTURES_SEED_STATE_FIELDS = (
+    "startedAt", "lastRestartAt", "lastFedAt", "lastHarvestAt", "lastWaterChangeAt",
+    "lastLargeWaterChangeAt", "lastTint", "crashedAt", "seededFrom", "lastSignAt",
+    "lastSign", "generation", "workingL", "cyclesSinceFresh", "lastLookedAt",
+    "starterOpenedAt", "arrivalTint",
+)
+
+
+def _cultures_seed_state(jar: dict[str, Any]) -> dict[str, Any]:
+    return {key: jar["state"].get(key, 0 if key in ("generation", "workingL", "cyclesSinceFresh") else "")
+            for key in _CULTURES_SEED_STATE_FIELDS}
+
+
+def _cultures_seed_water(config: dict[str, Any]) -> dict[str, Any]:
+    mix = _mixing_cfg(config)
+    batch = mix.get("batch") or {}
+    return {"litres": mixing_engine.mix_vessel_litres(mix), "contents": mixing_engine.mix_contents(mix),
+            **{key: batch.get(key, "") for key in ("state", "startedAt", "testedAt")}}
+
+
+def _cultures_seed_undo_record(raw: dict[str, Any]) -> dict[str, Any]:
+    """Keep bounded server-written seed receipts through config normalisation."""
+    out = {}
+    for key in ("before", "after", "mixBefore", "mixAfter"):
+        fields = _CULTURES_SEED_STATE_FIELDS if key in ("before", "after") else ("litres", "contents", "state", "startedAt", "testedAt")
+        values = raw.get(key) if isinstance(raw.get(key), dict) else {}
+        out[key] = {k: (_awc_num(v, 0, 0, 100000) if isinstance(v, (int, float)) and not isinstance(v, bool)
+                        else _awc_str(v, 40)) for k, v in values.items() if k in fields}
+    products = raw.get("products") if isinstance(raw.get("products"), list) else []
+    out["products"] = [{"id": _awc_str(p.get("id"), 64), "ml": _awc_num(p.get("ml"), 0, 0, 100000),
+                        "openedAt": _awc_str(p.get("openedAt"), 40), "remainingMl": _awc_num(p.get("remainingMl"), 0, 0, 100000)}
+                       for p in products[:4] if isinstance(p, dict)]
+    return out
+
+
+def _cultures_legacy_seed_state(jar: dict[str, Any], at: datetime) -> dict[str, Any] | None:
+    """Older seeds have no receipt: recover only a recorded empty/crashed cycle.
+
+    Unknown historical lineage/starter dates stay unknown rather than being
+    copied from the accidental new seed. No estimate is used for stock credits.
+    """
+    rows = [(t, r) for t, r in cultures_engine._chronological(jar.get("history")) if t < at]
+    state = {k: 0 if k in ("generation", "workingL", "cyclesSinceFresh") else "" for k in _CULTURES_SEED_STATE_FIELDS}
+    manual = [(t, r) for t, r in rows if r.get("event") not in ("light", "index")]
+    if not manual:
+        return None
+    if manual[-1][1].get("event") != "crashed":
+        return None
+    seeds = [(t, r) for t, r in rows if r.get("event") == "seeded"]
+    if not seeds:
+        return None
+    start, seed = seeds[-1]
+    state.update(startedAt=start.isoformat(), seededFrom=seed.get("from", ""),
+                 generation=0 if seed.get("from") else 1, arrivalTint=seed.get("arrivalTint", ""))
+    for t, r in rows:
+        if t < start:
+            continue
+        stamp, event = t.isoformat(), r.get("event")
+        if event in ("seeded", "restart"):
+            state.update(lastRestartAt=stamp, cyclesSinceFresh=0, lastSign="", lastSignAt="", lastFedAt=stamp)
+        if event == "harvest" and not r.get("draw"):
+            state["lastHarvestAt"] = stamp
+            state["cyclesSinceFresh"] += 1
+        if r.get("workingMl") is not None:
+            state["workingL"] = r["workingMl"] / 1000
+        elif event == "seeded":
+            state["workingL"] = awc_engine._f(r.get("ml")) / 1000
+        if r.get("tint"):
+            state.update(lastTint=r["tint"], lastLookedAt=stamp if event != "crashed" else state["lastLookedAt"])
+        if r.get("sign"):
+            state.update(lastSign=r["sign"], lastSignAt=stamp)
+        if event == "crashed":
+            state["crashedAt"] = stamp
+    return state
+
+
+def _cultures_seed_owner(config: dict[str, Any], jar_id: str, row: dict[str, Any]) -> str:
+    jars = config.get("nps", {}).get("cultures", {}).get("jars", {})
+    if row.get("event") == "seeded" and cultures_engine.species_kind(jars[jar_id].get("species")) == "phyto":
+        return jar_id
+    if row.get("event") == "harvest" and row.get("draw") and row.get("to") == "vessel":
+        targets = [jid for jid, jar in jars.items() for h in jar.get("history", [])
+                   if h.get("event") == "seeded" and h.get("from") == jar_id
+                   and h.get("at") == row.get("at") and not h.get("undoneAt")]
+        return targets[0] if len(targets) == 1 else ""
+    return ""
+
+
+def _cultures_seed_undo_plan(config: dict[str, Any], jar_id: str, row: dict[str, Any],
+                            now: datetime) -> tuple[dict[str, Any] | None, str]:
+    """Validate all linked records before reversing any of them; no writes here."""
+    jars = config["nps"]["cultures"]["jars"]
+    jar, stamp = jars[jar_id], str(row["at"])
+    at = _parse_datetime(stamp)
+    if row.get("undoneAt") or not _undo_window_ok(at, now):
+        return None, "Undo is available for 24 hours after seeding."
+    if jar["state"].get("startedAt") != stamp:
+        return None, "This culture has been started again since that seed."
+    def newer(j):
+        return any(t > at and r.get("event") != "light"
+                   and not (r.get("event") == "index" and r.get("source") == "sensor")
+                   for t, r in cultures_engine._chronological(j.get("history")))
+    if newer(jar):
+        return None, "Undo later entries in this culture before undoing its seed."
+    receipt = row.get("seedUndo")
+    before = receipt.get("before") if receipt else _cultures_legacy_seed_state(jar, at)
+    if before is None or set(before) != set(_CULTURES_SEED_STATE_FIELDS):
+        return None, "The earlier culture state is missing from the journal; it cannot be restored safely."
+    if receipt and _cultures_seed_state(jar) != receipt.get("after"):
+        return None, "The culture state has changed since seeding."
+    if receipt and any(set(receipt.get(k, {})) != {"litres", "contents", "state", "startedAt", "testedAt"}
+                       for k in ("mixBefore", "mixAfter")):
+        return None, "The seed's saved saltwater receipt is incomplete."
+    donor, donor_row, donor_litres = None, None, None
+    source = str(row.get("from") or "")
+    starter_ml = awc_engine._f(row.get("workingMl", row.get("ml"))) - awc_engine._f(row.get("freshMl"))
+    if starter_ml <= 0:
+        return None, "The starter volume is missing from this seed entry."
+    if source and source != "bottle":
+        donor = jars.get(source)
+        matches = [r for r in (donor or {}).get("history", []) if r.get("at") == stamp
+                   and r.get("event") == "harvest" and r.get("draw") and r.get("to") == "vessel" and not r.get("undoneAt")]
+        if len(matches) != 1 or awc_engine._f(matches[0].get("ml")) != starter_ml:
+            return None, "The linked donor withdrawal is missing or does not match the seed."
+        donor_row = matches[0]
+        after_l = awc_engine._f(donor_row.get("workingMl"), -1) / 1000
+        donor_litres = round(after_l + starter_ml / 1000, 2)
+        if newer(donor) or abs(awc_engine._f(donor["state"].get("workingL")) - round(after_l, 2)) > 0.001 \
+                or donor_litres > donor["volumeL"]:
+            return None, "The donor culture has changed since this seed; undo its later entries first."
+    products = config.get("consumables", {}).get("products", {})
+    doses = [(pid, p, r) for pid, p in products.items() for r in p.get("history", [])
+             if r.get("kind") == "dose" and r.get("at") == stamp and r.get("to") == "jar" and r.get("jarId") == jar_id]
+    expected_ml = sum(p["ml"] for p in receipt.get("products", [])) if receipt else (
+        awc_engine._f(row.get("nutrientMl")) + (starter_ml if source == "bottle" else 0))
+    if abs(sum(awc_engine._f(r.get("ml")) for _, _, r in doses) - expected_ml) > 0.01:
+        return None, "The linked f/2 or starter-bottle dose is missing; no balances have been changed."
+    if receipt and {(p["id"], p["ml"]) for p in receipt.get("products", [])} != {(pid, r["ml"]) for pid, _, r in doses}:
+        return None, "The recorded stock doses no longer match this seed."
+    for pid, product, dose in doses:
+        opened = product.get("openedAt") or ""
+        recorded = next((p for p in (receipt or {}).get("products", []) if p["id"] == pid), None)
+        credit = sum(r["ml"] for linked_id, _, r in doses if linked_id == pid)
+        refilled = any(r.get("kind") == "refill" and (t := _parse_datetime(r.get("at"))) is not None and t > at
+                       for r in product.get("history", []))
+        later_usage = sum(awc_engine._f(r.get("ml")) for r in product.get("history", [])
+                          if r.get("kind") in ("dose", "pump", "transfer") and not r.get("undoneAt")
+                          and (t := _parse_datetime(r.get("at"))) is not None and t > at)
+        corrected = recorded and (later_usage > recorded["remainingMl"] or abs(awc_engine._f(product.get("remainingMl"))
+                                     - (recorded["remainingMl"] - later_usage)) > 0.01)
+        if dose.get("undoneAt") or (recorded and opened != recorded["openedAt"]) \
+                or (not recorded and opened and not _vessel_holds_that_load(opened, at)) \
+                or refilled or corrected or awc_engine._f(product.get("remainingMl")) + credit > awc_engine._f(product.get("bottleMl")):
+            return None, "A linked stock bottle has been replaced, corrected or already credited."
+    water_now = _cultures_seed_water(config)
+    water_before, water_after = (receipt.get("mixBefore"), receipt.get("mixAfter")) if receipt else (None, None)
+    if not receipt:
+        # v0.7.225 and earlier recorded this debit in the activity ledger.
+        # Require the actual recorded draw/remaining amount, never today's recipe.
+        pattern = re.compile(r"Mixing station: ([\d.]+) L drawn by seeding " + re.escape(jar["name"]) + r" — ([\d.]+) L left$")
+        records = [(a, pattern.fullmatch(str(a.get("message") or ""))) for a in config.get("activity", [])
+                   if (t := _parse_datetime(a.get("timestamp"))) is not None and 0 <= (t - at).total_seconds() <= 5]
+        matches = [(a, m) for a, m in records if m]
+        if len(matches) != 1:
+            return None, "This older seed has no unambiguous saltwater debit receipt; its water balance needs review."
+        _, match = matches[0]
+        if water_now["state"] not in ("ready", "storing") or any(
+                (t := _parse_datetime(water_now[k])) is not None and t > at for k in ("startedAt", "testedAt")):
+            return None, "The saltwater batch has changed since seeding."
+        water_after = {**water_now, "litres": float(match[2])}
+        water_before = {**water_after, "litres": round(float(match[1]) + float(match[2]), 2)}
+    restore_water = water_before != water_after
+    # Ready → storing is routine circulation of the same tested batch.
+    comparable_water = dict(water_now)
+    if water_now["state"] in ("ready", "storing") and water_after["state"] in ("ready", "storing"):
+        comparable_water["state"] = water_after["state"]
+    if restore_water and (comparable_water != water_after or water_before["state"] != water_after["state"]
+                          or water_before["litres"] > _mixing_cfg(config)["vessels"]["mix"]["volumeLitres"]):
+        return None, "The saltwater level or batch has changed or was exhausted; review it before undoing this seed."
+    return {"state": before, "donor": donor, "donorRow": donor_row, "donorLitres": donor_litres,
+            "doses": doses, "water": water_before if restore_water else None, "legacy": not receipt}, ""
+
+
+def _cultures_journal_undo(config: dict[str, Any], jar_id: str, row: dict[str, Any], now: datetime) -> dict[str, Any]:
+    out = {k: v for k, v in row.items() if k != "seedUndo"}
+    if row.get("undoneAt"):
+        return {**out, "undoable": False}
+    owner = _cultures_seed_owner(config, jar_id, row)
+    if owner:
+        seed = next(r for r in config["nps"]["cultures"]["jars"][owner]["history"]
+                    if r.get("event") == "seeded" and r.get("at") == row["at"] and not r.get("undoneAt"))
+        plan, reason = _cultures_seed_undo_plan(config, owner, seed, now)
+        return {**out, "undoable": plan is not None, "undoJarId": owner, "undoReason": reason,
+                "undoKind": "seed"}
+    allowed = row.get("event") in cultures_engine.UNDOABLE_EVENTS
+    recent = _undo_window_ok(_parse_datetime(row.get("at")), now)
+    return {**out, "undoable": allowed and recent,
+            "undoReason": ("" if recent else "Undo window passed") if allowed else "Undo is not available for this entry."}
+
+
 def _cultures_undo_apply(config: dict[str, Any], jar_id: str, stamp: str,
                          now: datetime) -> tuple[str, str] | None:
     """Take back a daily tap (0.7.191): the journal row named by ``stamp`` —
@@ -20012,8 +20227,9 @@ def _cultures_undo_apply(config: dict[str, Any], jar_id: str, stamp: str,
     The jar's stamps are re-read from the surviving rows, the phyto dose the
     feed drew comes back to the bottle if it still holds that load, and the
     reminder completion the tap wrote goes (a skip's snooze with it). The
-    ceremonies — harvest, restart, water change, seed, split, crash — move
-    water and stock and are refused here. Returns (code, message) on refusal."""
+    Phyto seeds reverse their linked records together after checking the
+    receipt. Other water-moving actions remain unsupported. Returns an error
+    before changing balances when a linked record cannot be restored."""
     cultures = _nps_cultures_cfg(config)
     jar = cultures["jars"].get(jar_id)
     if not isinstance(jar, dict):
@@ -20024,8 +20240,30 @@ def _cultures_undo_apply(config: dict[str, Any], jar_id: str, stamp: str,
     at = _parse_datetime(stamp)
     if row is None or not _undo_window_ok(at, now):
         return "nothing_to_undo", "Nothing to undo — a tap can be taken back for a day"
+    owner = _cultures_seed_owner(config, jar_id, row)
+    if owner:
+        target = cultures["jars"][owner]
+        seed = next(r for r in target["history"] if r.get("event") == "seeded"
+                    and r.get("at") == stamp and not r.get("undoneAt"))
+        plan, reason = _cultures_seed_undo_plan(config, owner, seed, now)
+        if plan is None:
+            return "seed_undo_conflict", reason
+        target["state"].update(plan["state"])
+        seed["undoneAt"] = now.isoformat()
+        if plan["donor"] is not None:
+            plan["donor"]["state"]["workingL"] = plan["donorLitres"]
+            plan["donorRow"]["undoneAt"] = now.isoformat()
+        for _pid, product, dose in plan["doses"]:
+            product["remainingMl"] = round(product["remainingMl"] + dose["ml"], 2)
+            dose["undoneAt"] = now.isoformat()
+        if plan["water"] is not None:
+            _mixing_cfg(config)["vessels"]["mix"]["estimatedLitres"] = plan["water"]["litres"]
+        _cultures_touch_continuity(cultures, now)
+        _append_activity(config, f"{target['name']}: seed taken back — culture, donor, stock and saltwater records restored"
+                         + ("; earlier culture state recovered from the journal" if plan["legacy"] else ""), "control")
+        return None
     if row.get("event") not in cultures_engine.UNDOABLE_EVENTS:
-        return "not_undoable", "Only a look, a feed, a skip or a sign can be taken back — a harvest or a restart moves water and stock"
+        return "not_undoable", "Undo supports observations, feeds and linked phyto seeds; this entry is not supported yet"
     row["undoneAt"] = now.isoformat()
     state = jar["state"]
     replay = cultures_engine.replay_state(history, jar.get("species"))

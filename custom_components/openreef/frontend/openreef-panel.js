@@ -14144,7 +14144,8 @@ const rigSteps = [
     // The feed strip reads the bottle's rows too — a Fed from a strip card
     // must fill its mark on the next paint.
     if (msg && (msg.type === "openreef/cultures_bottle" || (msg.type === "openreef/cultures_log" && msg.harvested)
-      || msg.type === "openreef/cultures_split" || msg.type === "openreef/cultures_fresh_vessel" || msg.type === "openreef/cultures_seed")) setTimeout(() => this._npsLoadSummary?.(true), 0);
+      || msg.type === "openreef/cultures_split" || msg.type === "openreef/cultures_fresh_vessel" || msg.type === "openreef/cultures_seed"
+      || msg.type === "openreef/cultures_undo")) setTimeout(() => this._npsLoadSummary?.(true), 0);
     const submittedDraft = { ...this._culturesFormDrafts?.[msg.jar_id] };
     let succeeded = false;
     try {
@@ -14157,7 +14158,7 @@ const rigSteps = [
         if (draft && draft[key] === submittedDraft[key]) delete draft[key];
       }
       succeeded = true;
-      if (msg.harvested && this._hass && this._mixingEnabled()) this._mixingLoadSummary(true);
+      if ((msg.harvested || msg.type === "openreef/cultures_undo") && this._hass && this._mixingEnabled()) this._mixingLoadSummary(true);
     } catch (err) {
       this._cultures.error = (err && err.message) || "That didn't work — try again.";
     }
@@ -14552,8 +14553,11 @@ const rigSteps = [
   // the reload — the backend owns every one of them.
   _culturesUndo(jarId, at) {
     if (!jarId || !at) return;
-    this._culturesCall({ type: "openreef/cultures_undo", jar_id: jarId, at },
-      "Taken back — the journal, the timeline and the feed advice no longer count that tap. Log the look again as you saw it.");
+    const row = this._cultures.summary?.jars?.find((jar) => jar.id === jarId)?.history?.find((item) => item.at === at);
+    return this._culturesCall({ type: "openreef/cultures_undo", jar_id: jarId, at },
+      row?.undoKind === "seed" || row?.event === "seeded"
+        ? "Seed taken back — the culture, donor, saltwater and stock records are restored. No water or equipment was moved."
+        : "Taken back — the journal, the timeline and the feed advice no longer count that tap. Log the look again as you saw it.");
   }
 
   // A crash sign (V2 Stage B): foam, milky water, a smell, pods at the
@@ -16014,12 +16018,12 @@ const rigSteps = [
       enriched: "enriched & bottled", bottled: "bottled plain", filled: "filled", fed_tank: "fed to the tank", emptied: "emptied" };
     const signWord = Object.fromEntries((sum.signs || []).map((sg) => [sg.id, sg.label]));
     // Undo (0.7.191): a daily tap — a look, a feed, a skip, a sign — can be
-    // taken back for a day; the ceremonies move water and stock and cannot.
+    // taken back for a day. Linked seeds use the backend's receipt checks.
     // A taken-back row stays on the page, struck through, so the log never
     // hides what happened.
     const undoWindowMs = 24 * 3600000;
-    const undoable = (h) => h.jarId && !h.undoneAt && ["feed", "tint", "skip", "sign"].includes(h.event)
-      && Date.now() - Date.parse(h.at) <= undoWindowMs;
+    const undoable = (h) => h.jarId && !h.undoneAt && (h.undoable ?? (["feed", "tint", "skip", "sign", "index"].includes(h.event)
+      && Date.now() - Date.parse(h.at) >= 0 && Date.now() - Date.parse(h.at) <= undoWindowMs));
     const journal = events.length ? `
       <article class="panel stack">
         <p class="eyebrow" style="margin:0;">Culture journal</p>
@@ -16046,8 +16050,8 @@ const rigSteps = [
               <td style="padding:6px 10px;text-align:right;">${h.eggRatio != null ? `${this._escape(String(Math.round(h.eggRatio)))} %` : ""}</td>
               <td style="padding:6px 10px;text-align:right;">${h.tempC != null ? this._escape(String(h.tempC)) : ""}</td>
               <td style="padding:2px 6px;text-align:right;white-space:nowrap;">${undoable(h)
-                ? `<button class="secondary compact-button" data-action="cultures-undo" data-id="${this._escape(h.jarId)}" data-at="${this._escape(h.at)}" title="Takes this tap back — the water, the feed clock and the phyto dose go back to how they were; the timeline and the feed advice stop counting it">Undo</button>`
-                : ""}</td>
+                ? `<button class="secondary compact-button" data-action="cultures-undo" data-id="${this._escape(h.undoJarId || h.jarId)}" data-at="${this._escape(h.at)}" title="${h.undoKind === "seed" ? "Undo this seed and its linked donor, saltwater and stock entries together. This corrects records only." : "Take this entry back and restore its recorded balances and clocks."}">Undo</button>`
+                : !h.undoneAt && h.undoReason ? `<small class="muted" style="display:block;max-width:220px;white-space:normal;">${this._escape(h.undoReason)}</small>` : ""}</td>
             </tr>`).join("")}</tbody>
           </table>
         </div>

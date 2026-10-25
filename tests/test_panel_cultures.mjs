@@ -1091,6 +1091,38 @@ test("journal: a daily tap inside the day carries Undo, a ceremony and an old ro
 });
 
 
+test("journal seed undo links both rows to the seed and explains unavailable corrections", async () => {
+  const restore = freezeTime(NOW);
+  try {
+    const at = iso(1);
+    const main = phytoJar({ id: "n1", name: "Nanno Main", history: [
+      { event: "harvest", at, ml: 250, draw: true, to: "vessel", undoable: true, undoKind: "seed", undoJarId: "n2" },
+      { event: "harvest", at: iso(3), ml: 150, undoable: false, undoReason: "Undo is not available for this entry." },
+    ] });
+    const backup = phytoJar({ id: "n2", name: "Nanno Backup", history: [
+      { event: "seeded", at, ml: 1250, freshMl: 1000, nutrientMl: 1.5, from: "n1", undoable: true, undoKind: "seed", undoJarId: "n2" },
+    ] });
+    const panel = await culturesPanel({}, summaryFixture([main, backup]));
+    let journal = panel._culturesTab().split("Culture journal")[1];
+    assert((journal.match(/data-action="cultures-undo" data-id="n2"/g) || []).length === 2, "either linked row undoes the target seed");
+    assert(journal.includes("Undo is not available for this entry."), "unsupported entries explain the missing button");
+    const calls = [];
+    panel._callWS = async (msg) => { calls.push(msg); return panel._cultures.summary; };
+    await panel._culturesUndo("n2", at);
+    assert(calls[0].type === "openreef/cultures_undo" && calls[0].jar_id === "n2" && calls[0].at === at, "the seed owns the correction");
+    assert(panel._cultures.message.includes("Seed taken back") && panel._cultures.message.includes("No water or equipment was moved"), "confirmation explains a record correction");
+    for (const jar of [main, backup]) {
+      jar.history[0].undoable = false;
+      jar.history[0].undoReason = "The saltwater level has changed; review it before undoing this seed.";
+    }
+    journal = panel._culturesTab().split("Culture journal")[1];
+    assert(!journal.includes('data-action="cultures-undo"') && journal.includes("saltwater level has changed"), "the backend conflict appears beside the entry");
+    for (const jar of [main, backup]) jar.history[0].undoneAt = iso(0);
+    journal = panel._culturesTab().split("Culture journal")[1];
+    assert((journal.match(/culture-journal-undone/g) || []).length === 2 && !journal.includes("saltwater level has changed"), "both tombstones remain visible without a second undo");
+  } finally { restore(); }
+});
+
 // ---------------------------------------------------------------------------
 // 0.7.207 — the phyto vessel, Stage A (docs/phyto-culture-brainstorm.md §5.9)
 // ---------------------------------------------------------------------------
