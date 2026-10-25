@@ -2870,6 +2870,36 @@ def test_mix_now_with_circulation_off_is_a_one_off_and_refuses_elsewhere():
     assert _mix_state(entry3)["batch"]["state"] == "salting"
 
 
+def test_rotifer_240ml_external_draw_stops_without_changing_stored_water_levels():
+    scheduler = install_scheduler(integration)
+    hass, entry = _station({"rodi": {"rateLph": 8.08, "fillCapMin": 240, "flushSeconds": 45},
+                           "batch": _stored_batch(litres=10),
+                           "vessels": {"mix": {"volumeLitres": 35, "estimatedLitres": 10, "contents": "salt"},
+                                       "rodi": {"volumeLitres": 20, "estimatedLitres": 5}}})
+    conn = FakeConnection()
+    before = copy.deepcopy(_mix_state(entry)["vessels"])
+    scheduled_before = len(scheduler.scheduled)
+    run(integration.websocket_mixing_rodi_draw(hass, conn, {"id": 1, "litres": 0.24, "destination": "external"}))
+    assert conn.results[-1].payload["success"] is True
+    draw = _mix_state(entry)["rodi"]["draw"]
+    assert draw["active"] and draw["destination"] == "external" and draw["litres"] == 0.24
+    duration = (datetime.fromisoformat(draw["endsAt"]) - datetime.fromisoformat(draw["startedAt"])).total_seconds()
+    assert abs(duration - (45 + 0.24 / 8.08 * 3600)) < 0.001
+    # A double click cannot start a second run.
+    run(integration.websocket_mixing_rodi_draw(hass, conn, {"id": 2, "litres": 0.24, "destination": "external"}))
+    assert conn.results[-1].payload["success"] is False
+    assert _switch_calls(hass, "switch.mix_booster").count(("turn_on", "switch.mix_booster")) == 1
+    stop = next(row for row in scheduler.scheduled[scheduled_before:]
+                if not row["cancelled"] and abs((row["run_at"] - datetime.fromisoformat(draw["endsAt"])).total_seconds()) < 1)
+
+    async def finish():
+        await stop["callback"](stop["run_at"])
+    run(finish())
+    assert _mix_state(entry)["rodi"]["draw"]["active"] is False
+    assert ("turn_off", "switch.mix_booster") in _switch_calls(hass, "switch.mix_booster")
+    assert _mix_state(entry)["vessels"] == before, "T-off water must not enter either stored-water ledger"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

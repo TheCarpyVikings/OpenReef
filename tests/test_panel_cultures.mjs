@@ -780,7 +780,7 @@ test("day 0 shows the fill split from the station's water, the harvest tap sends
     // Producing: the bottle input rides the harvest tap and the tap sends it.
     panel = await culturesPanel();
     html = panel._culturesTab();
-    assert(html.includes('data-cultures-bottle-ml="c1"') && html.includes("Blank = the whole harvest volume (625 ml)"), "the bottle input is missing");
+    assert(html.includes('data-cultures-bottle-ml="c1"') && html.includes("Enter the measured amount"), "the bottle input asks for the actual rinse water");
     const c1Tile = html.slice(html.indexOf('data-culture="c1"'), html.indexOf('data-culture="c2"'));
     assert(c1Tile.length > 0 && !c1Tile.includes("fill 2500 ml"), "a running jar shows no fill line");
     const c2Tile = html.slice(html.indexOf('data-culture="c2"'));
@@ -853,7 +853,7 @@ test("a harvest names where it went: the tile's select, the settings default, th
     const panel = await culturesPanel();
     let html = panel._culturesTab();
     assert(html.includes('data-cultures-harvest-to="c1"') && html.includes('<option value="bottle" selected>the fridge bottle</option>'), "the producing rotifer tile must carry the destination select, bottle by default");
-    assert(html.includes('>Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="625" data-cultures-bottle-ml="c1"'), "the rinse box lost its label — blank means the whole harvest, so the box shows it");
+    assert(html.includes('>Rinsed in<span class="unit"><input type="number" min="1" max="20000" step="1" placeholder="fresh saltwater ml" data-cultures-bottle-ml="c1"'), "the rinse box asks for measured fresh saltwater, not the discarded harvest water");
     const c2Tile = html.slice(html.indexOf('data-culture="c2"'));
     assert(!c2Tile.includes("data-cultures-harvest-to"), "the pods have nowhere else than the tank — no select");
     const settings = panel._culturesSettings();
@@ -1978,11 +1978,11 @@ test("care cycle resets independently of culture age and heat still takes priori
 
 // A small DOM double for the actual render/event path: every innerHTML write
 // recreates the recipe's controls, just as a Home Assistant update does.
-async function editablePhytoPanel() {
-  const jar = phytoJar({ volumeL: 5, state: { ...phytoJar().state, workingL: 5 },
+async function editablePhytoPanel(options = {}) {
+  const jar = options.jar || phytoJar({ volumeL: 5, state: { ...phytoJar().state, workingL: 5 },
     splitGuide: { ...phytoJar().splitGuide, outMl: 2500 },
     homeBottle: { ...phytoJar().homeBottle, bottleMl: 2500, remainingMl: 1300 } });
-  const panel = await culturesPanel(phytoConfig(), phytoSummary(jar));
+  const panel = await culturesPanel({ ...phytoConfig(), ...options.config }, options.jar ? summaryFixture([jar]) : phytoSummary(jar));
   panel._config.tank = {};
   panel._activeTab = "cultures";
   const handlers = {}, fields = {};
@@ -1991,6 +1991,7 @@ async function editablePhytoPanel() {
     culturesDestTank: false, culturesDestTankMl: "100", culturesDestCone: false,
     culturesDestConeMl: "300", culturesDestVessel: false, culturesDestVesselMl: "",
     culturesWorkingAfter: "5", culturesF2: true, culturesTint: "dark", culturesSecchi: "",
+    ...options.fields,
   };
   const attr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
   const detail = { dataset: { feedingDetails: "culture-n1-recipe" }, open: true };
@@ -2005,8 +2006,8 @@ async function editablePhytoPanel() {
         value: typeof value === "boolean" ? "" : value, checked: typeof value === "boolean" && value,
         matches: () => true,
       };
-      for (const key of ["split-preview", "nutrient-preview", "split-warning"])
-        fields[`data-culture-${key}`] = { textContent: "" };
+      for (const key of ["split-preview", "nutrient-preview", "split-warning", "harvest-water", "phyto-refill"])
+        fields[`data-culture-${key}`] = { textContent: "", innerHTML: "" };
     },
   };
   for (const method of ["_styles", "_messages", "_tabs", "_subNav", "_mountBetaFab", "_stopPulseDiagramMotion", "_subscribeConfigEvents", "_recordLiveReadings"])
@@ -2024,7 +2025,8 @@ async function editablePhytoPanel() {
     const type = field.type === "checkbox" ? "change" : "input";
     handlers[type]({ target: field, type });
   };
-  return { panel, fields, edit };
+  const click = (action) => handlers.click({ target: { closest: () => ({ dataset: { action, id: "n1" } }) } });
+  return { panel, fields, edit, click };
 }
 
 test("the 150 ml tank withdrawal survives hass updates and summary refreshes between fields", async () => {
@@ -2101,6 +2103,95 @@ test("demo edits cannot replace a real culture recipe draft", async () => {
   edit("culturesSplitMl", "900");
   panel._culturesToggleDemo();
   assert(fields["data-cultures-split-ml"].value === "150", "the real draft returns after demo mode");
+});
+
+async function rotiferWaterPanel() {
+  return editablePhytoPanel({
+    jar: jarSummary({ id: "n1", volumeL: 4.5, salinityPpt: 27, purgeMl: 50,
+      harvestGuide: { totalMl: 999.9, refillMl: 1050, mixMl: 810, rodiMl: 240, targetPpt: 27, mixPpt: 35 },
+      phytoSources: [{ id: "bottle:a", name: "Phyto A", ppt: 30, ml: 1000, ready: true }], coneDoseMl: 300 }),
+    config: { mixingStation: { enabled: true, batch: { state: "storing" }, rodi: { rateLph: 8.08 } } },
+    fields: { culturesBottleMl: "", culturesRinseFromVessel: true, culturesHarvestTo: "bottle", culturesEnrich: false,
+      culturesPhytoFrom: "", culturesPhytoMl: "", culturesTint: "clearing" },
+  });
+}
+
+test("rotifer rinse source and volume survive refresh and log 500 ml separately from the refill", async () => {
+  const { panel, fields, edit, click } = await rotiferWaterPanel();
+  panel._mixingLoadSummary = () => {};
+  const calls = [];
+  panel._callWS = async (msg) => { calls.push(msg); return panel._cultures.summary; };
+  edit("culturesBottleMl", "500");
+  edit("culturesRinseFromVessel", true);
+  panel.hass = {};
+  await panel._culturesLoadSummary(true);
+  assert(fields["data-cultures-bottle-ml"].value === "500", "the rinse volume survives updates");
+  const controls = fields["data-culture-harvest-water"].innerHTML;
+  assert(controls.includes("500 ml rinse + 810 ml refill = 1310 ml"), "both saltwater withdrawals are visible");
+  assert(controls.includes("Draw 240 ml RODI to T-off"), "the calculated RODI amount has a direct draw button");
+  click("cultures-harvested-only");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const log = calls.find((msg) => msg.type === "openreef/cultures_log");
+  assert(log.harvested && log.bottle_ml === 500 && log.rinse_from_vessel === true, JSON.stringify(log));
+  assert(!log.fed, "logging the water does not invent a feed");
+  assert(!calls.some((msg) => msg.type === "openreef/mixing_rodi_draw"), "logging must never start the booster");
+  assert(fields["data-cultures-bottle-ml"].value === "", "successful harvest clears the submitted rinse amount");
+});
+
+test("the culture RODI button uses T-off only, preserves the recipe, and offers stop", async () => {
+  const { panel, fields, edit, click } = await rotiferWaterPanel();
+  edit("culturesBottleMl", "500");
+  const calls = [];
+  panel._callWS = async (msg) => {
+    calls.push(msg);
+    return { success: true, summary: { rodi: { draw: msg.type.endsWith("_draw") ? { destination: "external", litres: 0.24 } : null } } };
+  };
+  // A stored selection on the Mixing tab must never redirect this draw.
+  panel._mixingDrawDest = "mix";
+  click("cultures-rodi-draw");
+  click("cultures-rodi-draw");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(calls.length === 1 && JSON.stringify(calls[0]) === JSON.stringify({ type: "openreef/mixing_rodi_draw", litres: 0.24, destination: "external" }), JSON.stringify(calls));
+  assert(fields["data-cultures-bottle-ml"].value === "500", "starting a draw keeps the unfinished harvest");
+  assert(fields["data-culture-harvest-water"].innerHTML.includes("Stop RODI draw"), "stop is available on the culture tile");
+  assert(panel._cultures.message.includes("harvest has not been logged"), "drawing water is separate from the harvest log");
+  click("cultures-rodi-stop");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(calls[1].type === "openreef/mixing_rodi_stop", "the same controller stops the draw");
+  assert(!calls.some((msg) => msg.type === "openreef/cultures_log"), "neither action logs a harvest");
+});
+
+test("RODI controls follow a changed phyto refill and refuse invalid recipes or demo actions", async () => {
+  const { panel, fields, edit } = await rotiferWaterPanel();
+  edit("culturesPhytoFrom", "bottle:a");
+  edit("culturesPhytoMl", "300");
+  assert(fields["data-culture-harvest-water"].innerHTML.includes("Draw 197 ml RODI to T-off"), "30 ppt phyto changes the fresh-water recipe to 553 mix + 197 RODI");
+  const calls = [];
+  panel._callWS = async (msg) => { calls.push(msg); return { success: true }; };
+  await panel._culturesRodiAction("n1");
+  assert(calls[0].litres === 0.197, "the click uses the current edited recipe");
+  edit("culturesTint", "green");
+  await panel._culturesRodiAction("n1");
+  assert(calls.length === 1 && panel._cultures.error.includes("Still green"), "an invalid refill never starts a draw");
+  edit("culturesTint", "clearing");
+  panel._cultures.demo = true;
+  await panel._culturesRodiAction("n1");
+  await panel._culturesRodiAction("n1", true);
+  assert(calls.length === 1, "demo mode cannot start or stop hardware");
+});
+
+test("a refused RODI draw is explained on Cultures and retains the harvest fields", async () => {
+  const { panel, fields, edit } = await rotiferWaterPanel();
+  edit("culturesBottleMl", "500");
+  edit("culturesRinseFromVessel", false);
+  panel._callWS = async () => ({ success: false, reasons: ["RODI flow rate is unknown — calibrate it"] });
+  await panel._culturesRodiAction("n1");
+  assert(panel._cultures.error.includes("calibrate it") && !panel._cultures.message, "backend guard reason is visible");
+  assert(fields["data-cultures-bottle-ml"].value === "500" && !fields["data-cultures-rinse-from-vessel"].checked, "refusal retains volume and source");
+  assert(fields["data-culture-harvest-water"].innerHTML.includes("810 ml refill = 810 ml"), "other-source rinse water is not charged to the station");
+  panel._callWS = async () => { throw new Error("Connection lost"); };
+  await panel._culturesRodiAction("n1");
+  assert(panel._cultures.error === "Connection lost" && !panel._busy, "connection failure releases the controls and explains the failure");
 });
 
 runTests();

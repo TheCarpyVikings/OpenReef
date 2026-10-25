@@ -22,7 +22,69 @@ def phyto_config(**kwargs):
     return t._config(t._phyto_entry(jars={"c1": t._phyto_jar(started_ago_days=12, now=NOW, lastTint="dark", workingL=3.5)}, **kwargs))
 
 
+def rotifer_harvest_entry():
+    jar = t._jar(started_ago_days=19, now=NOW, lastTint="clearing")
+    jar.update(volumeL=4.5, salinityPpt=27, vesselKind="reactor", purgeMl=50, cadence={"harvestPct": 22.22})
+    entry = t._entry(jars={"r": jar})
+    cfg = t._config(entry)
+    cfg["mixingStation"] = {
+        "enabled": True, "salt": {"targetPpt": 35},
+        "vessels": {"mix": {"volumeLitres": 35, "estimatedLitres": 10, "contents": "salt"},
+                    "rodi": {"volumeLitres": 20, "estimatedLitres": 5}},
+        "batch": {"state": "storing", "type": "salt", "litres": 10, "loggedPpt": 35, "testedAt": stamp()},
+    }
+    entry.options = {**entry.options, t.CONF_SETTINGS: cfg}
+    return entry
+
+
 class CultureIntegrity(unittest.TestCase):
+    def test_rotifer_harvest_debits_bottle_rinse_and_refill_separately(self):
+        entry = rotifer_harvest_entry()
+        conn, hass = FakeConnection(), FakeHass(entries=[entry])
+        guide = I._cultures_summary_payload(hass, t._config(entry))["jars"][0]["harvestGuide"]
+        self.assertEqual((guide["totalMl"], guide["purgeMl"], guide["mixMl"], guide["rodiMl"]), (999.9, 50, 810, 240))
+        run(I.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "r", "harvested": True,
+                                                "bottle_ml": 500, "rinse_from_vessel": True}))
+        self.assertFalse(conn.errors)
+        cfg = t._config(entry)
+        self.assertEqual(cfg["mixingStation"]["vessels"]["mix"]["estimatedLitres"], 8.69)
+        self.assertEqual(cfg["mixingStation"]["vessels"]["rodi"]["estimatedLitres"], 5)
+        self.assertEqual(cfg["nps"]["cultures"]["bottle"]["remainingMl"], 500)
+        jar = cfg["nps"]["cultures"]["jars"]["r"]
+        self.assertEqual(jar["volumeL"], 4.5)
+        self.assertEqual((jar["history"][0]["ml"], jar["history"][0]["purgeMl"]), (999.9, 50))
+        self.assertFalse([call for call in hass.services.calls if call.domain == "switch"],
+                         "logging a harvest must not start equipment")
+        activity = str(cfg["activity"])
+        self.assertIn("0.81 L drawn by refilling", activity)
+        self.assertIn("0.5 L drawn by rinsing", activity)
+
+    def test_other_rinse_water_and_legacy_blank_volume_do_not_invent_station_draws(self):
+        for extra, bottle in (({"bottle_ml": 500, "rinse_from_vessel": False}, 500), ({}, 999.9)):
+            with self.subTest(extra=extra):
+                entry = rotifer_harvest_entry()
+                conn = FakeConnection()
+                run(I.websocket_cultures_log(FakeHass(entries=[entry]), conn,
+                                            {"id": 1, "jar_id": "r", "harvested": True, **extra}))
+                self.assertFalse(conn.errors)
+                cfg = t._config(entry)
+                self.assertEqual(cfg["mixingStation"]["vessels"]["mix"]["estimatedLitres"], 9.19)
+                self.assertEqual(cfg["nps"]["cultures"]["bottle"]["remainingMl"], bottle)
+
+    def test_invalid_measured_rinse_and_disabled_tracking_are_atomic(self):
+        for amount, tracking in ((None, True), (0, True), (-500, True), (float("nan"), True),
+                                 (float("inf"), True), (500, False)):
+            with self.subTest(amount=amount, tracking=tracking):
+                entry = rotifer_harvest_entry()
+                entry.options[t.CONF_SETTINGS]["mixingStation"]["integrations"] = {"hatcheryFromVessel": tracking}
+                before = deepcopy(entry.options)
+                conn, hass = FakeConnection(), FakeHass(entries=[entry])
+                run(I.websocket_cultures_log(hass, conn, {"id": 1, "jar_id": "r", "harvested": True,
+                                                        "fed": True, "bottle_ml": amount, "rinse_from_vessel": True}))
+                self.assertTrue(conn.errors)
+                self.assertEqual(entry.options, before)
+                self.assertFalse(hass.services.calls)
+
     def test_150_ml_tank_draw_without_topup_leaves_485_l_and_preserves_stock(self):
         parent = t._phyto_jar(started_ago_days=19, now=NOW, lastTint="dark", workingL=5,
                              lastHarvestAt=stamp(7), cyclesSinceFresh=2)

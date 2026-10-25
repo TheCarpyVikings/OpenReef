@@ -2059,6 +2059,8 @@ class OpenReefPanel extends HTMLElement {
         id ? { type: "openreef/nps_hatch_cancel", vessel_id: id } : { type: "openreef/nps_hatch_cancel" },
         "Hatch cancelled — the hatcher stands down.");
       if (action === "cultures-refresh") this._culturesLoadSummary(true);
+      if (action === "cultures-rodi-draw") this._culturesRodiAction(id);
+      if (action === "cultures-rodi-stop") this._culturesRodiAction(id, true);
       if (action === "cultures-demo-toggle") this._culturesToggleDemo();
       if (action === "cultures-rig-play") this._culturesRigPlay();
       if (action === "cultures-sign") this._culturesSign(id, target.dataset.sign || "");
@@ -2236,7 +2238,7 @@ class OpenReefPanel extends HTMLElement {
       }
 
       const cultureField = Object.entries(target.dataset).find(([key]) =>
-        /^(cultures(SplitMl|WorkingAfter|F2|PhytoFrom|PhytoMl|Tint|Secchi)|culturesDest(Bottle|Tank|Drip|Vessel|Cone)(Ml|Jar)?)$/.test(key));
+        /^(cultures(SplitMl|WorkingAfter|F2|PhytoFrom|PhytoMl|Tint|Secchi|BottleMl|RinseFromVessel|HarvestTo|Enrich)|culturesDest(Bottle|Tank|Drip|Vessel|Cone)(Ml|Jar)?)$/.test(key));
       if (cultureField) {
         const [key, jarId] = cultureField;
         this._culturesFormDrafts ||= {};
@@ -14152,6 +14154,7 @@ const rigSteps = [
         if (draft && draft[key] === submittedDraft[key]) delete draft[key];
       }
       succeeded = true;
+      if (msg.harvested && this._hass && this._mixingEnabled()) this._mixingLoadSummary(true);
     } catch (err) {
       this._cultures.error = (err && err.message) || "That didn't work — try again.";
     }
@@ -14185,6 +14188,8 @@ const rigSteps = [
     const bottleBox = this.shadowRoot?.querySelector(`[data-cultures-bottle-ml="${jarId}"]`);
     const bottleMl = bottleBox && bottleBox.value !== "" ? Number(bottleBox.value) : 0;
     if (harvested && bottleMl > 0) msg.bottle_ml = bottleMl;
+    if (harvested && this.shadowRoot?.querySelector(`[data-cultures-rinse-from-vessel="${jarId}"]`)?.checked)
+      msg.rinse_from_vessel = true;
     const egg = this.shadowRoot?.querySelector(`[data-cultures-egg="${jarId}"]`);
     const eggRatio = egg && egg.value !== "" ? Number(egg.value) : 0;
     if (egg && egg.value !== "" && Number.isFinite(eggRatio) && eggRatio >= 0) msg.egg_ratio = Math.min(100, eggRatio);
@@ -14218,7 +14223,7 @@ const rigSteps = [
       : fed ? "Feed logged — the phyto bottle keeps count. Wrong water? Undo it from the journal for a day."
         : msg.skip_feed ? "Feed skipped — the water is on the record; the reminder holds until the next slot. Wrong water? Undo it from the journal for a day."
           : "Tint logged — nothing else moved. Wrong water? Undo it from the journal for a day.",
-      ["culturesTint", ...(harvested ? ["culturesPhytoFrom", "culturesPhytoMl"] : [])]);
+      ["culturesTint", ...(harvested ? ["culturesPhytoFrom", "culturesPhytoMl", "culturesBottleMl", "culturesRinseFromVessel", "culturesHarvestTo", "culturesEnrich"] : [])]);
   }
 
   // The day the starter lands (doc §5.3): the arrival check first — the
@@ -14305,25 +14310,120 @@ const rigSteps = [
   }
 
   _culturesRefillDraft(jar, draft = {}) {
+    return this._culturesRefillRecipe(jar, draft).line;
+  }
+
+  _culturesRefillRecipe(jar, draft = {}) {
     const guide = jar.harvestGuide || {};
+    const invalid = (line) => ({ valid: false, line });
+    if (guide.available === false) return invalid(guide.reason || "The refill recipe is unavailable.");
     const source = (jar.phytoSources || []).find((item) => item.id === draft.sourceId);
-    if (!draft.sourceId) return "Plain-water refill selected; no phyto is included in the recipe above.";
-    if (!source?.ready) return "Selected phyto is unavailable — choose a ready source or plain water.";
-    if ((draft.tint ?? jar.tint) === "green") return "Still green — use plain water this time; a phyto refill will be refused.";
-    const phyto = Math.round(Number(draft.phytoMl ?? jar.coneDoseMl));
+    if (!draft.sourceId) return { valid: [guide.mixMl, guide.rodiMl].every((ml) => Number.isFinite(ml) && ml >= 0),
+      mixMl: guide.mixMl, rodiMl: guide.rodiMl, line: "Plain-water refill selected; no phyto is included in the recipe above." };
+    if (!source?.ready) return invalid("Selected phyto is unavailable — choose a ready source or plain water.");
+    if ((draft.tint ?? jar.tint) === "green") return invalid("Still green — use plain water this time; a phyto refill will be refused.");
+    // Match Python's whole-ml, ties-to-even rounding in refill_guide.
+    const roundMl = (value) => { const floor = Math.floor(value); return value - floor === 0.5 ? floor + floor % 2 : Math.round(value); };
+    const phyto = roundMl(Number(draft.phytoMl ?? jar.coneDoseMl));
     const total = Number(guide.refillMl ?? Number(guide.totalMl || 0) + Number(guide.purgeMl ?? jar.purgeMl ?? 0));
     const target = Number(guide.targetPpt ?? jar.salinityPpt);
     const mixPpt = Number(guide.mixPpt ?? jar.phytoRefill?.mixPpt);
     const phytoPpt = Number(source.ppt);
     if (![phyto, total, target, mixPpt, phytoPpt].every(Number.isFinite) || phyto <= 0 || total <= 0 || mixPpt <= 0)
-      return "Enter a positive phyto amount and check the refill salinities.";
-    if (phyto > Number(source.ml)) return `Only ${source.ml} ml is available from ${source.name}.`;
-    if (phyto > total) return `The phyto amount exceeds the ${total} ml harvest refill.`;
+      return invalid("Enter a positive phyto amount and check the refill salinities.");
+    if (phyto > Number(source.ml)) return invalid(`Only ${source.ml} ml is available from ${source.name}.`);
+    if (phyto > total) return invalid(`The phyto amount exceeds the ${total} ml harvest refill.`);
     const saltNeeded = total * target - phyto * phytoPpt;
-    const mix = Math.round(saltNeeded / mixPpt);
+    const mix = roundMl(saltNeeded / mixPpt);
     const rodi = total - phyto - mix;
-    if (saltNeeded < -0.5 || mix < 0 || rodi < 0) return `This phyto amount cannot make a ${target} ppt refill with ${mixPpt} ppt mix. Adjust the amount or source.`;
-    return `harvest refill: ${phyto} ml of ${phytoPpt} ppt phyto from ${source.name} + ${mix} ml mix${rodi > 0 ? ` + ${rodi} ml RODI` : ""} → ${target} ppt (${total} ml total). Restarting needs a separate full-vessel recipe.`;
+    if (saltNeeded < -0.5 || mix < 0 || rodi < 0) return invalid(`This phyto amount cannot make a ${target} ppt refill with ${mixPpt} ppt mix. Adjust the amount or source.`);
+    return { valid: true, mixMl: mix, rodiMl: rodi,
+      line: `harvest refill: ${phyto} ml of ${phytoPpt} ppt phyto from ${source.name} + ${mix} ml mix${rodi > 0 ? ` + ${rodi} ml RODI` : ""} → ${target} ppt (${total} ml total). Restarting needs a separate full-vessel recipe.` };
+  }
+
+  _culturesWaterFromVessel() {
+    const mix = this._mixingCfg();
+    return !!mix.enabled && mix.integrations?.hatcheryFromVessel !== false && mix.integrations?.awcGuard !== "off";
+  }
+
+  _culturesHarvestInputs(jar, live = true) {
+    const draft = this._culturesFormDrafts?.[jar.id] || {};
+    const read = (attr, key, fallback) => {
+      const el = live && this.shadowRoot?.querySelector?.(`[data-cultures-${attr}="${jar.id}"]`);
+      return el ? (el.type === "checkbox" ? el.checked : el.value) : draft[key] ?? fallback;
+    };
+    const phyto = read("phyto-ml", "culturesPhytoMl", ""), bottle = read("bottle-ml", "culturesBottleMl", "");
+    return { sourceId: read("phyto-from", "culturesPhytoFrom", ""), phytoMl: phyto === "" ? undefined : Number(phyto),
+      tint: read("tint", "culturesTint", jar.tint), bottleMl: bottle === "" ? null : Number(bottle),
+      rinseFromVessel: read("rinse-from-vessel", "culturesRinseFromVessel", this._culturesWaterFromVessel()) };
+  }
+
+  _culturesHarvestWaterControls(jar, live = false) {
+    const esc = (value) => this._escape(String(value));
+    const draft = this._culturesHarvestInputs(jar, live), recipe = this._culturesRefillRecipe(jar, draft);
+    const mix = this._mixingCfg(), rodi = this._mixingSummary?.rodi;
+    const draw = rodi ? rodi.draw : mix.rodi?.draw?.active ? mix.rodi.draw : null;
+    const tracking = this._culturesWaterFromVessel();
+    const rinse = draft.rinseFromVessel && jar.hasBottle;
+    let ledger = "";
+    if (tracking && recipe.valid) {
+      ledger = rinse && !(draft.bottleMl > 0 && draft.bottleMl <= 20000)
+        ? "Enter the fresh saltwater used to rinse the crop so it can be deducted with the refill."
+        : `Saltwater vessel: ${rinse ? `${draft.bottleMl} ml rinse + ` : ""}${recipe.mixMl} ml refill = ${recipe.mixMl + (rinse ? draft.bottleMl : 0)} ml to deduct when you log the harvest.`;
+      if (!["ready", "storing"].includes(mix.batch?.state)) ledger += " A tested saltwater batch is needed for the vessel ledger.";
+    }
+    let control = "";
+    if (this._mixingEnabled()) {
+      if (draw) {
+        const where = { external: "T-off", store: "RODI store", mix: "mixing vessel" }[draw.destination] || draw.destination;
+        control = `<small>RODI draw running to ${esc(where)}${draw.litres > 0 ? ` (${esc(Math.round(draw.litres * 1000))} ml requested)` : ""}.</small>
+          <button class="danger-text compact-button" data-action="cultures-rodi-stop" data-id="${esc(jar.id)}" ${this._busy || this._cultures.demo ? "disabled" : ""}>Stop RODI draw</button>`;
+      } else if (jar.state?.status === "producing" && recipe.valid && recipe.rodiMl > 0) {
+        const canDraw = recipe.rodiMl >= 10 && !this._busy && !this._cultures.demo;
+        control = `<small>Route the T-off into your refill jug before starting. This draws the RODI only; log the harvest after completing the refill.</small>
+          <button class="secondary compact-button" data-action="cultures-rodi-draw" data-id="${esc(jar.id)}" ${canDraw ? "" : "disabled"}>Draw ${esc(recipe.rodiMl)} ml RODI to T-off</button>${recipe.rodiMl < 10 ? "<small>Timed draws start at 10 ml.</small>" : ""}`;
+      }
+    }
+    const notice = this._culturesRodiNotice;
+    return `${ledger ? `<small data-culture-water-debit="${esc(jar.id)}">${esc(ledger)}</small>` : ""}${control}
+      ${notice?.jarId === jar.id ? `<small role="status" ${notice.error ? 'style="color:var(--error-color,#e5484d)"' : ""}>${esc(notice.message)}</small>` : ""}`;
+  }
+
+  async _culturesRodiAction(jarId, stop = false) {
+    if (this._busy) return;
+    const notice = (message, error = false) => {
+      this._culturesRodiNotice = { jarId, message, error };
+      this._cultures.error = error ? message : "";
+      this._cultures.message = error ? "" : message;
+    };
+    if (this._cultures.demo) {
+      notice("Exit demo view before running the RODI draw.");
+      this._render();
+      return;
+    }
+    const jar = this._cultures.summary?.jars?.find((item) => item.id === jarId);
+    const recipe = jar && this._culturesRefillRecipe(jar, this._culturesHarvestInputs(jar));
+    if (!stop && (!recipe?.valid || recipe.rodiMl < 10 || jar.kind === "phyto" || jar.state?.status !== "producing")) {
+      notice(recipe?.valid ? "This harvest needs no timed RODI draw of at least 10 ml." : recipe?.line || "The harvest recipe is unavailable.", true);
+      this._render();
+      return;
+    }
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS(stop ? { type: "openreef/mixing_rodi_stop" }
+        : { type: "openreef/mixing_rodi_draw", litres: recipe.rodiMl / 1000, destination: "external" });
+      if (result?.config) this._config = result.config;
+      if (result?.summary) { this._mixingSummary = result.summary; this._mixingSummaryAt = Date.now(); }
+      if (result?.success === false) throw new Error(result.reasons?.join(" · ") || "The RODI action was refused.");
+      notice(stop ? "RODI draw stopped. Check the amount collected before completing the refill."
+        : `${recipe.rodiMl} ml RODI draw started to T-off; it stops automatically. The harvest has not been logged.`);
+    } catch (err) {
+      notice(err?.message || "Could not run the RODI action.", true);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
   }
 
   _culturesUpdateRecipePreview(jarId) {
@@ -14347,6 +14447,8 @@ const rigSteps = [
         phytoMl: number("data-cultures-phyto-ml", jar.coneDoseMl), tint: q("data-cultures-tint")?.value || jar.tint }));
       const guide = q("data-culture-harvest-guide");
       if (guide) guide.hidden = !!sourceId;
+      const controls = q("data-culture-harvest-water");
+      if (controls) controls.innerHTML = this._culturesHarvestWaterControls(jar, true);
     }
   }
 
@@ -15552,6 +15654,7 @@ const rigSteps = [
   _culturesTab() {
     this._culturesLoadSummary();
     const st = this._cultures;
+    if (this._hass && this._activeTab === "cultures" && this._mixingEnabled() && !st.demo) this._mixingLoadSummary();
     const sum = st.summary || {};
     const jars = Array.isArray(sum.jars) ? sum.jars : [];
     const bottle = sum.bottle || {};
@@ -15690,7 +15793,8 @@ const rigSteps = [
           </select></label>
         <div class="culture-field"><span></span><label class="culture-tick" title="The DHA step: this crop goes into the soak (${this._escape(String(sum.enrichment?.drops ?? 3))} drops, ${this._escape(String(sum.enrichment?.soakH ?? 6))} h) instead of straight into the bottle. Rinse and bottle when the soak is done."><input type="checkbox" data-cultures-enrich="${this._escape(j.id)}" ${sum.enrichment?.pauseReason || (sum.enrichment?.soak?.status && sum.enrichment.soak.status !== "none") ? "disabled" : ""}> enrich this crop</label></div>
         ${sum.enrichment?.pauseReason ? `<small class="awc-hint">${this._escape(sum.enrichment.pauseReason)}</small>` : ""}
-        <label class="culture-field" title="What you rinsed the net into — the culture water goes to waste. Blank = the whole harvest volume (${this._escape(String(j.harvestGuide?.totalMl || 0))} ml) for the bottle, no volume for the tank.">Rinsed in<span class="unit"><input type="number" min="1" max="5000" step="10" placeholder="${(j.harvestTo || "bottle") !== "tank" ? this._escape(String(j.harvestGuide?.totalMl || "")) : ""}" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>` : "";
+        <label class="culture-field" title="Fresh water used to rinse the retained crop into its bottle, soak or tank. Discard the sieved culture water. Enter the measured amount when drawing it from the saltwater vessel.">Rinsed in<span class="unit"><input type="number" min="1" max="20000" step="1" placeholder="fresh saltwater ml" data-cultures-bottle-ml="${this._escape(j.id)}"><small class="muted">ml</small></span></label>
+        <label class="culture-tick"><input type="checkbox" data-cultures-rinse-from-vessel="${this._escape(j.id)}" ${this._culturesWaterFromVessel() ? "checked" : ""}> Rinse water from saltwater vessel</label>` : "";
       // Refill with phyto (Stage C, doc §5.5): a home bottle on the shelf or a
       // vessel reading green or dark feeds the cone in its own refill — the jug
       // goes three-way at the cone's salinity; blank ml = one tint of the jar.
@@ -15759,7 +15863,8 @@ const rigSteps = [
         running ? `<button class="primary compact-button" data-action="cultures-looked" data-id="${this._escape(j.id)}" title="Logs the water you saw (and an egg count if you typed one) — nothing else moves: no feed, no phyto, the reminders stand">Log observation</button>` : "",
         running && !j.feed?.pauseReason ? `<button class="secondary compact-button" data-action="cultures-fed" data-id="${this._escape(j.id)}" title="Logs the tint and one feed — debits the phyto bottle">Fed</button>` : "",
         running && due.includes("feed") ? `<button class="secondary compact-button" data-action="cultures-skip-feed" data-id="${this._escape(j.id)}" title="Looked, not feeding: logs the water and skips this feed — the reminder holds until the next slot, no phyto moves, and the clearing time stays honest">Skip feed</button>` : "",
-        status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="${j.feed?.pauseReason ? "cultures-harvested-only" : "cultures-harvested"}" data-id="${this._escape(j.id)}" title="Logs today's harvest${j.hasBottle ? " — fills the rotifer bottle" : ""}${j.feed?.pauseReason ? "; the linked food is unavailable" : " and a feed"}">${j.feed?.pauseReason ? "Harvested" : "Harvested + fed"}</button>` : "",
+        status === "producing" ? `<button class="${due.includes("harvest") ? "primary" : "secondary"} compact-button" data-action="cultures-harvested-only" data-id="${this._escape(j.id)}" title="Log the harvest, rinse water and refill. Phyto selected in the refill is included; no separate feed is logged.">Harvested</button>` : "",
+        status === "producing" && !j.feed?.pauseReason ? `<button class="secondary compact-button" data-action="cultures-harvested" data-id="${this._escape(j.id)}" title="Log the harvest and a feed from the linked phyto supply">Harvested + fed</button>` : "",
         running ? `<button class="secondary compact-button" data-action="cultures-restart" data-id="${this._escape(j.id)}" title="Open the clean-vessel restart guide and refill calculator">Restart</button>` : "",
         running ? `<button class="secondary compact-button" data-action="cultures-water-change" data-id="${this._escape(j.id)}" title="${s.waterChangeOnDemand ? "On a sign — review the water-change amount and recipe" : "Choose the actual water-change amount and prepare the refill"}">Water change</button>` : "",
         status === "producing" && s.splitEligible ? `<button class="secondary compact-button" data-action="cultures-split" data-id="${this._escape(j.id)}" title="Seed a second jar from this one — a second culture; check the dates to stagger its restart">Split into B</button>` : "",
@@ -15794,7 +15899,7 @@ const rigSteps = [
           ${status === "producing" ? `<div class="button-row">${this._feedingReview(`culture-${j.id}-recipe`, "Review harvest & refill")}</div>` : ""}
           ${!running ? `<div class="culture-notes">${fillLine}</div>${this._feedingActions(buttons, otherActions, true)}` : ""}
           ${running ? this._feedingDetails(`culture-${j.id}-recipe`, "Harvest & refill recipe",
-            `<div class="culture-notes">${guide}${withdrawalWarning}</div><div class="culture-form">${harvestFields}${phytoRow}</div>${phytoLine}${this._feedingActions(buttons, harvestActions)}`, due.includes("harvest")) : ""}
+            `<div class="culture-notes">${guide}${withdrawalWarning}</div><div class="culture-form">${harvestFields}${phytoRow}</div>${phytoLine}<div class="culture-notes" data-culture-harvest-water="${this._escape(j.id)}">${status === "producing" ? this._culturesHarvestWaterControls(j) : ""}</div>${this._feedingActions(buttons, harvestActions)}`, due.includes("harvest")) : ""}
           ${running ? this._feedingDetails(`culture-${j.id}-water-change`, "Water change",
             this._culturesWaterCareForm(j, "water-change"), due.includes("waterChange")) : ""}
           ${running ? this._feedingDetails(`culture-${j.id}-restart`, "Restart",
@@ -29982,7 +30087,7 @@ const rigSteps = [
       this._mixingSummaryLoading = false;
       // Never repaint over someone mid-keystroke — a render resets every
       // input's value attribute (the hass-update path has the same guard).
-      if (this._activeTab === "mixing" && !this._isEditingFormControl()) this._render();
+      if ((this._activeTab === "mixing" || (this._activeTab === "cultures" && !this._cultures?.demo)) && !this._isEditingFormControl()) this._render();
     }
   }
 
@@ -31112,7 +31217,7 @@ const rigSteps = [
       </label>
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="mixing-integrations" data-field="hatcheryFromVessel" ${mix.integrations?.hatcheryFromVessel !== false ? "checked" : ""}>
-        <span><strong>The hatchery draws from the vessel</strong><small>Starting a brine hatch draws that cone's volume (a 0.5 L hatchery takes 0.5 L), and harvesting draws whatever fresh saltwater the backflush pushed into the live-brine container (a 750 ml container filled from empty takes 0.75 L). Untick if you mix hatch water somewhere else.</small></span>
+        <span><strong>The hatchery and cultures draw from the vessel</strong><small>Tracks saltwater used for hatchery fills and backflushes, culture refills, and measured harvest rinse water marked as coming from this vessel. Untick if you prepare that saltwater elsewhere.</small></span>
       </label>
       <small class="awc-hint">Every coupling here respects the guard above — set it to Off and this station's ledger is never touched from outside the Mixing tab.</small>`;
   }

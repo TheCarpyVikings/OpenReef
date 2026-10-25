@@ -19359,6 +19359,7 @@ async def websocket_cultures_seed(
     vol.Optional("harvested"): bool,
     vol.Optional("ml"): vol.Any(int, float),
     vol.Optional("bottle_ml"): vol.Any(int, float),
+    vol.Optional("rinse_from_vessel"): bool,
     vol.Optional("destination"): vol.In(("bottle", "tank", "soak")),
     vol.Optional("sign"): str,
     vol.Optional("egg_ratio"): vol.Any(int, float),
@@ -19390,6 +19391,7 @@ async def websocket_cultures_log(
         hass, config, str(msg.get("jar_id") or ""),
         tint=str(msg.get("tint") or ""), fed=bool(msg.get("fed")), harvested=bool(msg.get("harvested")),
         ml=msg.get("ml"), bottle_ml=msg.get("bottle_ml"), destination=str(msg.get("destination") or ""),
+        rinse_from_vessel=bool(msg.get("rinse_from_vessel")),
         sign=str(msg.get("sign") or ""),
         egg_ratio=msg.get("egg_ratio"), enrich=bool(msg.get("enrich")), skip_feed=bool(msg.get("skip_feed")),
         secchi_cm=msg.get("secchi_cm"),
@@ -19405,7 +19407,7 @@ async def websocket_cultures_log(
 def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str, *,
                         tint: str = "", fed: bool = False, harvested: bool = False,
                         ml: Any = None, bottle_ml: Any = None, sign: str = "", egg_ratio: Any = None,
-                        enrich: bool = False, destination: str = "",
+                        enrich: bool = False, destination: str = "", rinse_from_vessel: bool = False,
                         skip_feed: bool = False, secchi_cm: Any = None,
                         phyto_ml: Any = None, phyto_from: str = "",
                         source: str = "the Cultures tab") -> tuple[str, str] | None:
@@ -19440,6 +19442,15 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
     st = cultures_engine.culture_state(jar, now)
     if st["status"] in ("none", "crashed"):
         return "jar_idle", f"{jar['name']} is not running — seed it first"
+    if rinse_from_vessel:
+        if not harvested or cultures_engine.species_kind(jar["species"]) == "phyto":
+            return "invalid_rinse", "Fresh rinse water belongs to an animal-culture harvest"
+        if bottle_ml is None:
+            return "invalid_volume", "Enter the measured fresh saltwater used to rinse the crop"
+        mix = _mixing_cfg(config)
+        if not mix.get("enabled") or not _mixing_hatchery_from_vessel(config) \
+                or (mix.get("integrations") or {}).get("awcGuard") == "off":
+            return "tracking_disabled", "Enable mixing-station water tracking, or untick rinse water from the saltwater vessel"
     if cultures_engine.species_kind(jar["species"]) == "phyto":
         return _cultures_phyto_look_apply(hass, config, cultures, jar, jar_id, now, tint=tint, sign=sign,
                                           secchi_cm=secchi_cm, refused=bool(fed or harvested or skip_feed or enrich
@@ -19548,6 +19559,13 @@ def _cultures_log_apply(hass: HomeAssistant, config: dict[str, Any], jar_id: str
         # comes out of the mixing vessel, the rest is RODI (doc §3.1, §8.3) —
         # and with phyto riding it (Stage C) the phyto's own salt is counted.
         _mixing_hatchery_debit(hass, config, refill["mixMl"] / 1000.0, f"refilling {jar['name']}")
+        # The sieved culture water is discarded. Fresh water used to rinse
+        # the retained crop into its bottle/soak/tank is a SEPARATE draw.
+        # Only debit a measured amount with an explicitly selected source;
+        # legacy blank bottle volumes must not invent another withdrawal.
+        if rinse_from_vessel:
+            _mixing_hatchery_debit(hass, config, float(bottle_ml) / 1000.0, f"rinsing the harvest from {jar['name']}")
+            notes.append(f"{float(bottle_ml):g} ml fresh rinse water from the saltwater vessel")
         notes.append(f"harvested {round(harvest_ml)} ml"
                      + (", straight into the tank" if has_bottle and wants == "tank"
                         else f", {round(into_bottle)} ml bottled" if has_bottle and wants == "bottle" and round(into_bottle) != round(harvest_ml)
