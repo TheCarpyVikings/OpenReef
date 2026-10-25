@@ -1210,7 +1210,7 @@ test("the seed card: the arrival check gates the tap, both recipes, the fridge-b
     noPlaceholders(html, "phyto seed card");
     assert(html.includes('data-cultures-arrival="n1"') && html.includes("off — grey, brown, cloudy, a smell"), "the arrival check");
     assert(html.includes('data-cultures-starter-ml="n1"') && html.includes('data-cultures-working-l="n1"') && html.includes('data-cultures-starter-opened="n1"'), "the recipe's boxes");
-    assert(html.includes("recipe: 250 ml starter + 1000 ml of 35 ppt water + 1.5 ml f/2 → 1.25 L · the kit's 3.5 L wants 3250 ml + 4.9 ml f/2"), "the recipe line");
+    assert(html.includes(panel._escape("recipe: 250 ml starter + 1000 ml of 35 ppt water + 1.5 ml f/2 → 1.25 L · the kit's 3.5 L wants 3250 ml + 4.9 ml f/2")), "the recipe line");
     assert(html.includes('data-action="cultures-seed-phyto" data-id="n1"') && html.includes('data-recipe="kit"') && html.includes("Seed at 3.5 L"), "both recipes");
     assert(html.includes("The day the parcel lands") && html.includes("Phyto into the vessel.") && html.includes("Hygiene, said once") && !html.includes("Rotifers into the cone"), "the walkthrough speaks to the vessel only");
     assert(html.includes("the home fridge bottle joins the food shelf when you seed"), "the bottle is promised");
@@ -2002,11 +2002,11 @@ async function editablePhytoPanel(options = {}) {
     querySelectorAll: (selector) => selector === "[data-feeding-details]" ? [detail] : [],
     set innerHTML(_html) {
       for (const [key, value] of Object.entries(defaults)) fields[attr(key)] = {
-        dataset: { [key]: "n1" }, type: typeof value === "boolean" ? "checkbox" : "number",
+        dataset: { [key]: "n1" }, type: options.types?.[key] || (typeof value === "boolean" ? "checkbox" : "number"),
         value: typeof value === "boolean" ? "" : value, checked: typeof value === "boolean" && value,
         matches: () => true,
       };
-      for (const key of ["split-preview", "nutrient-preview", "split-warning", "harvest-water", "phyto-refill"])
+      for (const key of ["split-preview", "nutrient-preview", "split-warning", "harvest-water", "phyto-refill", "seed-preview"])
         fields[`data-culture-${key}`] = { textContent: "", innerHTML: "" };
     },
   };
@@ -2022,10 +2022,10 @@ async function editablePhytoPanel(options = {}) {
     const field = fields[attr(key)];
     if (field.type === "checkbox") field.checked = value;
     else field.value = value;
-    const type = field.type === "checkbox" ? "change" : "input";
+    const type = ["checkbox", "select-one"].includes(field.type) ? "change" : "input";
     handlers[type]({ target: field, type });
   };
-  const click = (action) => handlers.click({ target: { closest: () => ({ dataset: { action, id: "n1" } }) } });
+  const click = (action, data = {}) => handlers.click({ target: { closest: () => ({ dataset: { action, id: "n1", ...data } }) } });
   return { panel, fields, edit, click };
 }
 
@@ -2103,6 +2103,119 @@ test("demo edits cannot replace a real culture recipe draft", async () => {
   edit("culturesSplitMl", "900");
   panel._culturesToggleDemo();
   assert(fields["data-cultures-split-ml"].value === "150", "the real draft returns after demo mode");
+});
+
+async function editableSeedPanel() {
+  return editablePhytoPanel({
+    jar: phytoJar({ name: "Nanno Backup", due: [], reseedFrom: ["n2"], reseedFromBottle: true,
+      state: { ...phytoJar().state, status: "crashed", workingL: 0 } }),
+    fields: { culturesArrival: "", culturesStarterMl: "250", culturesWorkingL: "1.25", culturesStarterOpened: "2026-09-03" },
+    types: { culturesArrival: "select-one", culturesStarterOpened: "date" },
+  });
+}
+
+test("seed fields survive hass, culture and mixing refreshes and the sibling tap uses the edited volumes", async () => {
+  const { panel, fields, edit, click } = await editableSeedPanel();
+  panel._cultures.summary.jars.push(phytoJar({ id: "n2", name: "Nanno Main" }));
+  assert(panel._culturesTab().includes("Seed from Nanno Main"), "the backup names its donor");
+  const calls = [];
+  panel._callWS = async (msg) => {
+    calls.push(msg);
+    return msg.type === "openreef/mixing_summary" ? { summary: {} } : structuredClone(panel._cultures.summary);
+  };
+  const edits = { culturesArrival: "green", culturesStarterMl: "500", culturesWorkingL: "3.5", culturesStarterOpened: "2026-09-01" };
+  for (const [key, value] of Object.entries(edits)) {
+    edit(key, value);
+    panel.hass = {};
+    await panel._culturesLoadSummary(true);
+    await panel._mixingLoadSummary(true);
+  }
+  for (const [key, value] of Object.entries(edits))
+    assert(panel._culturesFormDrafts.n1[key] === value, `${key} must survive all refresh paths`);
+  assert(fields["data-cultures-starter-ml"].value === "500" && fields["data-cultures-working-l"].value === "3.5", "the restored volumes stay visible");
+  assert(fields["data-cultures-arrival"].value === "green" && fields["data-cultures-starter-opened"].value === "2026-09-01", "selection and date stay visible");
+  assert(fields["data-culture-seed-preview"].textContent.includes("500 ml starter + 3000 ml of 35 ppt water + 4.5 ml f/2 → 3.5 L"), "the displayed recipe follows the edited volumes");
+  assert(!calls.some((msg) => msg.type === "openreef/cultures_seed"), "refreshing never seeds a vessel");
+  edit("culturesSplitMl", "150");
+  click("cultures-seed", { from: "n2" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const seed = calls.find((msg) => msg.type === "openreef/cultures_seed");
+  assert(seed.jar_id === "n1" && seed.from_jar_id === "n2" && seed.starter_ml === 500 && seed.working_l === 3.5, JSON.stringify(seed));
+  assert(seed.arrival_tint === "green" && !("starter_opened_at" in seed), "a sibling draw is not an opened supplier bottle");
+  assert(Object.keys(edits).every((key) => !(key in panel._culturesFormDrafts.n1)), "successful seeding clears its submitted fields");
+  assert(panel._culturesFormDrafts.n1.culturesSplitMl === "150", "seeding clears only seed fields");
+});
+
+test("the seed form keeps focus, partial input and blanks across refreshes", async () => {
+  const { panel, fields, edit } = await editableSeedPanel();
+  panel._callWS = async () => structuredClone(panel._cultures.summary);
+  edit("culturesWorkingL", "3.");
+  const focused = fields["data-cultures-working-l"];
+  panel.shadowRoot.activeElement = focused;
+  panel.hass = {};
+  await panel._culturesLoadSummary(true);
+  await panel._mixingLoadSummary(true);
+  assert(fields["data-cultures-working-l"] === focused && focused.value === "3.", "a focused seed field is not replaced");
+  panel.shadowRoot.activeElement = null;
+  panel.hass = {};
+  assert(fields["data-cultures-working-l"].value === "3.", "raw input survives between fields");
+  for (const key of ["culturesStarterMl", "culturesWorkingL", "culturesStarterOpened", "culturesArrival"]) edit(key, "");
+  await panel._culturesLoadSummary(true);
+  for (const attr of ["starter-ml", "working-l", "starter-opened", "arrival"])
+    assert(fields[`data-cultures-${attr}`].value === "", `blank ${attr} must not revert to a default`);
+  assert(fields["data-culture-seed-preview"].textContent.startsWith("Check the starter"), "a blank recipe is not presented as valid");
+});
+
+test("refused seeding retains the draft and blank volumes never silently seed defaults", async () => {
+  const { panel, fields, edit, click } = await editableSeedPanel();
+  edit("culturesStarterMl", "500");
+  edit("culturesWorkingL", "3.5");
+  edit("culturesStarterOpened", "2026-09-01");
+  const calls = [];
+  panel._callWS = async (msg) => {
+    if (msg.type === "openreef/cultures_seed") { calls.push(msg); throw new Error("The source is not ready"); }
+    return panel._cultures.summary;
+  };
+  click("cultures-seed", { from: "n2" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(calls.length === 1 && panel._cultures.error === "The source is not ready", "a sibling uses its backend readiness check without requiring a supplier arrival check");
+  assert(fields["data-cultures-starter-ml"].value === "500" && fields["data-cultures-working-l"].value === "3.5"
+    && fields["data-cultures-starter-opened"].value === "2026-09-01", "a refusal retains all entries");
+  edit("culturesStarterMl", "");
+  click("cultures-seed", { from: "n2" });
+  assert(calls.length === 1 && panel._cultures.error.includes("positive starter volume"), "cleared amounts cannot fall back to the default draw");
+  edit("culturesStarterMl", "500");
+  panel._cultures.demo = true;
+  click("cultures-seed", { from: "n2" });
+  assert(calls.length === 1, "demo seeding cannot write records");
+});
+
+test("supplier and fridge-bottle seed buttons use the retained form and clear it only after success", async () => {
+  for (const action of ["cultures-seed-phyto", "cultures-seed-bottle"]) {
+    const { panel, fields, edit, click } = await editableSeedPanel();
+    edit("culturesArrival", "green");
+    edit("culturesStarterMl", "400");
+    edit("culturesWorkingL", "2");
+    edit("culturesStarterOpened", "2026-09-01");
+    const calls = [];
+    let finish;
+    panel._callWS = (msg) => {
+      if (msg.type !== "openreef/cultures_seed") return Promise.resolve(panel._cultures.summary);
+      calls.push(msg);
+      return new Promise((resolve) => { finish = resolve; });
+    };
+    panel.hass = {};
+    click(action);
+    const msg = calls[0];
+    assert(msg.starter_ml === 400 && msg.working_l === 2, JSON.stringify(msg));
+    assert(action === "cultures-seed-bottle" ? msg.from_bottle && !("starter_opened_at" in msg)
+      : !msg.from_bottle && msg.starter_opened_at.startsWith("2026-09-01"), "the opened date only applies to a supplier starter");
+    edit("culturesWorkingL", "2.5");
+    finish({});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert(fields["data-cultures-working-l"].value === "2.5", "edits made while saving survive the response");
+    assert(!("culturesStarterMl" in panel._culturesFormDrafts.n1), "only successfully submitted values clear");
+  }
 });
 
 async function rotiferWaterPanel() {

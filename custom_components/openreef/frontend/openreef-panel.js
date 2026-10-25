@@ -2078,15 +2078,18 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-enrich-done") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: true }, "Enriched rotifers bottled — the boost clock runs from now.");
       if (action === "cultures-enrich-plain") this._culturesCall({ type: "openreef/cultures_enrich_done", bottled: false }, "Bottled plain — still live food.");
       if (action === "nps-cysts-opened") this._npsCystsOpened(target.dataset.id || "");
-      if (action === "cultures-seed") this._culturesCall(
-        target.dataset.from ? { type: "openreef/cultures_seed", jar_id: id, from_jar_id: target.dataset.from }
-          : { type: "openreef/cultures_seed", jar_id: id },
-        "Seeded — the culture clocks are running. Let it establish before the first harvest.");
+      if (action === "cultures-seed") {
+        const jar = this._cultures.summary?.jars?.find((item) => item.id === id);
+        if (jar?.kind === "phyto") this._culturesPhytoSeed(id, "", { fromJarId: target.dataset.from });
+        else this._culturesCall(
+          target.dataset.from ? { type: "openreef/cultures_seed", jar_id: id, from_jar_id: target.dataset.from }
+            : { type: "openreef/cultures_seed", jar_id: id },
+          "Seeded — the culture clocks are running. Let it establish before the first harvest.");
+      }
       // The phyto vessel (0.7.207): the arrival-checked seed, the split with
       // its destinations, the fresh vessel, the shelf's Shaken tap.
       if (action === "cultures-seed-phyto") this._culturesPhytoSeed(id, target.dataset.recipe || "");
-      if (action === "cultures-seed-bottle") this._culturesCall({ type: "openreef/cultures_seed", jar_id: id, from_bottle: true },
-        "Seeded from the fridge bottle — the culture clocks are running; light on, air on.");
+      if (action === "cultures-seed-bottle") this._culturesPhytoSeed(id, "", { fromBottle: true });
       if (action === "cultures-split-phyto") this._culturesPhytoSplit(id, false);
       if (action === "cultures-fresh-vessel") this._culturesPhytoSplit(id, true);
       if (action === "cultures-add-phyto") this._culturesAddJar("nanno");
@@ -2238,7 +2241,7 @@ class OpenReefPanel extends HTMLElement {
       }
 
       const cultureField = Object.entries(target.dataset).find(([key]) =>
-        /^(cultures(SplitMl|WorkingAfter|F2|PhytoFrom|PhytoMl|Tint|Secchi|BottleMl|RinseFromVessel|HarvestTo|Enrich)|culturesDest(Bottle|Tank|Drip|Vessel|Cone)(Ml|Jar)?)$/.test(key));
+        /^(cultures(SplitMl|WorkingAfter|F2|PhytoFrom|PhytoMl|Tint|Secchi|BottleMl|RinseFromVessel|HarvestTo|Enrich|Arrival|StarterMl|WorkingL|StarterOpened)|culturesDest(Bottle|Tank|Drip|Vessel|Cone)(Ml|Jar)?)$/.test(key));
       if (cultureField) {
         const [key, jarId] = cultureField;
         this._culturesFormDrafts ||= {};
@@ -14229,28 +14232,39 @@ const rigSteps = [
   // The day the starter lands (doc §5.3): the arrival check first — the
   // backend refuses an off-colour starter before writing — then the recipe:
   // the starter page's 1:4 by default, the kit's 3.5 L on the same card.
-  _culturesPhytoSeed(jarId, recipe = "") {
+  _culturesPhytoSeed(jarId, recipe = "", { fromJarId = "", fromBottle = false } = {}) {
     const q = (attr) => this.shadowRoot?.querySelector(`[${attr}="${jarId}"]`);
     const arrival = q("data-cultures-arrival");
     const tint = arrival && arrival.value ? String(arrival.value) : "";
-    if (!tint) {
+    if (!tint && !fromJarId && !fromBottle) {
       this._cultures.message = "Look at the starter under a light first — rich green and clean, or off? Pick it above.";
       this._render();
       return;
     }
     const jar = (this._cultures?.summary?.jars || []).find((j) => j.id === jarId) || {};
-    const msg = { type: "openreef/cultures_seed", jar_id: jarId, arrival_tint: tint };
+    const msg = { type: "openreef/cultures_seed", jar_id: jarId };
+    if (tint) msg.arrival_tint = tint;
+    if (fromJarId) msg.from_jar_id = fromJarId;
+    if (fromBottle) msg.from_bottle = true;
     const starter = q("data-cultures-starter-ml");
     const working = q("data-cultures-working-l");
     const opened = q("data-cultures-starter-opened");
-    if (starter && Number(starter.value) > 0) msg.starter_ml = Number(starter.value);
+    if ([starter, ...(recipe === "kit" ? [] : [working])].some((el) => el && (!Number.isFinite(Number(el.value)) || Number(el.value) <= 0))) {
+      this._cultures.error = "Enter a positive starter volume and final working volume.";
+      this._render();
+      return;
+    }
+    if (starter) msg.starter_ml = Number(starter.value);
     if (recipe === "kit") msg.working_l = Number(jar.seedGuides?.kit?.workingL) || 3.5;
     else if (working && Number(working.value) > 0) msg.working_l = Number(working.value);
-    if (opened && opened.value) {
+    // The opened date belongs to an external starter bottle, not a draw
+    // from a sibling culture or the tracked home fridge bottle.
+    if (!fromJarId && !fromBottle && opened && opened.value) {
       const ms = Date.parse(`${opened.value}T12:00:00`);
       if (Number.isFinite(ms)) msg.starter_opened_at = new Date(ms).toISOString();
     }
-    this._culturesCall(msg, "Seeded — light on, air on. Look at it once a day against a white card; it should read dark in about a week.");
+    return this._culturesCall(msg, "Seeded — light on, air on. Look at it once a day against a white card; it should read dark in about a week.",
+      ["culturesArrival", "culturesStarterMl", "culturesWorkingL", "culturesStarterOpened"]);
   }
 
   _culturesRestoreFormDrafts() {
@@ -14270,6 +14284,26 @@ const rigSteps = [
 
   // Draft measurements update beside the fields without replacing focused
   // inputs. These are previews; the backend validates the submitted recipe.
+  _culturesSeedDraft(jar, starterMl, workingL) {
+    const guide = jar.seedGuides?.starter || {};
+    const ppt = Number(guide.targetPpt ?? jar.salinityPpt);
+    const mixPpt = Number(guide.mixPpt ?? jar.splitGuide?.mixPpt ?? ppt);
+    const rate = Number(jar.nutrient?.mlPerL ?? guide.nutrientMlPerL ?? 1.5);
+    const capacity = Number(jar.volumeL);
+    if (![starterMl, workingL, capacity, ppt, mixPpt, rate].every(Number.isFinite)
+        || starterMl <= 0 || workingL <= 0 || workingL > capacity || starterMl > workingL * 1000
+        || mixPpt <= 0 || ppt > mixPpt)
+      return "Check the starter and final working volumes, vessel capacity and mixing salinity before seeding.";
+    const fresh = Math.round(workingL * 1000 - starterMl);
+    const mix = Math.round(fresh * ppt / mixPpt), rodi = fresh - mix;
+    const nutrient = (ml) => Number((ml / 1000 * rate).toFixed(1));
+    const kitL = Number(jar.seedGuides?.kit?.workingL || 3.5);
+    const kitFresh = Math.round(kitL * 1000 - starterMl);
+    const kit = kitL <= capacity && kitFresh >= 0
+      ? ` · the kit's ${kitL} L wants ${kitFresh} ml + ${nutrient(kitFresh)} ml f/2` : "";
+    return `recipe: ${starterMl} ml starter + ${fresh} ml of ${ppt} ppt water${rodi > 0 ? ` (${mix} ml mix + ${rodi} ml RODI)` : ""} + ${nutrient(fresh)} ml f/2 → ${workingL} L${kit}`;
+  }
+
   _culturesPhytoDraft(jar, draft = {}) {
     const guide = jar.splitGuide || {};
     const before = Number(jar.state?.workingL || jar.volumeL) * 1000;
@@ -14433,6 +14467,11 @@ const rigSteps = [
     const number = (attr, fallback) => { const el = q(attr); return el && el.value !== "" ? Number(el.value) : fallback; };
     const set = (attr, text) => { const el = q(attr); if (el) el.textContent = text || ""; };
     if (jar.kind === "phyto") {
+      if (q("data-cultures-starter-ml")) {
+        set("data-culture-seed-preview", this._culturesSeedDraft(jar,
+          number("data-cultures-starter-ml", NaN), number("data-cultures-working-l", NaN)));
+        return;
+      }
       const shares = ["bottle", "tank", "drip", "vessel", "cone"].filter((dest) => q(`data-cultures-dest-${dest}`)?.checked)
         .map((dest) => ({ to: dest, ml: number(`data-cultures-dest-${dest}-ml`, 0) }));
       const preview = this._culturesPhytoDraft(jar, { outMl: number("data-cultures-split-ml", jar.splitGuide?.outMl),
@@ -16200,7 +16239,7 @@ const rigSteps = [
       : guide.available === false ? `<small class="muted">${esc(guide.reason)}</small>` : "";
     const warn = running ? `<small data-culture-split-warning="${esc(j.id)}" aria-live="polite" style="color:var(--warning-color,#f5a524)">${esc(this._culturesPhytoDraft(j).warning || guide.warning || "")}</small>` : "";
     const sizing = j.sizing?.available && j.sizing.line ? `<small class="muted" data-culture-sizing>${esc(j.sizing.line)}</small>` : "";
-    const seedLine = !running ? `<small class="muted" title="The starter page's 1:4, or the kit's 3.5 L on the same card — the sizing line says why 1:4 first.">recipe: ${esc(starter.starterMl || 250)} ml starter + ${esc(starter.freshMl || 1000)} ml of ${esc(j.salinityPpt)} ppt water + ${esc(starter.nutrientMl ?? 1.5)} ml f/2 → ${esc(starter.workingL || 1.25)} L · the kit's ${esc(kit.workingL || 3.5)} L wants ${esc(kit.freshMl || 3250)} ml + ${esc(kit.nutrientMl ?? 4.9)} ml f/2</small>` : "";
+    const seedLine = !running ? `<small class="muted" data-culture-seed-preview="${esc(j.id)}" aria-live="polite" title="The starter page's 1:4, or the kit's 3.5 L on the same card — the sizing line says why 1:4 first.">${esc(this._culturesSeedDraft(j, Number(starter.starterMl || 250), Number(starter.workingL || 1.25)))}</small>` : "";
     const bottleLine = hb.exists
       ? `<small class="muted" data-culture-home-bottle>fridge bottle: ${Number(hb.remainingMl) > 0
         ? `${esc(Math.round(hb.remainingMl))} of ${esc(Math.round(hb.bottleMl || 0))} ml · ${hb.expiry?.status === "expired" ? `<span style="color:var(--error-color,#e5484d)">past three weeks — tip it out</span>` : hb.expiry?.daysLeft != null ? `${esc(hb.expiry.daysLeft)} d left` : ""}${hb.daysUntilEmpty != null ? ` · ~${esc(hb.daysUntilEmpty)} d at the tank's rate` : ""}${hb.shake?.due ? ` · <span style="color:var(--warning-color,#f5a524)">shake it</span>` : ""}`
