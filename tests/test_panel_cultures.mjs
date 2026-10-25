@@ -1976,4 +1976,131 @@ test("care cycle resets independently of culture age and heat still takes priori
   assert(panel._cultureNextTitle(jar) === "Check this culture before harvesting", "heat warnings still take priority");
 });
 
+// A small DOM double for the actual render/event path: every innerHTML write
+// recreates the recipe's controls, just as a Home Assistant update does.
+async function editablePhytoPanel() {
+  const jar = phytoJar({ volumeL: 5, state: { ...phytoJar().state, workingL: 5 },
+    splitGuide: { ...phytoJar().splitGuide, outMl: 2500 },
+    homeBottle: { ...phytoJar().homeBottle, bottleMl: 2500, remainingMl: 1300 } });
+  const panel = await culturesPanel(phytoConfig(), phytoSummary(jar));
+  panel._config.tank = {};
+  panel._activeTab = "cultures";
+  const handlers = {}, fields = {};
+  const defaults = {
+    culturesSplitMl: "2500", culturesDestBottle: true, culturesDestBottleMl: "",
+    culturesDestTank: false, culturesDestTankMl: "100", culturesDestCone: false,
+    culturesDestConeMl: "300", culturesDestVessel: false, culturesDestVesselMl: "",
+    culturesWorkingAfter: "5", culturesF2: true, culturesTint: "dark", culturesSecchi: "",
+  };
+  const attr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+  const detail = { dataset: { feedingDetails: "culture-n1-recipe" }, open: true };
+  panel.shadowRoot = {
+    activeElement: null,
+    addEventListener: (name, handler) => { handlers[name] = handler; },
+    querySelector: (selector) => fields[selector.match(/^\[([^=]+)="n1"\]$/)?.[1]] || null,
+    querySelectorAll: (selector) => selector === "[data-feeding-details]" ? [detail] : [],
+    set innerHTML(_html) {
+      for (const [key, value] of Object.entries(defaults)) fields[attr(key)] = {
+        dataset: { [key]: "n1" }, type: typeof value === "boolean" ? "checkbox" : "number",
+        value: typeof value === "boolean" ? "" : value, checked: typeof value === "boolean" && value,
+        matches: () => true,
+      };
+      for (const key of ["split-preview", "nutrient-preview", "split-warning"])
+        fields[`data-culture-${key}`] = { textContent: "" };
+    },
+  };
+  for (const method of ["_styles", "_messages", "_tabs", "_subNav", "_mountBetaFab", "_stopPulseDiagramMotion", "_subscribeConfigEvents", "_recordLiveReadings"])
+    panel[method] = () => "";
+  panel._activeContent = () => panel._culturesTab();
+  panel.addEventListener = () => {};
+  panel._npsLoadSummary = () => {};
+  panel._attachEvents();
+  delete panel._render;
+  panel._render();
+  const edit = (key, value) => {
+    const field = fields[attr(key)];
+    if (field.type === "checkbox") field.checked = value;
+    else field.value = value;
+    const type = field.type === "checkbox" ? "change" : "input";
+    handlers[type]({ target: field, type });
+  };
+  return { panel, fields, edit };
+}
+
+test("the 150 ml tank withdrawal survives hass updates and summary refreshes between fields", async () => {
+  const { panel, fields, edit } = await editablePhytoPanel();
+  const edits = { culturesSplitMl: "150", culturesDestBottle: false, culturesDestTank: true,
+    culturesDestTankMl: "150", culturesDestCone: false, culturesDestVessel: false,
+    culturesWorkingAfter: "4.85", culturesF2: false, culturesSecchi: "" };
+  const calls = [];
+  panel._callWS = async (msg) => {
+    calls.push(msg);
+    return panel._cultures.summary;
+  };
+  for (const [key, value] of Object.entries(edits)) {
+    edit(key, value);
+    panel.hass = {};
+    await panel._culturesLoadSummary(true);
+  }
+  assert(fields["data-culture-split-preview"].textContent.includes("150 ml out · 0 ml fresh"), "the retained recipe has no refill");
+  assert(fields["data-culture-nutrient-preview"].textContent.includes("0 ml (not added)"), "the unchecked f/2 survives");
+  assert(!fields["data-culture-split-warning"].textContent, "the unchecked bottle has no overflow warning");
+  assert(panel._feedingDetailsOpen["culture-n1-recipe"], "the recipe stays open");
+  panel._culturesPhytoSplit("n1");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const withdrawal = calls.find((msg) => msg.type === "openreef/cultures_split");
+  assert(withdrawal.ml === 150 && withdrawal.fresh_ml === 0 && withdrawal.nutrient === false, JSON.stringify(withdrawal));
+  assert(JSON.stringify(withdrawal.to) === JSON.stringify([{ to: "tank", ml: 150 }]), "only the tank receives the draw");
+  assert(panel._cultures.message.includes("4.85 L remains"), "confirmation describes the withdrawal");
+  assert(Object.keys(panel._culturesFormDrafts.n1).length === 0, "a successful withdrawal clears its submitted draft");
+});
+
+test("a culture summary arriving while typing keeps the focused control attached", async () => {
+  const { panel, fields, edit } = await editablePhytoPanel();
+  edit("culturesWorkingAfter", "4.8");
+  const focused = fields["data-cultures-working-after"];
+  panel.shadowRoot.activeElement = focused;
+  panel._callWS = async () => structuredClone(panel._cultures.summary);
+  await panel._culturesLoadSummary(true);
+  panel.hass = {};
+  assert(fields["data-cultures-working-after"] === focused && focused.value === "4.8", "no rebuild or focus loss during editing");
+  panel.shadowRoot.activeElement = null;
+  panel.hass = {};
+  assert(fields["data-cultures-working-after"] !== focused && fields["data-cultures-working-after"].value === "4.8", "the next render preserves the decimal");
+  edit("culturesWorkingAfter", "");
+  panel.hass = {};
+  assert(fields["data-cultures-working-after"].value === "", "clearing a field does not restore its default");
+});
+
+test("logging a colour keeps the withdrawal draft and refused saves keep every field", async () => {
+  const { panel, fields, edit } = await editablePhytoPanel();
+  edit("culturesSplitMl", "150");
+  edit("culturesDestBottle", false);
+  edit("culturesTint", "dark");
+  edit("culturesSecchi", "2.5");
+  panel._callWS = async () => panel._cultures.summary;
+  panel._culturesLog("n1", false, false);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(fields["data-cultures-split-ml"].value === "150" && !fields["data-cultures-dest-bottle"].checked, "logging the observation preserves the recipe");
+  assert(fields["data-cultures-secchi"].value === "", "the logged measurement is cleared");
+  panel._callWS = async (msg) => {
+    if (msg.type !== "openreef/cultures_summary") throw new Error("Please check this recipe");
+    return panel._cultures.summary;
+  };
+  panel._culturesPhytoSplit("n1");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(fields["data-cultures-split-ml"].value === "150" && !fields["data-cultures-dest-bottle"].checked, "a rejected save retains the draft");
+  assert(panel._cultures.error === "Please check this recipe", "the refusal remains visible");
+});
+
+test("demo edits cannot replace a real culture recipe draft", async () => {
+  const { panel, fields, edit } = await editablePhytoPanel();
+  edit("culturesSplitMl", "150");
+  panel._culturesLoadSummary = () => {};
+  panel._culturesToggleDemo();
+  edit("culturesSplitMl", "900");
+  panel._culturesToggleDemo();
+  assert(fields["data-cultures-split-ml"].value === "150", "the real draft returns after demo mode");
+});
+
 runTests();

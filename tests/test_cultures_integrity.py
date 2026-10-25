@@ -23,6 +23,33 @@ def phyto_config(**kwargs):
 
 
 class CultureIntegrity(unittest.TestCase):
+    def test_150_ml_tank_draw_without_topup_leaves_485_l_and_preserves_stock(self):
+        parent = t._phyto_jar(started_ago_days=19, now=NOW, lastTint="dark", workingL=5,
+                             lastHarvestAt=stamp(7), cyclesSinceFresh=2)
+        parent["volumeL"] = 5
+        products = {**t._phyto_products(), "home_phyto_c1": {
+            "name": "Home phyto", "category": "phyto", "bottleMl": 2500, "remainingMl": 1300,
+            "openedAt": stamp(1), "shelfLifeDaysOpened": 21, "history": []}}
+        cfg = t._config(t._phyto_entry(jars={"c1": parent}, products=products))
+        before_products = deepcopy(cfg["consumables"]["products"])
+        before_station = deepcopy(cfg["mixingStation"])
+        error = I._cultures_phyto_split_apply(FakeHass(), cfg, "c1", ml=150,
+                                            dests=[{"to": "tank", "ml": 150}],
+                                            fresh_ml=0, nutrient=False, tint="dark", now=NOW)
+        self.assertIsNone(error)
+        jar = cfg["nps"]["cultures"]["jars"]["c1"]
+        self.assertEqual(jar["state"]["workingL"], 4.85)
+        self.assertEqual(jar["state"]["lastTint"], "dark")
+        self.assertEqual(jar["state"]["lastHarvestAt"], stamp(7))
+        self.assertEqual(jar["state"]["cyclesSinceFresh"], 2)
+        row = jar["history"][0]
+        self.assertTrue(row["draw"])
+        self.assertEqual((row["ml"], row["tankMl"], row["freshMl"], row["nutrientMl"]), (150, 150, 0, 0))
+        self.assertEqual(row["dests"], [{"to": "tank", "ml": 150}])
+        for pid in before_products:
+            self.assertEqual(cfg["consumables"]["products"][pid]["remainingMl"], before_products[pid]["remainingMl"])
+        self.assertEqual(cfg["mixingStation"], before_station)
+
     def test_shallow_index_and_secchi_fits_use_unrounded_slopes(self):
         for index in (True, False):
             rows = [{"event": "seeded", "at": stamp(30)}]

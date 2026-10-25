@@ -2235,12 +2235,15 @@ class OpenReefPanel extends HTMLElement {
         return;
       }
 
-      const cultureRecipeId = target.dataset.culturesSplitMl || target.dataset.culturesWorkingAfter
-        || target.dataset.culturesF2 || target.dataset.culturesPhytoFrom || target.dataset.culturesPhytoMl
-        || target.dataset.culturesTint
-        || Object.entries(target.dataset).find(([key]) => key.startsWith("culturesDest"))?.[1];
-      if (cultureRecipeId) {
-        this._culturesUpdateRecipePreview(cultureRecipeId);
+      const cultureField = Object.entries(target.dataset).find(([key]) =>
+        /^(cultures(SplitMl|WorkingAfter|F2|PhytoFrom|PhytoMl|Tint|Secchi)|culturesDest(Bottle|Tank|Drip|Vessel|Cone)(Ml|Jar)?)$/.test(key));
+      if (cultureField) {
+        const [key, jarId] = cultureField;
+        this._culturesFormDrafts ||= {};
+        const draft = this._culturesFormDrafts[jarId] ||= {};
+        // Keep the raw string, including blanks and partially typed decimals.
+        draft[key] = target.type === "checkbox" ? target.checked : target.value;
+        this._culturesUpdateRecipePreview(jarId);
         return;
       }
 
@@ -8476,6 +8479,7 @@ class OpenReefPanel extends HTMLElement {
       </main>
     `;
 
+    this._culturesRestoreFormDrafts();
     this._lastRenderedSetupOpen = this._setupOpen;
     this._lastRenderedSetupStep = this._setupOpen ? this._setupStep : null;
     // The setup wizard keeps its place only within a step; every other
@@ -13869,6 +13873,7 @@ const rigSteps = [
     if (st.demo) {
       const stash = this._culturesDemoStash || {};
       st.summary = "summary" in stash ? stash.summary : null;
+      this._culturesFormDrafts = stash.formDrafts || {};
       st.at = 0;
       st.demo = false;
       this._culturesDemoStash = null;
@@ -13880,7 +13885,8 @@ const rigSteps = [
       this._culturesLoadSummary(true);
       return;
     }
-    this._culturesDemoStash = { summary: st.summary };
+    this._culturesDemoStash = { summary: st.summary, formDrafts: this._culturesFormDrafts };
+    this._culturesFormDrafts = {};
     st.summary = this._culturesDemoData().summary;
     st.at = Date.now();
     st.demo = true;
@@ -14118,11 +14124,13 @@ const rigSteps = [
     } finally {
       st.at = Date.now();
       st.loading = false;
-      this._render();
+      // A response can arrive while a field is focused, independently of the
+      // hass render guard. Keep that control attached until editing ends.
+      if (!this.shadowRoot || !this._isEditingFormControl()) this._render();
     }
   }
 
-  async _culturesCall(msg, okMessage) {
+  async _culturesCall(msg, okMessage, clearFields = []) {
     if (this._cultures.demo) {
       this._cultures.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
       this._render();
@@ -14132,11 +14140,17 @@ const rigSteps = [
     // must fill its mark on the next paint.
     if (msg && (msg.type === "openreef/cultures_bottle" || (msg.type === "openreef/cultures_log" && msg.harvested)
       || msg.type === "openreef/cultures_split" || msg.type === "openreef/cultures_fresh_vessel" || msg.type === "openreef/cultures_seed")) setTimeout(() => this._npsLoadSummary?.(true), 0);
+    const submittedDraft = { ...this._culturesFormDrafts?.[msg.jar_id] };
     let succeeded = false;
     try {
       await this._callWS(msg);
       this._cultures.message = okMessage || "";
       this._cultures.error = "";
+      const draft = this._culturesFormDrafts?.[msg.jar_id];
+      for (const key of clearFields) {
+        // A refused action keeps its draft; edits made during a save do too.
+        if (draft && draft[key] === submittedDraft[key]) delete draft[key];
+      }
       succeeded = true;
     } catch (err) {
       this._cultures.error = (err && err.message) || "That didn't work — try again.";
@@ -14194,7 +14208,7 @@ const rigSteps = [
       return;
     }
     if (phyto) {
-      this._culturesCall(msg, "Colour logged — readiness follows your observation. Check again tomorrow while it grows. Wrong colour? Undo it from the journal for a day.");
+      this._culturesCall(msg, "Colour logged — readiness follows your observation. Check again tomorrow while it grows. Wrong colour? Undo it from the journal for a day.", ["culturesTint", "culturesSecchi"]);
       return;
     }
     this._culturesCall(msg, harvested
@@ -14203,7 +14217,8 @@ const rigSteps = [
         : "Harvest logged — the bottle and the reminders keep count.")
       : fed ? "Feed logged — the phyto bottle keeps count. Wrong water? Undo it from the journal for a day."
         : msg.skip_feed ? "Feed skipped — the water is on the record; the reminder holds until the next slot. Wrong water? Undo it from the journal for a day."
-          : "Tint logged — nothing else moved. Wrong water? Undo it from the journal for a day.");
+          : "Tint logged — nothing else moved. Wrong water? Undo it from the journal for a day.",
+      ["culturesTint", ...(harvested ? ["culturesPhytoFrom", "culturesPhytoMl"] : [])]);
   }
 
   // The day the starter lands (doc §5.3): the arrival check first — the
@@ -14231,6 +14246,21 @@ const rigSteps = [
       if (Number.isFinite(ms)) msg.starter_opened_at = new Date(ms).toISOString();
     }
     this._culturesCall(msg, "Seeded — light on, air on. Look at it once a day against a white card; it should read dark in about a week.");
+  }
+
+  _culturesRestoreFormDrafts() {
+    for (const [jarId, draft] of Object.entries(this._culturesFormDrafts || {})) {
+      let restored = false;
+      for (const [key, value] of Object.entries(draft)) {
+        const attr = `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+        const control = this.shadowRoot?.querySelector(`[${attr}="${jarId}"]`);
+        if (!control) continue;
+        if (control.type === "checkbox") control.checked = value;
+        else control.value = value;
+        restored = true;
+      }
+      if (restored) this._culturesUpdateRecipePreview(jarId);
+    }
   }
 
   // Draft measurements update beside the fields without replacing focused
@@ -14369,8 +14399,10 @@ const rigSteps = [
     if (Number.isFinite(secchiCm) && secchiCm >= 0) msg.secchi_cm = Math.min(60, secchiCm);
     this._culturesCall(msg, freshVessel
       ? "Fresh vessel logged — the cycle counter reset. Bleach, rinse and dry the old container for next time."
-      : msg.fresh_ml != null ? "Split logged — the working volume moved with the fresh water; the bottle, the f/2 and the station keep count."
-        : "Split logged — the bottle, the f/2 and the station keep count; the colour is pale again.");
+      : msg.fresh_ml === 0 ? `Withdrawal logged — ${out} ml out, no top-up or f/2; ${after} L remains in the vessel.`
+        : msg.fresh_ml != null ? "Split logged — the working volume moved with the fresh water; the bottle, the f/2 and the station keep count."
+          : "Split logged — the bottle, the f/2 and the station keep count; the colour is pale again.",
+      Object.keys(this._culturesFormDrafts?.[jarId] || {}));
   }
 
   // Take a daily tap back (0.7.191): the journal row is tombstoned, the
