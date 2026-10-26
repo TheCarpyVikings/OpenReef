@@ -2026,7 +2026,7 @@ async function editablePhytoPanel(options = {}) {
     ...options.fields,
   };
   const attr = (key) => `data-${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
-  const detail = { dataset: { feedingDetails: "culture-n1-recipe" }, open: true };
+  const detail = { dataset: { feedingDetails: "culture-n1-recipe" }, open: true, querySelector: () => null };
   panel.shadowRoot = {
     activeElement: null,
     addEventListener: (name, handler) => { handlers[name] = handler; },
@@ -2040,6 +2040,7 @@ async function editablePhytoPanel(options = {}) {
       };
       for (const key of ["split-preview", "nutrient-preview", "split-warning", "harvest-water", "phyto-refill", "seed-preview"])
         fields[`data-culture-${key}`] = { textContent: "", innerHTML: "" };
+      fields["data-cultures-split-submit"] = { textContent: "Split", disabled: false };
     },
   };
   for (const method of ["_styles", "_messages", "_tabs", "_subNav", "_mountBetaFab", "_stopPulseDiagramMotion", "_subscribeConfigEvents", "_recordLiveReadings"])
@@ -2337,6 +2338,81 @@ test("a refused RODI draw is explained on Cultures and retains the harvest field
   panel._callWS = async () => { throw new Error("Connection lost"); };
   await panel._culturesRodiAction("n1");
   assert(panel._cultures.error === "Connection lost" && !panel._busy, "connection failure releases the controls and explains the failure");
+});
+
+function seededDonor(overrides = {}) {
+  return phytoJar({ name: "Nanno Main", volumeL: 5, state: { ...phytoJar().state, workingL: 2.85,
+    colourObservation: { fresh: false } }, densityAdvice: { action: "check", reason: "Check the colour" },
+    refillAfterSeed: { seededId: "n2", seededName: "Nanno Backup", starterMl: 2000, afterL: 5,
+      guide: { ...phytoJar().splitGuide, outMl: 0, freshMl: 2150, mixMl: 2150, nutrientMl: 3.2,
+        workingMlBefore: 2850, workingMlAfter: 5000, containerMl: 5000, seedPct: 100 } },
+    ...overrides });
+}
+
+test("the seeded donor offers a zero-withdrawal refill instead of another split", async () => {
+  const jar = seededDonor({ risk: { level: "act", reason: "Short day of light" } });
+  const panel = await culturesPanel(phytoConfig(), phytoSummary(jar));
+  const html = panel._culturesPhytoTile(jar, phytoSummary(jar), [jar]);
+  assert(html.includes("Refill after seeding Nanno Backup") && html.includes(">Review refill</button>"));
+  assert(html.includes("Refill to start the next cycle") && !html.includes("split due"));
+  assert(html.includes("Short day of light"), "existing warnings remain visible");
+  assert(/data-cultures-split-ml="n1" value="0"/.test(html), "the starter already left Main");
+  assert(/data-cultures-working-after="n1" value="5"/.test(html));
+  for (const dest of ["bottle", "tank", "drip", "vessel", "cone"])
+    assert(!new RegExp(`data-cultures-dest-${dest}="n1"[^>]*checked`).test(html));
+  assert(html.includes("2150 ml fresh @ 35 ppt + 3.2 ml f/2 → 5 L working"));
+  assert(/data-action="cultures-split-phyto"[^>]*>Log refill<\/button>/.test(html));
+  assert(!/data-action="cultures-split-phyto"[^>]*disabled/.test(html), "a refill does not require a fresh dark harvest observation");
+  const journal = panel._culturesJournalWhat({ jarId: "n1", event: "harvest", ml: 0, freshMl: 2150, nutrientMl: 3.2 }, [jar]);
+  assert(journal === "refilled · 2150 ml fresh + 3.2 ml f/2", journal);
+});
+
+test("donor refill edits survive refresh and submit only the new water", async () => {
+  const { panel, fields, edit, click } = await editablePhytoPanel({ jar: seededDonor(), fields: {
+    culturesSplitMl: "0", culturesDestBottle: false, culturesWorkingAfter: "5" } });
+  const calls = [];
+  panel._callWS = async (msg) => { calls.push(msg); return panel._cultures.summary; };
+  // A donor may still have a split draft from before it supplied starter.
+  edit("culturesSplitMl", "2500");
+  edit("culturesDestBottle", true);
+  edit("culturesTint", "green");
+  click("cultures-review-refill");
+  assert(fields["data-cultures-split-ml"].value === "0" && !fields["data-cultures-dest-bottle"].checked);
+  assert(fields["data-cultures-tint"].value === "green", "reviewing the refill preserves observations");
+  assert(panel._feedingDetailsOpen["culture-n1-recipe"], "review opens the prepared recipe");
+  edit("culturesWorkingAfter", "4.5");
+  panel.hass = {};
+  panel._render();
+  assert(fields["data-cultures-working-after"].value === "4.5");
+  assert(fields["data-culture-split-preview"].textContent.includes("1650 ml fresh"));
+  edit("culturesWorkingAfter", "5");
+  edit("culturesF2", false);
+  panel._render();
+  assert(fields["data-culture-nutrient-preview"].textContent.includes("0 ml (not added)"));
+  edit("culturesF2", true);
+  assert(fields["data-cultures-split-submit"].textContent === "Log refill");
+  assert(!fields["data-cultures-split-submit"].disabled);
+  assert(!calls.length, "reviewing the recipe makes no stock or hardware calls");
+  click("cultures-split-phyto");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const sent = calls.find((msg) => msg.type === "openreef/cultures_split");
+  assert(sent?.ml === 0 && sent.fresh_ml === 2150 && sent.nutrient === true, JSON.stringify(sent));
+  assert(Array.isArray(sent.to) && sent.to.length === 0, "no second starter or bottle/tank destination");
+  assert(panel._cultures.message.startsWith("Refill logged — 2150 ml fresh water added; 5 L working."));
+});
+
+test("refill editing retains harvest guards and rejects invalid final volumes", async () => {
+  const { fields, edit } = await editablePhytoPanel({ jar: seededDonor(), fields: {
+    culturesSplitMl: "0", culturesDestBottle: false, culturesWorkingAfter: "5" } });
+  edit("culturesWorkingAfter", "5");
+  assert(!fields["data-cultures-split-submit"].disabled);
+  edit("culturesSplitMl", "100");
+  assert(fields["data-cultures-split-submit"].disabled, "withdrawing again still needs a fresh dark observation");
+  edit("culturesSplitMl", "0");
+  edit("culturesWorkingAfter", "6");
+  assert(fields["data-cultures-split-submit"].disabled, "cannot exceed capacity");
+  edit("culturesWorkingAfter", "2.85");
+  assert(fields["data-cultures-split-submit"].disabled, "no withdrawal and no fresh water is not an operation");
 });
 
 runTests();

@@ -20088,6 +20088,36 @@ def _cultures_animal_phyto_payload(config: dict[str, Any], cultures: dict[str, A
             "phytoRestart": ({**fill, "sourceId": lead["id"], "sourceName": lead["name"]} if fill else None)}
 
 
+def _cultures_donor_refill(config: dict[str, Any], jid: str, jar: dict[str, Any],
+                           st: dict[str, Any], mix_ppt: float) -> dict[str, Any] | None:
+    """Offer the donor's outstanding refill, including seeds logged before this UI existed.
+
+    Seeding records a withdrawal, not dilution. Do not move its growth clock
+    or stock until the keeper logs the fresh water separately.
+    """
+    if st.get("status") not in ("establishing", "producing") or st.get("harvestBlocked"):
+        return None
+    working = awc_engine._f((jar.get("state") or {}).get("workingL"))
+    capacity = awc_engine._f(jar.get("volumeL"))
+    if not 0 < working < capacity:
+        return None
+    # Observations and background light readings do not finish a refill.
+    # Any subsequent liquid operation supersedes this particular recipe.
+    row = next((h for h in jar.get("history", []) if not h.get("undoneAt")
+                and h.get("event") in ("harvest", "restart", "seeded", "split", "crashed", "water_change")), None)
+    if not row or row.get("event") != "harvest" or awc_engine._f(row.get("freshMl")) > 0:
+        return None
+    owner = _cultures_seed_owner(config, jid, row)
+    if not owner:
+        return None
+    guide = cultures_engine.split_guide(jar, mix_ppt, ml=0, fresh_ml=round((capacity - working) * 1000, 1))
+    if guide.get("available") is False:
+        return None
+    target = config["nps"]["cultures"]["jars"][owner]
+    return {"seededId": owner, "seededName": str(target.get("name") or owner),
+            "at": row.get("at"), "starterMl": row.get("ml", 0), "afterL": capacity, "guide": guide}
+
+
 def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any], st: dict[str, Any],
                             cad: dict[str, float], preset: dict[str, Any], mix_ppt: float, tank_l: float,
                             channels: dict[str, Any], now: datetime, light: Any = None,
@@ -20236,6 +20266,7 @@ def _cultures_phyto_payload(config: dict[str, Any], jid: str, jar: dict[str, Any
         "densityAdvice": cultures_engine.density_advice(state.get("lastTint"), st,
                                                         None),
         "splitGuide": split, "freshVesselGuide": split,
+        "refillAfterSeed": _cultures_donor_refill(config, jid, jar, st, mix_ppt),
         "seedGuides": {"starter": seed_default, "kit": seed_kit},
         "homeBottle": home, "hasHomeBottle": True,
         "nutrient": nutrient_payload, "sizing": sizing,
@@ -21011,7 +21042,7 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
     elif nutrient_ml > 0:
         _append_activity(config, f"{name}: {nutrient_ml:g} ml of f/2 went in but no f/2 bottle is on the shelf to debit — add it from the presets", "warning")
     _mixing_hatchery_debit(hass, config, awc_engine._f(guide["mixMl"]) / 1000.0,
-                           f"{'a fresh vessel for' if fresh_vessel else 'splitting'} {name}")
+                           f"{'a fresh vessel for' if fresh_vessel else 'refilling' if scale_only else 'splitting'} {name}")
     if tint in cultures_engine.PHYTO_TINTS:
         state["lastLookedAt"] = now.isoformat()
     # A DRAW (Stage C): under PHYTO_DRAW_MAX_PCT of the working volume out in
@@ -21043,7 +21074,8 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
                       tempC=_cultures_temp_c(hass, config, cultures), draw=True if draw else None)
     if not draw:
         _cultures_log_completion(config, jar_id, "harvest", now,
-                                 f"Logged automatically — {round(out_ml)} ml split from {source}")
+                                 f"Logged automatically — {round(fresh)} ml refill from {source}" if scale_only
+                                 else f"Logged automatically — {round(out_ml)} ml split from {source}")
     if fresh_vessel:
         _cultures_log_completion(config, jar_id, "restart", now,
                                  f"Logged automatically — a fresh, sterilised vessel from {source}")
@@ -21051,7 +21083,7 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
         _cultures_log_completion(config, jar_id, "look", now, f"Logged automatically — looked at the split from {source}")
     fresh_words = (f"{fresh:g} ml fresh @ {awc_engine._f(guide['targetPpt']):g} ppt"
                    + (f" + {nutrient_ml:g} ml f/2" if nutrient_ml > 0 else " (no f/2)")) if fresh > 0 else "nothing in"
-    what = "fresh vessel" if fresh_vessel else "scale-up" if guide.get("scaleUp") else "draw" if draw else "split"
+    what = "fresh vessel" if fresh_vessel else "refill" if scale_only else "scale-up" if guide.get("scaleUp") else "draw" if draw else "split"
     _append_activity(config, f"{name}: {what} — {round(out_ml)} ml out"
                              + (f" ({', '.join(words)})" if words else "") + f" · {fresh_words}"
                              + f" · {state['workingL']:g} L working"

@@ -2091,6 +2091,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-seed-phyto") this._culturesPhytoSeed(id, target.dataset.recipe || "");
       if (action === "cultures-seed-bottle") this._culturesPhytoSeed(id, "", { fromBottle: true });
       if (action === "cultures-split-phyto") this._culturesPhytoSplit(id, false);
+      if (action === "cultures-review-refill") this._culturesReviewDonorRefill(id);
       if (action === "cultures-fresh-vessel") this._culturesPhytoSplit(id, true);
       if (action === "cultures-add-phyto") this._culturesAddJar("nanno");
       if (action === "nps-product-shaken") this._npsCall({ type: "openreef/consumable_mark_shaken", product_id: id },
@@ -14306,17 +14307,18 @@ const rigSteps = [
   }
 
   _culturesPhytoDraft(jar, draft = {}) {
-    const guide = jar.splitGuide || {};
+    const refill = jar.refillAfterSeed;
+    const guide = refill?.guide || jar.splitGuide || {};
     const before = Number(jar.state?.workingL || jar.volumeL) * 1000;
     const out = Number(draft.outMl ?? guide.outMl);
-    const after = Number(draft.afterL ?? before / 1000) * 1000;
+    const after = Number(draft.afterL ?? refill?.afterL ?? before / 1000) * 1000;
     const fresh = Math.abs(after - before) > 0.001 ? Math.round(after - before + out) : Number(out.toFixed(1));
     const capacity = Number(jar.volumeL) * 1000;
     const ppt = Number(guide.targetPpt ?? jar.salinityPpt);
     const mixPpt = Number(guide.mixPpt ?? ppt);
     const rate = Number(jar.nutrient?.mlPerL ?? guide.nutrientMlPerL);
     if (![before, out, after, capacity, ppt, mixPpt, rate].every(Number.isFinite)
-        || before <= 0 || after <= 0 || out < 0 || out > before || after > capacity || fresh < 0
+        || before <= 0 || after <= 0 || out < 0 || out >= before || after > capacity || fresh < 0
         || mixPpt <= 0 || ppt > mixPpt || (out === 0 && fresh === 0)) {
       return { line: "Check the split and final working volumes, capacity and mixing salinity before logging.", nutrientText: "f/2 amount unavailable until the recipe is valid" };
     }
@@ -14325,12 +14327,13 @@ const rigSteps = [
     const nutrientMl = draft.nutrient === false ? 0 : Number((fresh / 1000 * rate).toFixed(1));
     const nutrientText = `f/2 with the fresh water — ${nutrientMl} ml${draft.nutrient === false ? " (not added)" : jar.nutrient?.productName ? ` off ${jar.nutrient.productName}` : " (no f/2 bottle on the shelf)"}`;
     const seedPct = Math.round(100 * (before - out) / before);
-    const line = `jug: ${out} ml out · ${fresh} ml fresh @ ${ppt} ppt${rodi > 0 ? ` (${mix} ml mix + ${rodi} ml RODI)` : ""} + ${nutrientMl} ml f/2 · ${seedPct} % stays as seed`;
+    const refillOnly = out === 0 && fresh > 0;
+    const line = `${refillOnly ? "refill:" : `jug: ${out} ml out ·`} ${fresh} ml fresh @ ${ppt} ppt${rodi > 0 ? ` (${mix} ml mix + ${rodi} ml RODI)` : ""} + ${nutrientMl} ml f/2${refillOnly ? ` → ${after / 1000} L working` : ` · ${seedPct} % stays as seed`}`;
     const warnings = [];
     if (100 * out / before > 70) warnings.push("More than 70% removed — a thin seed may take longer to recover.");
     const bottle = jar.homeBottle || {};
     const free = Number(guide.bottleFreeMl ?? Math.max(0, Number(bottle.bottleMl || 0) - Number(bottle.remainingMl || 0)));
-    const shares = draft.shares?.length ? draft.shares : [{ to: (jar.harvestTo || "bottle") === "source" ? "tank" : "bottle", ml: 0 }];
+    const shares = out === 0 ? [] : draft.shares?.length ? draft.shares : [{ to: (jar.harvestTo || "bottle") === "source" ? "tank" : "bottle", ml: 0 }];
     if (shares.reduce((total, share) => total + Number(share.ml || 0), 0) > out)
       warnings.push("Destination shares exceed the volume out; reduce the shares before logging.");
     const bottleShare = shares.find((share) => share.to === "bottle");
@@ -14341,7 +14344,7 @@ const rigSteps = [
       if (uncertain && !bottleShare.ml) warnings.push(`Bottle has room for ${free} ml; automatic destination shares are confirmed when logging. Any bottle overflow goes to waste.`);
       else if (bottleMl > free) warnings.push(`Bottle has room for ${free} ml: ${Math.round(bottleMl - free)} ml of its share would go to waste. Reduce the split or choose another destination.`);
     }
-    return { line, nutrientText, warning: warnings.join(" "), freshMl: fresh, nutrientMl };
+    return { valid: true, refillOnly, line, nutrientText, warning: warnings.join(" "), freshMl: fresh, nutrientMl };
   }
 
   _culturesRefillDraft(jar, draft = {}) {
@@ -14481,6 +14484,17 @@ const rigSteps = [
       set("data-culture-split-preview", preview.line);
       set("data-culture-nutrient-preview", preview.nutrientText);
       set("data-culture-split-warning", preview.warning);
+      const submit = q("data-cultures-split-submit");
+      if (submit) {
+        const canSplit = jar.tint === "dark" && jar.densityAdvice?.action === "split_now"
+          && jar.state?.colourObservation?.fresh !== false;
+        submit.disabled = !preview.valid || !!jar.state?.harvestBlocked
+          || !["producing", "establishing"].includes(jar.state?.status)
+          || !(preview.refillOnly || canSplit);
+        submit.textContent = preview.refillOnly ? "Log refill" : "Split";
+        submit.title = preview.refillOnly ? "Log after adding the fresh water and any f/2 shown in the recipe"
+          : "A recent dark observation with no unresolved warning signs is needed before splitting";
+      }
     } else {
       const sourceId = q("data-cultures-phyto-from")?.value || "";
       set("data-culture-phyto-refill", this._culturesRefillDraft(jar, { sourceId,
@@ -14492,13 +14506,27 @@ const rigSteps = [
     }
   }
 
+  _culturesReviewDonorRefill(jarId) {
+    const jar = (this._cultures?.summary?.jars || []).find((item) => item.id === jarId);
+    const refill = jar?.refillAfterSeed;
+    if (!refill || jar.state?.harvestBlocked) return;
+    // Reviewing a refill explicitly replaces any old split draft on the
+    // donor. Observations stay put; subsequent edits survive every refresh.
+    this._culturesFormDrafts ||= {};
+    const draft = this._culturesFormDrafts[jarId] ||= {};
+    Object.assign(draft, { culturesSplitMl: "0", culturesWorkingAfter: String(refill.afterL), culturesF2: true });
+    for (const dest of ["Bottle", "Tank", "Drip", "Vessel", "Cone"]) draft[`culturesDest${dest}`] = false;
+    this._culturesRestoreFormDrafts();
+    this._feedingOpen(`culture-${jarId}-recipe`);
+  }
+
   // The split (doc §5.3): ml out, the shares — the bottle, the tank, the
   // drip, B — fresh water in (a bigger working volume = a scale-up) and the
   // f/2 that rides it. The same form is the fresh vessel with ``freshVessel``.
   _culturesPhytoSplit(jarId, freshVessel = false) {
     const q = (attr) => this.shadowRoot?.querySelector(`[${attr}="${jarId}"]`);
     const jar = (this._cultures?.summary?.jars || []).find((j) => j.id === jarId) || {};
-    const guide = jar.splitGuide || {};
+    const guide = jar.refillAfterSeed?.guide || jar.splitGuide || {};
     const msg = { type: freshVessel ? "openreef/cultures_fresh_vessel" : "openreef/cultures_split", jar_id: jarId };
     const outBox = q("data-cultures-split-ml");
     const out = outBox && outBox.value !== "" ? Number(outBox.value) : Number(guide.outMl) || 0;
@@ -14525,7 +14553,8 @@ const rigSteps = [
     // One ticked share left blank takes whatever the others leave.
     const blank = shares.filter((s) => !s.ml && !["drip", "vessel", "cone"].includes(s.to));
     if (blank.length === 1) blank[0].ml = Math.max(0, out - shares.reduce((n, s) => n + s.ml, 0));
-    if (shares.length) msg.to = shares.filter((s) => s.ml > 0 || ["drip", "vessel", "cone"].includes(s.to));
+    if (out === 0) msg.to = [];
+    else if (shares.length) msg.to = shares.filter((s) => s.ml > 0 || ["drip", "vessel", "cone"].includes(s.to));
     const afterBox = q("data-cultures-working-after");
     const after = afterBox && afterBox.value !== "" ? Number(afterBox.value) : NaN;
     const before = Number(jar.state?.workingL) || Number(jar.volumeL) || 0;
@@ -14541,6 +14570,7 @@ const rigSteps = [
     if (Number.isFinite(secchiCm) && secchiCm >= 0) msg.secchi_cm = Math.min(60, secchiCm);
     this._culturesCall(msg, freshVessel
       ? "Fresh vessel logged — the cycle counter reset. Bleach, rinse and dry the old container for next time."
+      : out === 0 && msg.fresh_ml > 0 ? `Refill logged — ${msg.fresh_ml} ml fresh water added; ${after} L working. Saltwater and f/2 records updated; a new growth cycle starts.`
       : msg.fresh_ml === 0 ? `Withdrawal logged — ${out} ml out, no top-up or f/2; ${after} L remains in the vessel.`
         : msg.fresh_ml != null ? "Split logged — the working volume moved with the fresh water; the bottle, the f/2 and the station keep count."
           : "Split logged — the bottle, the f/2 and the station keep count; the colour is pale again.",
@@ -15679,6 +15709,8 @@ const rigSteps = [
 
   _cultureNextTitle(jar) {
     if (!["producing", "establishing"].includes(jar.state?.status)) return "Prepare a clean vessel to seed";
+    if (jar.kind === "phyto" && jar.refillAfterSeed && !jar.state?.harvestBlocked)
+      return `Refill after seeding ${jar.refillAfterSeed.seededName}`;
     if (jar.kind === "rotifer" && (jar.due || []).includes("restart") && !jar.temp?.act) return "Review a restart or large water change";
     if (jar.risk?.level === "act" || jar.state?.harvestBlocked) return "Check this culture before harvesting";
     if (jar.kind === "phyto") {
@@ -16116,7 +16148,8 @@ const rigSteps = [
     const fresh = Number(h.freshMl) > 0 ? ` · ${Math.round(Number(h.freshMl))} ml fresh${Number(h.nutrientMl) > 0 ? ` + ${h.nutrientMl} ml f/2` : ""}` : "";
     const secchi = h.secchiCm != null ? ` · Secchi ${h.secchiCm} cm` : "";
     if (kind === "phyto") {
-      const word = ({ harvest: "split", restart: "fresh vessel", tint: "looked", seeded: "seeded", split: "seeded B", sign: "sign", crashed: "crashed" })[h.event] || h.event;
+      const word = h.event === "harvest" && Number(h.ml) === 0 && Number(h.freshMl) > 0 ? "refilled"
+        : ({ harvest: "split", restart: "fresh vessel", tint: "looked", seeded: "seeded", split: "seeded B", sign: "sign", crashed: "crashed" })[h.event] || h.event;
       return `${word}${dests}${fresh}${secchi}${h.arrivalTint ? ` · arrived ${h.arrivalTint}` : ""}`;
     }
     const eventLabel = { seeded: "seeded", feed: "fed", tint: "looked", skip: "feed skipped", harvest: "harvested", restart: "restarted", water_change: "water change", split: "split", crashed: "crashed", sign: "sign",
@@ -16179,11 +16212,12 @@ const rigSteps = [
     const s = j.state || {};
     const status = s.status || "none";
     const running = status === "producing" || status === "establishing";
+    const refill = running && !s.harvestBlocked ? j.refillAfterSeed : null;
     const splitReady = j.tint === "dark" && j.densityAdvice?.action === "split_now"
       && !s.harvestBlocked && s.colourObservation?.fresh !== false;
-    const due = (j.due || []).filter((key) => key !== "harvest" || splitReady);
+    const due = (j.due || []).filter((key) => key !== "harvest" || (splitReady && !refill));
     const reasonWord = { dark: "it reads dark", cycles: `${esc(s.cyclesSinceFresh ?? "")} splits since the last`, sign: "a sign", backup: `${esc(Math.round(s.ageDays || 0))} days on the sill` };
-    const readiness = running && !splitReady
+    const readiness = refill ? `<span class="pill warning" style="font-size:11px;">Refill to start the next cycle</span>` : running && !splitReady
       ? `<span class="pill" style="font-size:11px;">${s.harvestBlocked ? "Splitting on hold" : s.colourObservation?.fresh === false ? "Colour check needed" : "Not ready to split"}</span>` : "";
     const chips = readiness + due.map((d) => {
       const reason = d === "harvest" ? reasonWord[s.harvest?.reason] : d === "restart" ? reasonWord[s.restart?.reason] : d === "refresh" ? reasonWord[s.refresh?.reason] : "";
@@ -16196,7 +16230,7 @@ const rigSteps = [
       crashed: `<span style="color:var(--error-color,#e5484d)">crashed</span> at day ${esc(Math.round(s.ageDays || 0))}`,
     })[status] || "empty — seed it when the starter lands";
     const hb = j.homeBottle || {};
-    const guide = j.splitGuide || {};
+    const guide = refill?.guide || j.splitGuide || {};
     const seed = j.seedGuides || {};
     const starter = seed.starter || {};
     const kit = seed.kit || {};
@@ -16219,15 +16253,15 @@ const rigSteps = [
     const doseMl = Number(hb.handDose?.ml) || 0;
     const splitForm = running && !s.harvestBlocked ? `
         <label class="culture-field" title="What comes out — the split percentage of the working volume by default (${esc(Math.round(guide.removalPct || 0))} %). More than 70 % leaves a thin seed.">Out<span class="unit"><input type="number" min="0" step="10" data-cultures-split-ml="${esc(j.id)}" value="${esc(Math.round(guide.outMl || 0))}"><small class="muted">ml</small></span></label>
-        ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
-        ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
+        ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", !refill && (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
+        ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", !refill && (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
         ${drips.length ? destRow("drip", "→ drip", `Load the drip's jar (${drips.map((d) => d.name).join(", ")}) — the oldest remaining load keeps its clock; the jar takes what fits.`, false, "", "the jar's fill", true) : ""}
         ${cones.length ? destRow("cone", `→ ${esc(cones.length === 1 ? cones[0].name : "cone")}`, `Feed a rotifer or pod jar straight from the vessel — one tint of it (${cones.map((c) => `${c.name} ~${c.doseMl} ml`).join(", ")}) as the default; refused while that jar is still green (one big dose is the classic rotifer crash). Under 30 % of the working volume this is a draw: the vessel keeps its colour and its split clock.`, false, cones[0].doseMl, cones[0].stillGreen ? " (still green — it will refuse)" : "") : ""}
         ${cones.length > 1 ? `<div class="culture-field"><span></span><select data-cultures-dest-cone-jar="${esc(j.id)}" style="width:auto;">${cones.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(c.tint || "no tint")}</option>`).join("")}</select></div>` : ""}
         ${canB ? (refresh.backupId
           ? destRow("vessel", `→ ${esc(refresh.backupName)}`, `Refresh ${refresh.backupName} from this vessel — its old culture to waste, this share of today's crop as the new seed (1:4 into fresh water + f/2).`, false, "", ` to refresh ${esc(refresh.backupName)}`)
           : destRow("vessel", "→ B", "Seed a second vessel from this one — a windowsill backup on its own light; a litre is plenty.", false, "", " for B")) : ""}
-        <label class="culture-field" title="Fresh ${esc(j.salinityPpt)} ppt water goes in like for like. A bigger working volume is a SCALE-UP: ${esc(starter.workingL || 1.25)} L → ${esc(kit.workingL || 3.5)} L over the first splits, once the drip or the cone drinks it.">After<span class="unit"><input type="number" min="0.2" max="${esc(j.volumeL || 4)}" step="0.05" data-cultures-working-after="${esc(j.id)}" value="${esc(s.workingL || j.volumeL)}"><small class="muted">L working (max ${esc(j.volumeL)})</small></span></label>
+        <label class="culture-field" title="Fresh ${esc(j.salinityPpt)} ppt water goes in like for like. A bigger working volume is a SCALE-UP: ${esc(starter.workingL || 1.25)} L → ${esc(kit.workingL || 3.5)} L over the first splits, once the drip or the cone drinks it.">After<span class="unit"><input type="number" min="0.2" max="${esc(j.volumeL || 4)}" step="0.05" data-cultures-working-after="${esc(j.id)}" value="${esc(refill?.afterL ?? s.workingL ?? j.volumeL)}"><small class="muted">L working (max ${esc(j.volumeL)})</small></span></label>
         <div class="culture-field"><span></span><label class="culture-tick" title="${esc(j.nutrientNote || "f/2 rides the fresh water only.")}"><input type="checkbox" data-cultures-f2="${esc(j.id)}" checked> <span data-culture-nutrient-preview="${esc(j.id)}">f/2 with the fresh water — ${esc(guide.nutrientMl ?? 0)} ml${j.nutrient?.productName ? ` off ${esc(j.nutrient.productName)}` : " (no f/2 bottle on the shelf)"}</span></label></div>` : "";
     const seedCard = !running ? `
         <label class="culture-field" title="The arrival check (the rotifer pouch's lesson): a rich green starter with no smell seeds; grey, brown, cloudy or smelling does not — contact the supplier.">Starter<select data-cultures-arrival="${esc(j.id)}"><option value="" selected>Look at it first…</option><option value="green">rich green, no smell</option><option value="pale">pale, but clean</option><option value="off">off — grey, brown, cloudy, a smell</option></select></label>
@@ -16235,11 +16269,11 @@ const rigSteps = [
         <label class="culture-field" title="The starter page's recipe: 1:4 — ${esc(starter.starterMl || 250)} ml into ${esc(starter.freshMl || 1000)} ml of ${esc(j.salinityPpt)} ppt water + ${esc(starter.nutrientMl ?? 1.5)} ml f/2. Small volumes green faster under window light; scale up to ${esc(kit.workingL || 3.5)} L at the first splits.">Working<span class="unit"><input type="number" min="0.2" max="${esc(j.volumeL || 4)}" step="0.05" data-cultures-working-l="${esc(j.id)}" value="${esc(starter.workingL || 1.25)}"><small class="muted">L (the 1:4)</small></span></label>
         <label class="culture-field" title="The day the starter bottle arrived or was opened — its four-week clock.">Opened<input type="date" data-cultures-starter-opened="${esc(j.id)}" value="${esc(new Date().toISOString().slice(0, 10))}"></label>` : "";
     const adv = j.densityAdvice || {};
-    const advice = running && adv.reason ? `<small ${adv.action === "hold" ? 'style="color:var(--error-color,#e5484d)"' : adv.action === "split_now" ? 'style="color:var(--warning-color,#f5a524)"' : 'class="muted"'} data-culture-density="${esc(adv.action)}">${esc(adv.reason)}${adv.action === "split_now" ? " → split" : ""}</small>` : "";
+    const advice = refill ? `<small class="muted">${esc(refill.starterMl)} ml starter already recorded for ${esc(refill.seededName)}. Review the top-up to ${esc(refill.afterL)} L, then log it after adding the water and f/2. Until then, the remaining culture keeps its colour and growth clock.</small>` : running && adv.reason ? `<small ${adv.action === "hold" ? 'style="color:var(--error-color,#e5484d)"' : adv.action === "split_now" ? 'style="color:var(--warning-color,#f5a524)"' : 'class="muted"'} data-culture-density="${esc(adv.action)}">${esc(adv.reason)}${adv.action === "split_now" ? " → split" : ""}</small>` : "";
     const risk = running && j.risk && j.risk.level !== "ok"
       ? `<small style="color:${j.risk.level === "act" ? "var(--error-color,#e5484d)" : "var(--warning-color,#f5a524)"}" data-culture-risk="${esc(j.risk.level)}">${j.risk.level === "act" ? "⚠ " : "👀 "}${esc(j.risk.reason || "")}</small>` : "";
-    const jug = canSplit && guide.available !== false
-      ? `<small class="muted" data-culture-split-preview="${esc(j.id)}" aria-live="polite" title="The split jug: out through a clean jug or the drain tap, the same in as fresh water at the vessel's salinity, the f/2 by the NEW litres only">jug: ${esc(Math.round(guide.outMl || 0))} ml out · ${esc(Math.round(guide.freshMl || 0))} ml fresh @ ${esc(guide.targetPpt || j.salinityPpt)} ppt${guide.rodiMl ? ` (${esc(guide.mixMl)} ml mix + ${esc(guide.rodiMl)} ml RODI)` : ""} + ${esc(guide.nutrientMl ?? 0)} ml f/2 · ${esc(Math.round(guide.seedPct || 0))} % stays as seed</small>`
+    const jug = running && !s.harvestBlocked && guide.available !== false
+      ? `<small class="muted" data-culture-split-preview="${esc(j.id)}" aria-live="polite" title="Fresh water and f/2 for the working volume shown; log only after adding them">${esc(this._culturesPhytoDraft(j).line)}</small>`
       : guide.available === false ? `<small class="muted">${esc(guide.reason)}</small>` : "";
     const warn = running ? `<small data-culture-split-warning="${esc(j.id)}" aria-live="polite" style="color:var(--warning-color,#f5a524)">${esc(this._culturesPhytoDraft(j).warning || guide.warning || "")}</small>` : "";
     const sizing = j.sizing?.available && j.sizing.line ? `<small class="muted" data-culture-sizing>${esc(j.sizing.line)}</small>` : "";
@@ -16305,7 +16339,7 @@ const rigSteps = [
       !running && j.reseedFromBottle ? `<button class="secondary compact-button" data-action="cultures-seed-bottle" data-id="${esc(j.id)}" title="The fridge bottle is under a week old — a legitimate starter">Seed from the fridge bottle</button>` : "",
       ...(!running ? (j.reseedFrom || []).map((from) => `<button class="secondary compact-button" data-action="cultures-seed" data-id="${esc(j.id)}" data-from="${esc(from)}">Seed from ${esc((jars.find((x) => x.id === from) || {}).name || from)}</button>`) : []),
       running ? `<button class="primary compact-button" data-action="cultures-looked" data-id="${esc(j.id)}" title="Logs the colour (and a Secchi reading if you typed one) — nothing else moves">Log observation</button>` : "",
-      running ? `<button class="${due.includes("harvest") && canSplit ? "primary" : "secondary"} compact-button" data-action="cultures-split-phyto" data-id="${esc(j.id)}" title="${canSplit ? "The harvest: out to the places ticked, fresh water and f/2 in, the colour back to pale" : "A recent dark observation with no unresolved warning signs is needed before splitting"}" ${canSplit ? "" : "disabled"}>Split</button>` : "",
+      running ? `<button class="${refill || (due.includes("harvest") && canSplit) ? "primary" : "secondary"} compact-button" data-action="cultures-split-phyto" data-id="${esc(j.id)}" data-cultures-split-submit="${esc(j.id)}" title="${refill ? "Log after adding the fresh water and any f/2 shown in the recipe" : canSplit ? "The harvest: out to the places ticked, fresh water and f/2 in, the colour back to pale" : "A recent dark observation with no unresolved warning signs is needed before splitting"}" ${canSplit || refill ? "" : "disabled"}>${refill ? "Log refill" : "Split"}</button>` : "",
       running ? `<button class="${due.includes("restart") ? "primary" : "secondary"} compact-button" data-action="cultures-fresh-vessel" data-id="${esc(j.id)}" title="The same split, the seed into a sterilised container of new water + f/2 — every ${esc(s.restartCycles || 4)} splits, or on a sign${s.harvestBlocked ? "; an off-colour crop goes to waste, never the bottle" : ""}">Fresh vessel</button>` : "",
       running && refresh.isBackup && refresh.available ? `<button class="${due.includes("refresh") ? "primary" : "secondary"} compact-button" data-action="cultures-refresh-backup" data-id="${esc(j.id)}" title="A small split of ${esc(refresh.fromName)}: ${esc(refresh.starterMl || 250)} ml of its crop into this bottle with fresh water and f/2 — the old culture to waste">Refresh from ${esc(refresh.fromName)}</button>` : "",
       running ? `<button class="danger-text compact-button" data-action="cultures-crash" data-id="${esc(j.id)}">Crashed</button>` : "",
@@ -16332,9 +16366,9 @@ const rigSteps = [
           <div class="feeding-next"><p class="eyebrow">Next action</p><strong>${esc(this._cultureNextTitle(j))}</strong>${advice}</div>
           <div class="feeding-alerts">${risk}${tempLine}${light.status === "act" || light.status === "watch" ? lightLine : ""}</div>
           ${lookForm || seedCard ? `<div class="culture-form">${lookForm}${seedCard}</div>` : ""}
-          ${this._feedingActions(buttons, dailyActions)}
+          ${refill ? `<button class="secondary compact-button" data-action="cultures-review-refill" data-id="${esc(j.id)}">Review refill</button>` : ""}${this._feedingActions(buttons, dailyActions)}
           ${!running ? `<div class="culture-notes">${seedLine}${nutrient}${bottleLine}</div>${this._feedingActions(buttons, knownActions, true)}` : ""}
-          ${running ? this._feedingDetails(`culture-${j.id}-recipe`, "Split & refill recipe",
+          ${running ? this._feedingDetails(`culture-${j.id}-recipe`, refill ? "Refill after seeding" : "Split & refill recipe",
             `<div class="culture-notes">${jug}${warn}${refreshLine}${nutrient}</div><div class="culture-form">${splitForm}</div>${this._feedingActions(buttons, recipeActions)}`, due.some((d) => ["harvest", "restart", "refresh"].includes(d))) : ""}
           ${running ? this._feedingDetails(`culture-${j.id}-growth`, "Light, growth & supply",
             `<div class="culture-notes">${lightLine}${sizing}${bottleLine}${starterLine}${learnedLine}${applyLines}${phLine}</div>`) : ""}

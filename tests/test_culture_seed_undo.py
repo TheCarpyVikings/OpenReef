@@ -9,7 +9,7 @@ from _fake_ha import FakeConnection, FakeHass, run
 I, C, NOW = t.integration, t.cultures, t.REAL
 
 
-def fixture(source="sibling", legacy=False, tracked=True):
+def fixture(source="sibling", legacy=False, tracked=True, starter_ml=250, working_l=1.25):
     started, crashed = (NOW - timedelta(days=33)).isoformat(), (NOW - timedelta(hours=2)).isoformat()
     donor = t._phyto_jar(started_ago_days=7, now=NOW, workingL=4.85, lastTint="dark")
     donor.update(name="Nanno Main", volumeL=5)
@@ -34,7 +34,7 @@ def fixture(source="sibling", legacy=False, tracked=True):
     before = t._config(entry)
     hass, conn = FakeHass(entries=[entry]), FakeConnection()
     extra = {"from_jar_id": "c1"} if source == "sibling" else {"from_bottle": True} if source == "bottle" else {"arrival_tint": "green"}
-    run(I.websocket_cultures_seed(hass, conn, {"id": 1, "jar_id": "c2", "starter_ml": 250, "working_l": 1.25, **extra}))
+    run(I.websocket_cultures_seed(hass, conn, {"id": 1, "jar_id": "c2", "starter_ml": starter_ml, "working_l": working_l, **extra}))
     assert not conn.errors, conn.errors
     cfg = t._config(entry)
     row = cfg["nps"]["cultures"]["jars"]["c2"]["history"][0]
@@ -46,6 +46,93 @@ def fixture(source="sibling", legacy=False, tracked=True):
 
 
 class SeedUndo(unittest.TestCase):
+    def test_two_litre_seed_offers_existing_donor_refill_without_moving_records(self):
+        entry, hass, _, before, stamp = fixture(legacy=True, starter_ml=2000, working_l=3.5)
+        cfg = t._config(entry)
+        donor = cfg["nps"]["cultures"]["jars"]["c1"]
+        at = datetime.fromisoformat(stamp)
+        I._cultures_history(donor, "light", at + timedelta(seconds=1), lightH=4)
+        I._cultures_history(donor, "tint", at + timedelta(seconds=2), tint="dark")
+        I._nps_cultures_cfg(cfg)
+        original = deepcopy(cfg)
+        summary = I._cultures_summary_payload(hass, cfg)
+        main = next(j for j in summary["jars"] if j["id"] == "c1")
+        refill = main["refillAfterSeed"]
+        self.assertEqual(refill["seededName"], "Nanno Backup")
+        self.assertEqual(refill["starterMl"], 2000)
+        self.assertEqual(refill["afterL"], 5)
+        self.assertEqual(refill["guide"]["outMl"], 0)
+        self.assertEqual(refill["guide"]["freshMl"], 2150)
+        self.assertEqual(refill["guide"]["mixMl"], 2150)
+        self.assertEqual(refill["guide"]["nutrientMl"], 3.2)
+        self.assertEqual(main["state"]["workingL"], 2.85)
+        self.assertEqual(main["tint"], "dark")
+        self.assertEqual(donor["state"]["lastHarvestAt"], before["nps"]["cultures"]["jars"]["c1"]["state"]["lastHarvestAt"])
+        self.assertEqual(cfg["nps"]["cultures"], original["nps"]["cultures"])
+        self.assertEqual(cfg["mixingStation"], original["mixingStation"])
+        self.assertEqual(cfg["consumables"], original["consumables"])
+
+    def test_donor_refill_debits_only_new_water_and_nutrient_and_starts_cycle(self):
+        entry, hass, conn, _, stamp = fixture(starter_ml=2000, working_l=3.5)
+        before = t._config(entry)
+        run(I.websocket_cultures_split(hass, conn, {"id": 2, "jar_id": "c1", "ml": 0,
+                                                   "fresh_ml": 2150, "to": [], "nutrient": True}))
+        self.assertFalse(conn.errors)
+        cfg = t._config(entry)
+        jars = cfg["nps"]["cultures"]["jars"]
+        self.assertEqual(jars["c1"]["state"]["workingL"], 5)
+        self.assertEqual(jars["c1"]["state"]["lastTint"], "pale")
+        self.assertGreater(jars["c1"]["state"]["lastHarvestAt"], stamp)
+        self.assertEqual(jars["c2"], before["nps"]["cultures"]["jars"]["c2"])
+        # 10.3 L - 1.5 L for Backup - 2.15 L for Main.
+        self.assertEqual(cfg["mixingStation"]["vessels"]["mix"]["estimatedLitres"], 6.65)
+        self.assertEqual(cfg["consumables"]["products"]["f2"]["remainingMl"], 226.6)
+        for pid, product in before["consumables"]["products"].items():
+            if pid != "f2":
+                self.assertEqual(cfg["consumables"]["products"][pid], product)
+        row = jars["c1"]["history"][0]
+        self.assertEqual((row["event"], row["ml"], row["freshMl"], row["nutrientMl"]), ("harvest", 0, 2150, 3.2))
+        main = next(j for j in I._cultures_summary_payload(hass, cfg)["jars"] if j["id"] == "c1")
+        self.assertIsNone(main["refillAfterSeed"])
+        self.assertFalse(main["state"]["harvest"]["due"])
+        self.assertAlmostEqual(main["state"]["cycle"]["day"], 0, places=3)
+        original = deepcopy(cfg)
+        # A repeated submission cannot add another 2.15 L above capacity.
+        self.assertIsNotNone(I._cultures_phyto_split_apply(hass, cfg, "c1", ml=0, fresh_ml=2150, dests=[]))
+        self.assertEqual(cfg, original)
+        # Undo cannot rewind the linked seed over a subsequent real refill.
+        self.assertIsNotNone(I._cultures_undo_apply(cfg, "c2", stamp, datetime.fromisoformat(stamp) + timedelta(minutes=1)))
+        self.assertEqual(cfg, original)
+        self.assertFalse([c for c in hass.services.calls if c.domain != "persistent_notification"])
+
+    def test_undoing_seed_removes_donor_refill_offer(self):
+        entry, hass, conn, _, stamp = fixture(starter_ml=2000, working_l=3.5)
+        run(I.websocket_cultures_undo(hass, conn, {"id": 2, "jar_id": "c1", "at": stamp}))
+        self.assertFalse(conn.errors)
+        main = next(j for j in I._cultures_summary_payload(hass, t._config(entry))["jars"] if j["id"] == "c1")
+        self.assertIsNone(main["refillAfterSeed"])
+        self.assertEqual(main["state"]["workingL"], 4.85)
+
+    def test_refill_offer_requires_unfinished_linked_seed_in_healthy_running_donor(self):
+        for change in ("target_undone", "donor_undone", "later_withdrawal", "full", "blocked", "crashed"):
+            with self.subTest(change=change):
+                entry, _, _, _, stamp = fixture(starter_ml=2000, working_l=3.5)
+                cfg = t._config(entry)
+                jars = cfg["nps"]["cultures"]["jars"]
+                donor = jars["c1"]
+                state = C.culture_state(donor, NOW)
+                if change.endswith("undone"):
+                    jars["c2" if change == "target_undone" else "c1"]["history"][0]["undoneAt"] = stamp
+                elif change == "later_withdrawal":
+                    I._cultures_history(donor, "harvest", datetime.fromisoformat(stamp) + timedelta(seconds=1), ml=150, draw=True, to="tank")
+                elif change == "full":
+                    donor["state"]["workingL"] = 5
+                elif change == "blocked":
+                    state["harvestBlocked"] = True
+                else:
+                    state["status"] = "crashed"
+                self.assertIsNone(I._cultures_donor_refill(cfg, "c1", donor, state, 35))
+
     def test_linked_seed_restores_both_cultures_stock_and_water_once(self):
         for clicked in ("c1", "c2"):
             with self.subTest(clicked=clicked):
