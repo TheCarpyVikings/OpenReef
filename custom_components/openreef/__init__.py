@@ -1085,6 +1085,8 @@ def _normalise_dosing_channels(dosing: dict[str, Any]) -> None:
                 "haRunStartedAt": _awc_str(raw_state.get("haRunStartedAt"), 40),
                 "haRunEndsAt": _awc_str(raw_state.get("haRunEndsAt"), 40),
                 "haRunTargetMl": _awc_num(raw_state.get("haRunTargetMl"), 0, 0, 100000),
+                "haRunConfirmed": bool(raw_state.get("haRunConfirmed")),
+                "serviceRunUntil": _awc_str(raw_state.get("serviceRunUntil"), 40),
                 "lastDoseAt": _awc_str(raw_state.get("lastDoseAt"), 40),
                 "lastSensorAt": _awc_str(raw_state.get("lastSensorAt"), 40),
                 "missedMl": _awc_num(raw_state.get("missedMl"), 0, 0, 1e6),
@@ -4199,6 +4201,130 @@ def _collect_entity_ids(config: dict[str, Any]) -> set[str]:
     return entity_ids
 
 
+def _automation_binding_errors(config: dict[str, Any]) -> dict[str, str]:
+    """Writable outputs must belong to exactly one independent controller.
+
+    Read-only sensors may be shared. Equipment cards may describe these same
+    pumps, so the generic inventory is deliberately not counted as an owner.
+    """
+    owners: dict[str, list[str]] = {}
+    errors: dict[str, str] = {}
+
+    def add(owner: str, entity: Any, domain: str) -> None:
+        entity = _normalise_entity_id(entity)
+        if not entity:
+            return
+        if entity.split(".", 1)[0] != domain:
+            errors[owner] = f"{owner} requires a {domain} entity ({entity})"
+        owners.setdefault(entity, []).append(owner)
+
+    awc = config.get("automaticWaterChange") or {}
+    for role, pump in (awc.get("pumps") or {}).items():
+        if isinstance(pump, dict):
+            add(f"awc.{role}", pump.get("switchEntity"), "switch")
+    for cid, channel in ((config.get("dosing") or {}).get("channels") or {}).items():
+        if not isinstance(channel, dict):
+            continue
+        for role, entity in ((channel.get("driver") or {}).get("entities") or {}).items():
+            for suffix, domain in (("Switch", "switch"), ("Number", "number"), ("Button", "button")):
+                if role.endswith(suffix):
+                    add(f"dosing.{cid}.{role}", entity, domain)
+                    break
+        stir = ((channel.get("schedule") or {}).get("standing") or {}).get("stir") or {}
+        add(f"dosing.{cid}.stir", stir.get("switchEntity"), "switch")
+    for role, binding in ((config.get("mixingStation") or {}).get("switches") or {}).items():
+        if isinstance(binding, dict):
+            add(f"mixing.{role}", binding.get("switchEntity"), "switch")
+    for entity, paths in owners.items():
+        if len(paths) > 1:
+            for path in paths:
+                errors[path] = f"{entity} is shared by {', '.join(paths)}; use separate outputs"
+    return errors
+
+
+def _automation_settings_error(hass: HomeAssistant, stored: dict[str, Any],
+                               incoming: dict[str, Any], *, importing: bool = False) -> str:
+    """Never let an edit move a running operation's stop target or calibration."""
+    fx = (incoming.get("nps") or {}).get("feedExchange") or {}
+    linked = _dosing_channels(incoming).get(str(fx.get("channelId") or ""))
+    if fx.get("enabled") and linked and dosing_engine.is_ha_timed(linked):
+        return "Matched drain requires a firmware completed-dose counter; disable matched drain for a generic HA switch"
+    conflicts = _automation_binding_errors(incoming)
+    if conflicts:
+        # An existing wiring error must not trap the user in an enabled state.
+        # Unchanged conflicts still block all starts, but allow a disable save.
+        old_channels = _dosing_channels(stored)
+        new_channels = _dosing_channels(incoming)
+        old_flags = [bool(_awc_cfg(stored).get("enabled")), bool((stored.get("dosing") or {}).get("enabled"))]
+        new_flags = [bool(_awc_cfg(incoming).get("enabled")), bool((incoming.get("dosing") or {}).get("enabled"))]
+        for cid in set(old_channels) | set(new_channels):
+            old_flags.append(bool((old_channels.get(cid) or {}).get("enabled")))
+            new_flags.append(bool((new_channels.get(cid) or {}).get("enabled")))
+        disabling = any(old and not new for old, new in zip(old_flags, new_flags))
+        enabling = any(new and not old for old, new in zip(old_flags, new_flags))
+        if importing or conflicts != _automation_binding_errors(stored) or not disabling or enabling:
+            return next(iter(conflicts.values()))
+    old_awc, new_awc = _awc_cfg(stored), _awc_cfg(incoming)
+    state = old_awc.get("state") or {}
+    fx_state = (((stored.get("nps") or {}).get("feedExchange") or {}).get("state") or {})
+    active = (state.get("status") in (*_AWC_RUNNING_STATES, "paused", "fault")
+              or state.get("calRunRole") or fx_state.get("drainStartedAt")
+              or hass.data.get(DOMAIN, {}).get(AWC_CALRUN_UNSUB) is not None)
+    if active:
+        if importing:
+            return "Finish or resolve the water-change, drain or calibration run before importing settings"
+        for key in ("pumps", "safety", "ato", "tankVolumeLitres", "sourcePolicy", "reservoirs"):
+            # Runtime is already preserved by the caller; differences here are
+            # edits that can change a running leg's destination, timing or guards.
+            if old_awc.get(key) != new_awc.get(key):
+                return "Stop and resolve the active water operation before changing pumps, calibration or safety settings"
+    old_channels = _dosing_channels(stored)
+    new_channels = _dosing_channels(incoming)
+    for cid, old in old_channels.items():
+        new = new_channels.get(cid)
+        run_state = old.get("state") or {}
+        service_until = _parse_datetime(run_state.get("serviceRunUntil"))
+        service_active = service_until is not None and service_until > datetime.now(timezone.utc)
+        identity_changed = new is None or old.get("driver") != new.get("driver")
+        calibration_changed = new is None or old.get("calibration") != new.get("calibration")
+        if (importing or identity_changed or
+                ((run_state.get("haRunStartedAt") or service_active) and calibration_changed)):
+            if service_active:
+                return f"Wait for {old.get('name') or cid}'s calibration/prime safety window to finish before changing bindings, calibration or importing"
+            if old.get("enabled") or run_state.get("haRunStartedAt") or run_state.get("haRunEndsAt"):
+                return f"Disable and save {old.get('name') or cid}, then wait for its pump to stop before removing, rebinding or importing"
+            entities = (old.get("driver") or {}).get("entities") or {}
+            for role in ("enabledSwitch", "powerSwitch"):
+                entity = entities.get(role)
+                if entity:
+                    live = hass.states.get(entity)
+                    if live is None or str(live.state).lower() != "off":
+                        return f"Confirm {entity} is OFF before removing, rebinding or importing its channel"
+    return ""
+
+
+def _dosing_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
+    """A stale settings panel must not erase dose counters or an in-flight stop."""
+    if not isinstance(stored, dict):
+        return
+    old_dosing = stored.get("dosing") or {}
+    new_dosing = incoming.get("dosing")
+    if not isinstance(new_dosing, dict):
+        incoming["dosing"] = deepcopy(old_dosing)
+        return
+    _copy_runtime_fields(old_dosing.get("spacing"), new_dosing.get("spacing"), ("queued",))
+    for cid, new in (new_dosing.get("channels") or {}).items():
+        old = (old_dosing.get("channels") or {}).get(cid)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            continue
+        _copy_runtime_fields(old, new, ("state", "sync"))
+        _copy_runtime_fields(old.get("wear"), new.get("wear"), ("runSeconds", "doseCount", "tubeInstalledAt"))
+        _copy_runtime_fields(old.get("reservoir"), new.get("reservoir"),
+                             ("remainingMl", "refilledAt", "primedAt", "mixedAt"))
+        if _calibration_newer_in_stored(old.get("calibration"), new.get("calibration"), "calibratedAt"):
+            new["calibration"] = deepcopy(old["calibration"])
+
+
 def _validate_config(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, Any]:
     entity_ids = sorted(_collect_entity_ids(config))
     missing = [entity_id for entity_id in entity_ids if hass.states.get(entity_id) is None]
@@ -4225,6 +4351,7 @@ def _validate_config(hass: HomeAssistant, config: dict[str, Any]) -> dict[str, A
         "missing_entities": missing,
         "locked_controls": sorted(locked_controls),
         "armed_unavailable": sorted(armed_unavailable),
+        "automation_binding_errors": _automation_binding_errors(config),
         "setup_complete": bool(config.get("display", {}).get("setupComplete")),
     }
 
@@ -5723,6 +5850,7 @@ def _clear_watchdog(hass: HomeAssistant) -> None:
 def _persist_entry_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
+    _preserve_unowned_automation(hass, entry, config)
     normalised = _normalise_core_config(config)
     # Keep old thermal bindings outside panel-owned settings until OFF is verified.
     _spawning_remember_temp_outputs(hass, entry, _spawning_execution_cfg(_config_from_entry(entry)))
@@ -5924,9 +6052,7 @@ async def _async_schedule_wavemaker_reminders(
             f"Display wavemaker reminder: {labels} still off in Running",
             "critical",
         )
-        options = dict(latest_entry.options)
-        options[CONF_SETTINGS] = _normalise_core_config(latest_config)
-        hass.config_entries.async_update_entry(latest_entry, options=options)
+        _persist_entry_config(hass, latest_entry, latest_config)
 
     hass.data.setdefault(DOMAIN, {})[
         WAVEMAKER_REMINDER_UNSUB
@@ -6148,9 +6274,7 @@ async def _async_fire_maintenance_reminder(
                                                          "product_id": nag["id"].split(":", 1)[-1],
                                                          "label": nag["label"], "detail": nag["detail"],
                                                          "severity": nag["severity"]})
-        options = dict(entry.options)
-        options[CONF_SETTINGS] = _normalise_core_config(latest_config)
-        hass.config_entries.async_update_entry(entry, options=options)
+        _persist_entry_config(hass, entry, latest_config)
 
 
 async def _async_schedule_maintenance_reminders(
@@ -6573,6 +6697,22 @@ async def _async_set_ato_duty_cycle_state(
     window_key: str,
     reason: str,
 ) -> None:
+    # A duty-window ON must not race the AWC preflight/ATO hold. This setter is
+    # only called by the duty task/timer; saves never await it while owning water.
+    async with _awc_lock(hass):
+        await _async_set_ato_duty_cycle_state_locked(
+            hass, entry, target_state, window_key, reason)
+
+
+async def _async_set_ato_duty_cycle_state_locked(
+    hass: HomeAssistant,
+    entry: OpenReefConfigEntry,
+    target_state: str,
+    window_key: str,
+    reason: str,
+) -> None:
+    if target_state == "on" and hass.data.get(DOMAIN, {}).get("unloading"):
+        return
     latest_config = _config_from_entry(entry)
     mode = latest_config.get("mode", {})
     if not isinstance(mode, dict) or mode.get("active") != "running":
@@ -6725,7 +6865,13 @@ async def _async_schedule_ato_duty_cycle(
     hass.data.setdefault(DOMAIN, {})[ATO_DUTY_CYCLE_UNSUB] = async_track_time_change(
         hass, _handle_ato_duty_cycle, second=0
     )
-    await _handle_ato_duty_cycle(dt_util.now())
+    # A pump-state save can hold the water/dosing lock. Never make that save
+    # await unrelated ATO network I/O before arming its pump stop timer.
+    store = hass.data.setdefault(DOMAIN, {})
+    pending = store.get("ato_duty_cycle_task")
+    if pending is None or pending.done():
+        store["ato_duty_cycle_task"] = hass.async_create_task(
+            _handle_ato_duty_cycle(dt_util.now()))
 
 
 async def _async_schedule_timelapse(
@@ -6869,9 +7015,89 @@ async def _async_refresh_issues(
         ir.async_delete_issue(hass, DOMAIN, ISSUE_LEGACY_LABS_CONFIG)
 
 
+def _preserve_unowned_automation(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+) -> None:
+    # A feature which awaited hardware/notifications may hold an old whole-config
+    # snapshot. Only the AWC lock owner may change control state/settings: an old
+    # culture save must never re-enable AWC or restore a superseded pump binding.
+    # Its reservoirs/ledger have the same ownership, including chaser accounting.
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:  # synchronous bookkeeping outside an event loop
+        task = None
+    awc_lock = hass.data.get(DOMAIN, {}).get(AWC_STATE_LOCK)
+    if task is None or getattr(awc_lock, "owner", None) is not task:
+        stored_awc = _awc_cfg(entry.options.get(CONF_SETTINGS) or {})
+        if stored_awc:
+            config["automaticWaterChange"] = deepcopy(stored_awc)
+        stored_mixing = (entry.options.get(CONF_SETTINGS) or {}).get("mixingStation")
+        if isinstance(stored_mixing, dict):
+            config["mixingStation"] = deepcopy(stored_mixing)
+        stored_fx = (((entry.options.get(CONF_SETTINGS) or {}).get("nps") or {}).get("feedExchange"))
+        if isinstance(stored_fx, dict):
+            # The same water-operation lock owns matched-drain debt and stop
+            # stamps. An unrelated save cannot replay an already drained dose.
+            config.setdefault("nps", {})["feedExchange"] = deepcopy(stored_fx)
+    dosing_lock = hass.data.get(DOMAIN, {}).get("dosing_state_lock")
+    if task is None or getattr(dosing_lock, "owner", None) is not task:
+        stored_dosing = (entry.options.get(CONF_SETTINGS) or {}).get("dosing")
+        if isinstance(stored_dosing, dict):
+            # Coupled hatchery/culture inventory writers take this lock too;
+            # unrelated saves cannot replenish already-dosed food or its clock.
+            config["dosing"] = deepcopy(stored_dosing)
+            stored_products = (((entry.options.get(CONF_SETTINGS) or {}).get("consumables") or {}).get("products") or {})
+            for channel in (stored_dosing.get("channels") or {}).values():
+                if not isinstance(channel, dict):
+                    continue
+                reservoir = channel.get("reservoir") or {}
+                product_id = str(reservoir.get("productId") or "")
+                product = stored_products.get(product_id)
+                if not reservoir.get("productIsBottle") or not isinstance(product, dict):
+                    continue
+                products = config.setdefault("consumables", {}).setdefault("products", {})
+                incoming = products.get(product_id)
+                if not isinstance(incoming, dict):
+                    products[product_id] = deepcopy(product)
+                    continue
+                # These bottles are live dosing supplies. A stale unrelated
+                # save cannot refill them, renew freshness, or erase pump usage.
+                for field in ("remainingMl", "history", "openedAt", "lastShakenAt",
+                              "lastDosedAt", "doseSkippedAt"):
+                    if field in product:
+                        incoming[field] = deepcopy(product[field])
+                    else:
+                        incoming.pop(field, None)
+
+
+def _persist_alert_bookkeeping(
+    hass: HomeAssistant, entry: OpenReefConfigEntry,
+    before: dict[str, Any], updated: dict[str, Any],
+) -> None:
+    """Commit notification results without replaying the pre-notification config."""
+    latest = _config_from_entry(entry)
+    escalation = latest.setdefault("alertEscalation", {})
+    if escalation.get("outputsActive") == before.get("outputsActive"):
+        escalation["outputsActive"] = updated.get("outputsActive", False)
+    before_times = before.get("lastEscalated") or {}
+    after_times = updated.get("lastEscalated") or {}
+    current_times = escalation.setdefault("lastEscalated", {})
+    for key in set(before_times) | set(after_times):
+        if current_times.get(key) == before_times.get(key):
+            if key in after_times:
+                current_times[key] = after_times[key]
+            else:
+                current_times.pop(key, None)
+    # No awaits between reading current settings and committing this delta.
+    hass.config_entries.async_update_entry(
+        entry, options={**entry.options, CONF_SETTINGS: latest}
+    )
+
+
 async def _async_save_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
+    _preserve_unowned_automation(hass, entry, config)
     # Re-arming the AWC schedule (enable / slot-time / day edits) stamps the state so
     # the scheduler tick treats already-passed slots as not-backlog (R24): enabling a
     # schedule at 15:00 with a 02:00 slot must wait for tomorrow's 02:00, not start a
@@ -6895,40 +7121,41 @@ async def _async_save_config(
     _trust_check_summary(hass, normalised, update=True)
     options = dict(entry.options)
     options[CONF_SETTINGS] = normalised
+    escalation_before = deepcopy(normalised.get("alertEscalation") or {})
     hass.config_entries.async_update_entry(entry, options=options)
     await _async_refresh_issues(hass, entry)
     if await _async_sync_alert_notifications(hass, normalised):
-        options = dict(entry.options)
-        options[CONF_SETTINGS] = normalised
-        hass.config_entries.async_update_entry(entry, options=options)
-    await _async_schedule_mode_timer(hass, entry, normalised)
-    await _async_schedule_equipment_timers(hass, entry, normalised)
-    await _async_schedule_max_off_timers(hass, entry, normalised)
+        _persist_alert_bookkeeping(hass, entry, escalation_before, normalised.get("alertEscalation") or {})
+    # Each await can admit a newer save. Re-arm from current state so an older
+    # idle snapshot cannot cancel a newly running pump's stop timer.
+    await _async_schedule_mode_timer(hass, entry, _config_from_entry(entry))
+    await _async_schedule_equipment_timers(hass, entry, _config_from_entry(entry))
+    await _async_schedule_max_off_timers(hass, entry, _config_from_entry(entry))
     _register_notification_actions(hass)
-    await _async_schedule_mode_schedule(hass, entry, normalised)
-    await _async_schedule_ato_duty_cycle(hass, entry, normalised)
-    await _async_schedule_wavemaker_reminders(hass, entry, normalised)
-    await _async_schedule_maintenance_reminders(hass, entry, normalised)
-    await _async_schedule_report(hass, entry, normalised)
-    await _async_schedule_timelapse(hass, entry, normalised)
-    await _async_schedule_watchdog(hass, entry, normalised)
-    await _async_schedule_awc(hass, entry, normalised)
-    await _async_schedule_awc_scheduler(hass, entry, normalised)
-    await _async_schedule_dosing_tick(hass, entry, normalised)
-    await _async_schedule_spawning_tick(hass, entry, normalised)
-    await _async_schedule_cooling_tick(hass, entry, normalised)
-    await _async_schedule_cultures_tick(hass, entry, normalised)
+    await _async_schedule_mode_schedule(hass, entry, _config_from_entry(entry))
+    await _async_schedule_ato_duty_cycle(hass, entry, _config_from_entry(entry))
+    await _async_schedule_wavemaker_reminders(hass, entry, _config_from_entry(entry))
+    await _async_schedule_maintenance_reminders(hass, entry, _config_from_entry(entry))
+    await _async_schedule_report(hass, entry, _config_from_entry(entry))
+    await _async_schedule_timelapse(hass, entry, _config_from_entry(entry))
+    await _async_schedule_watchdog(hass, entry, _config_from_entry(entry))
+    await _async_schedule_awc(hass, entry, _config_from_entry(entry))
+    await _async_schedule_awc_scheduler(hass, entry, _config_from_entry(entry))
+    await _async_schedule_dosing_tick(hass, entry, _config_from_entry(entry))
+    await _async_schedule_spawning_tick(hass, entry, _config_from_entry(entry))
+    await _async_schedule_cooling_tick(hass, entry, _config_from_entry(entry))
+    await _async_schedule_cultures_tick(hass, entry, _config_from_entry(entry))
     # The circulation chain re-arms from its persisted stamps on every save —
     # that save-driven re-arm IS how its burst legs chain (see the scheduler).
-    await _async_schedule_mixing_circulation(hass, entry, normalised)
+    await _async_schedule_mixing_circulation(hass, entry, _config_from_entry(entry))
     # Same contract for the RODI draw stop leg / calibration cap.
-    await _async_schedule_mixing_rodi(hass, entry, normalised)
-    await _async_setup_dosing_mirror(hass, entry, normalised)
-    if _dosing_channels(normalised):
+    await _async_schedule_mixing_rodi(hass, entry, _config_from_entry(entry))
+    await _async_setup_dosing_mirror(hass, entry, _config_from_entry(entry))
+    if _dosing_channels(_config_from_entry(entry)):
         _async_kick_dosing_sync(hass, entry)
     # Fingerprint-guarded: a save that does not change the vision config is a
     # no-op here (runtime state and the MQTT subscription survive untouched).
-    await _async_setup_vision(hass, entry, normalised)
+    await _async_setup_vision(hass, entry, _config_from_entry(entry))
     # Event-triggered camera capture on a fresh ok->warning/critical transition.
     for transition in transitions:
         if transition.get("state") == "critical":
@@ -6946,7 +7173,7 @@ async def _async_save_config(
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
         )
-    return normalised
+    return _config_from_entry(entry)
 
 
 def _append_activity(config: dict[str, Any], message: str, activity_type: str = "info",
@@ -7651,6 +7878,14 @@ async def _async_schedule_max_off_timers(
 _AWC_RUNNING_STATES = ("draining", "filling", "exchanging")
 _AWC_ON_STATES = {"on", "true", "1", "detected", "wet", "open", "problem"}
 _AWC_SAFE_METHOD = "batch_sequential"
+# Reference firmware stops each brushed AWC output after 180 s. Keep ten
+# seconds for command/feedback latency; larger changes need smaller slots.
+_AWC_SAFE_RUN_SECONDS = 170.0
+
+
+def _awc_run_limit_seconds(config: dict[str, Any]) -> float:
+    configured = _awc_num((_awc_cfg(config).get("safety") or {}).get("maxRuntimeSeconds"), 0, 0, 7200)
+    return min(_AWC_SAFE_RUN_SECONDS, configured) if configured > 0 else _AWC_SAFE_RUN_SECONDS
 
 
 def _awc_cfg(config: dict[str, Any]) -> dict[str, Any]:
@@ -7868,6 +8103,8 @@ def _awc_ato_suspended(config: dict[str, Any]) -> bool:
 async def _async_awc_set_pump(
     hass: HomeAssistant, config: dict[str, Any], role: str, on: bool, context: Any
 ) -> None:
+    if on and hass.data.get(DOMAIN, {}).get("unloading"):
+        raise RuntimeError("OpenReef is unloading; new pump runs are blocked")
     if _awc_sim_enabled(config):
         # Demo mode: record the virtual pump instead of driving hardware. Before the
         # entity check on purpose — a demo needs no real switch entities at all.
@@ -7878,28 +8115,48 @@ async def _async_awc_set_pump(
     pump = _awc_cfg(config).get("pumps", {}).get(role, {})
     entity = _normalise_entity_id(pump.get("switchEntity")) if isinstance(pump, dict) else ""
     if not entity:
+        if on:
+            raise RuntimeError(f"No {role} pump entity configured")
         return
+    if on and _awc_binary_unknown(hass, entity):
+        raise RuntimeError(f"The {role} pump is unavailable")
+    if on and hass.states.get(entity).state != "off":
+        raise RuntimeError(f"The {role} pump is not confirmed off before starting")
     await hass.services.async_call(
         "switch", "turn_on" if on else "turn_off",
         {ATTR_ENTITY_ID: entity}, blocking=True, context=context,
     )
+    # A successful HA service call only confirms dispatch. Firmware can reject an
+    # ON (interlock/watchdog), and a disconnected device can miss an OFF. Never
+    # progress the volume plan until HA reports the requested actuator state.
+    expected = "on" if on else "off"
+    for attempt in range(11):
+        observed = hass.states.get(entity)
+        if observed is not None and observed.state == expected:
+            return
+        if attempt < 10:
+            await asyncio.sleep(0.2)
+    raise RuntimeError(f"The {role} pump did not confirm {expected}")
 
 
 async def _async_awc_stop_pumps(
     hass: HomeAssistant, config: dict[str, Any], roles: Iterable[str], context: Any
-) -> None:
+) -> bool:
     """Turn every listed pump OFF, best-effort. This is the sole shutdown primitive —
     every caller (pause / abort / finalize / leg-complete / start-failure cleanup) is a
     stop path, so a failed ``turn_off`` on one pump must be logged and swallowed, NOT
     raised: otherwise the exception would skip stopping the *other* pumps and abandon the
     state transition (status latch, ATO restore, save) half-done — the exact "keep filling
-    forever, untracked" hazard. A genuinely stuck actuator is caught by the mode-verify
-    read-back, the runtime watchdog, and the local ESP firmware watchdog."""
+    forever, untracked" hazard. Return whether every OFF was confirmed: callers must
+    latch uncertainty rather than advance to another pump or release the ATO."""
+    confirmed = True
     for role in roles:
         try:
             await _async_awc_set_pump(hass, config, role, False, context)
         except Exception:  # noqa: BLE001 - best-effort stop: log and keep stopping the rest
+            confirmed = False
             _LOGGER.exception("Failed to turn off AWC %s pump during stop", role)
+    return confirmed
 
 
 # Back-compat alias: the start-failure cleanup path reads clearer as "best_effort".
@@ -7908,9 +8165,10 @@ _async_awc_stop_pumps_best_effort = _async_awc_stop_pumps
 
 async def _async_awc_kill_equipment_profile(
     hass: HomeAssistant, config: dict[str, Any], profile: str, context: Any
-) -> None:
+) -> bool:
     if _awc_sim_enabled(config):
-        return  # demo mode never touches real equipment
+        return True  # demo mode never touches real equipment
+    confirmed = True
     for equipment_id, mapped in _armed_equipment_by_profile(config, profile):
         switch_entity = _normalise_entity_id(mapped.get("switch_entity_id"))
         if not switch_entity:
@@ -7918,10 +8176,22 @@ async def _async_awc_kill_equipment_profile(
         state = hass.states.get(switch_entity)
         if state is not None and state.state == "off":
             continue
-        await hass.services.async_call(
-            "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity},
-            blocking=True, context=context,
-        )
+        try:
+            await hass.services.async_call(
+                "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity},
+                blocking=True, context=context,
+            )
+            for attempt in range(11):
+                state = hass.states.get(switch_entity)
+                if state is not None and state.state == "off":
+                    break
+                if attempt == 10:
+                    raise RuntimeError(f"{profile} OFF was not confirmed")
+                await asyncio.sleep(0.2)
+        except Exception:
+            confirmed = False
+            _LOGGER.exception("Failed to stop %s equipment %s", profile, equipment_id)
+    return confirmed
 
 
 def _awc_bump_odometer(awc: dict[str, Any], role: str, seconds: float = 0.0, starts: int = 0) -> None:
@@ -8118,14 +8388,42 @@ async def _async_awc_check_drift_on_empty(
         await _async_save_config(hass, entry, config)
 
 
+class _AwcStateLock(asyncio.Lock):
+    """Track the owner so unrelated saves cannot overwrite live pump control."""
+
+    owner: asyncio.Task | None = None
+
+    async def acquire(self) -> bool:
+        acquired = await super().acquire()
+        self.owner = asyncio.current_task()
+        return acquired
+
+    def release(self) -> None:
+        self.owner = None
+        super().release()
+
+
 def _awc_lock(hass: HomeAssistant) -> asyncio.Lock:
     """The per-instance AWC state lock (see AWC_STATE_LOCK). Held by the top-level entry
     points only — never acquire it from an inner helper they call."""
     store = hass.data.setdefault(DOMAIN, {})
     lock = store.get(AWC_STATE_LOCK)
     if lock is None:
-        lock = store[AWC_STATE_LOCK] = asyncio.Lock()
+        lock = store[AWC_STATE_LOCK] = _AwcStateLock()
     return lock
+
+
+def _automation_stock_transaction(handler: Any) -> Any:
+    """Serialize coupled inventory actions before they fetch mutable config.
+
+    A culture split or brine transfer may refill a dosing reservoir and consume
+    saltwater in one action. Use the same order as pump accounting/settings.
+    """
+    @functools.wraps(handler)
+    async def locked(hass: HomeAssistant, *args: Any, **kwargs: Any) -> Any:
+        async with _awc_lock(hass), _dosing_lock(hass):
+            return await handler(hass, *args, **kwargs)
+    return locked
 
 
 def _clear_awc_timer(hass: HomeAssistant) -> None:
@@ -8133,6 +8431,49 @@ def _clear_awc_timer(hass: HomeAssistant) -> None:
     unsub = store.pop(AWC_UNSUB, None)
     if unsub is not None:
         unsub()
+
+
+async def _async_awc_emergency_fault(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    reason: str, context: Any,
+) -> None:
+    """Fail closed after unexpected orchestration/persistence failure.
+
+    The normal save performs notification and timer work after updating options.
+    Bypass that work here, so its failure cannot leave a stale running plan able
+    to restart an already-pumped leg. Hardware OFF remains best effort.
+    """
+    await _async_awc_stop_pumps(hass, config, _awc_all_pump_roles(config), context)
+    if _awc_cfg(config).get("ato", {}).get("suspendDuringChange", True):
+        await _async_awc_kill_equipment_profile(hass, config, "ato", context)
+    _clear_awc_timer(hass)
+    state = _awc_cfg(config).setdefault("state", {})
+    state.update({"status": "fault", "fault": reason, "faultSince": datetime.now(timezone.utc).isoformat(),
+                  "legStartedAt": "", "legEndsAt": "", "endsAt": {}, "pausedReason": ""})
+    # Set the runtime latch even if storage itself is failing. Reboot recovery
+    # separately faults any still-persisted running state.
+    hass.data.setdefault(DOMAIN, {}).setdefault(AWC_RUNTIME, {})["emergencyFault"] = reason
+    _preserve_unowned_automation(hass, entry, config)
+    options = dict(entry.options)
+    options[CONF_SETTINGS] = _normalise_core_config(config)
+    hass.config_entries.async_update_entry(entry, options=options)
+    try:
+        await _async_dosing_awc_suspend(hass, config, True, context)
+    except Exception:
+        _LOGGER.exception("Could not confirm dosing hold after an AWC emergency")
+
+
+def _awc_running_pump_problem(hass: HomeAssistant, config: dict[str, Any], roles: Iterable[str]) -> str:
+    """Detect an unexpectedly stopped/disconnected actuator before crediting flow."""
+    if _awc_sim_enabled(config):
+        return ""
+    for role in roles:
+        entity = (_awc_cfg(config).get("pumps", {}).get(role) or {}).get("switchEntity")
+        observed = hass.states.get(entity) if entity else None
+        if observed is None or observed.state != "on":
+            return (f"The {role} pump stopped or became unavailable unexpectedly — actual water movement "
+                    "is unknown; check and correct water levels before clearing this fault")
+    return ""
 
 
 async def _async_awc_begin_leg(
@@ -8150,13 +8491,16 @@ async def _async_awc_begin_leg(
     state = acfg["state"]
     slice_l = float(leg["sliceMl"]) / 1000.0
     expected = awc_engine.leg_runtime_s(slice_l, acfg, pumps)
+    if expected > _awc_run_limit_seconds(config):
+        state.update({"status": "fault", "fault": "Remaining pump run exceeds the safe runtime limit — reduce the change volume",
+                      "faultSince": now.isoformat(), "legStartedAt": "", "legEndsAt": ""})
+        return False, state["fault"]
     # A pump with volume to move but a zero/uncalibrated runtime would be energised on
     # a zero-length timer and credit the whole slice at the next fire (non-fail-safe).
     # Judged on the RATE (R13 parity): an UNCALIBRATED pump faults — this is
     # unreachable from a normal start (preflight blocks it) and covers mid-run
-    # calibration loss. A CALIBRATED pump whose sliver of a slice rounds to a
-    # non-positive runtime (spin-up correction on a post-resume remainder) instead
-    # runs a floor tick so the ordinary leg-complete credit closes the change out.
+    # calibration loss. A calibrated pump's remaining volume can also be below
+    # its fitted minimum. Do not invent a one-second burst or credit phantom water.
     if slice_l > 1e-9 and expected <= 0:
         if any(
             _awc_num((acfg.get("pumps", {}).get(r) or {}).get("mlPerS"), 0, 0, 1e9) <= 0
@@ -8169,7 +8513,19 @@ async def _async_awc_begin_leg(
             state["legEndsAt"] = ""
             state["pausedReason"] = ""
             return False, state["fault"]
-        expected = 1.0
+        state["status"] = "fault"
+        state["fault"] = "Remaining volume is below the calibrated pump minimum — reconcile the water level manually"
+        state["faultSince"] = now.isoformat()
+        state["legStartedAt"] = ""
+        state["legEndsAt"] = ""
+        return False, state["fault"]
+    if slice_l > 1e-9 and expected < 1.0:
+        state["status"] = "fault"
+        state["fault"] = "Remaining volume requires less than one second of pumping — reconcile the water level manually"
+        state["faultSince"] = now.isoformat()
+        state["legStartedAt"] = ""
+        state["legEndsAt"] = ""
+        return False, state["fault"]
     try:
         for role in pumps:
             await _async_awc_set_pump(hass, config, role, True, context)
@@ -8210,6 +8566,10 @@ async def _async_awc_begin_exchange(
     fill_remaining_l = max(0.0, target_ml - _awc_moved(state, fill_role)) / 1000.0
     drain_rt = awc_engine.runtime_for_volume_s(drain_remaining_l, drain.get("mlPerS"), drain.get("exchangeFactor", 1.0), drain.get("spinUpMl", 0.0))
     fill_rt = awc_engine.runtime_for_volume_s(fill_remaining_l, fill.get("mlPerS"), fill.get("exchangeFactor", 1.0), fill.get("spinUpMl", 0.0))
+    if max(drain_rt, fill_rt) > _awc_run_limit_seconds(config):
+        state.update({"status": "fault", "fault": "Remaining pump run exceeds the safe runtime limit — reduce the change volume",
+                      "faultSince": now.isoformat(), "legStartedAt": "", "legEndsAt": "", "endsAt": {}})
+        return False, state["fault"]
 
     # An UNCALIBRATED side with volume still to move would be energised on a zero-length
     # timer and phantom-credit the full target on the next tick (non-fail-safe). Refuse
@@ -8225,13 +8585,16 @@ async def _async_awc_begin_exchange(
         state["endsAt"] = {}
         return False, state["fault"]
 
-    # A CALIBRATED side whose remaining sliver rounds to a non-positive runtime (the
-    # spin-up correction near the very end) is FINISHED, not uncalibrated — resuming a
-    # change 30 ml from its end must not latch a spurious calibration fault (R13).
-    if drain_remaining_l > 1e-6 and drain_rt <= 0:
-        drain_remaining_l = 0.0
-    if fill_remaining_l > 1e-6 and fill_rt <= 0:
-        fill_remaining_l = 0.0
+    # A sliver below the calibrated minimum cannot be delivered reliably. It is
+    # neither a completed dose nor grounds for an arbitrary one-second burst.
+    if (drain_remaining_l > 1e-6 and drain_rt < 1.0) or (fill_remaining_l > 1e-6 and fill_rt < 1.0):
+        state["status"] = "fault"
+        state["fault"] = "Remaining volume is below the calibrated pump minimum — reconcile the water level manually"
+        state["faultSince"] = now.isoformat()
+        state["legStartedAt"] = ""
+        state["legEndsAt"] = ""
+        state["endsAt"] = {}
+        return False, state["fault"]
 
     roles_on = []
     if drain_remaining_l > 1e-6:
@@ -8278,7 +8641,8 @@ async def _async_awc_begin_exchange(
 async def _async_awc_suspend_ato(hass: HomeAssistant, config: dict[str, Any], context: Any) -> None:
     """Actively turn off any armed ATO equipment; the safety-block gate then keeps it
     off for the whole change + hold-off."""
-    await _async_awc_kill_equipment_profile(hass, config, "ato", context)
+    if not await _async_awc_kill_equipment_profile(hass, config, "ato", context):
+        raise RuntimeError("ATO suspension could not be confirmed — no water change started")
 
 
 async def _async_awc_start(
@@ -8292,9 +8656,18 @@ async def _async_awc_start(
     deep-copied config before acquiring it, so the locked body's status checks ran on
     stale state — an aborted change could be resurrected by a queued start."""
     async with _awc_lock(hass):
-        return await _async_awc_start_locked(
-            hass, entry, _config_from_entry(entry), target_litres, method, manual, context
-        )
+        config = _config_from_entry(entry)
+        try:
+            return await _async_awc_start_locked(
+                hass, entry, config, target_litres, method, manual, context
+            )
+        except Exception:
+            # Starting a pump precedes persistence. A storage/notification failure
+            # must not leave an energised pump with idle persisted state and no timer.
+            await _async_awc_emergency_fault(
+                hass, entry, config,
+                "Water-change start failed unexpectedly — inspect pumps and actual water levels before clearing", context)
+            raise
 
 
 async def _async_awc_start_locked(
@@ -8303,6 +8676,13 @@ async def _async_awc_start_locked(
 ) -> tuple[bool, list[dict[str, str]]]:
     acfg = _awc_cfg(config)
     state = acfg["state"]
+    emergency = hass.data.get(DOMAIN, {}).get(AWC_RUNTIME, {}).get("emergencyFault")
+    if emergency:
+        return False, [{"code": "latched", "severity": "block", "message": emergency}]
+    binding_errors = _automation_binding_errors(config)
+    if binding_errors and not _awc_sim_enabled(config):
+        return False, [{"code": "unsafe_binding", "severity": "block",
+                        "message": next(iter(binding_errors.values()))}]
     if state.get("status") in _AWC_RUNNING_STATES:
         return False, [{"code": "busy", "severity": "block", "message": "A water change is already running"}]
     if state.get("status") == "paused":
@@ -8319,6 +8699,8 @@ async def _async_awc_start_locked(
         return False, [{"code": "unsupported_method", "severity": "block",
                         "message": "AWC supports sequential or simultaneous changes (continuous is projection-only)"}]
     target = round(float(target_litres or 0), 3)
+    if not math.isfinite(target):
+        return False, [{"code": "invalid_volume", "severity": "block", "message": "Enter a finite water-change volume"}]
 
     # Select THE fill source for this change (each change draws wholly from one
     # source): the policy picks it; every guard below is judged against it.
@@ -8337,6 +8719,15 @@ async def _async_awc_start_locked(
         now_min = local_now.hour * 60 + local_now.minute
     live = _awc_live_state(hass, config, fill_role=fill_role)
     reasons = awc_engine.start_guard_reasons(acfg, live, now_min, manual, fill_role=fill_role)
+    if not _awc_sim_enabled(config):
+        for role in ("drain", fill_role):
+            entity = (acfg.get("pumps", {}).get(role) or {}).get("switchEntity")
+            if entity and _awc_binary_unknown(hass, entity):
+                reasons.append({"code": "pump_unavailable", "severity": "block",
+                                "message": f"The {role} pump is unavailable"})
+            elif entity and hass.states.get(entity).state != "off":
+                reasons.append({"code": "pump_already_running", "severity": "block",
+                                "message": f"The {role} pump must report OFF before starting a water change"})
     if _awc_sim_enabled(config):
         # Demo mode: virtual pumps need no real switch entities, and a virtual change
         # can't flood a floor, so the no-leak-sensor acknowledgement isn't demanded
@@ -8346,6 +8737,18 @@ async def _async_awc_start_locked(
                    if r.get("code") not in ("no_pump_entity", "flood_unacknowledged")]
     if target <= 0:
         reasons.append({"code": "no_volume", "severity": "block", "message": "Enter a volume to change"})
+    if target > 0:
+        for role in ("drain", fill_role):
+            pump = (acfg.get("pumps", {}).get(role) or {})
+            runtime = awc_engine.runtime_for_volume_s(
+                target, pump.get("mlPerS"), pump.get("exchangeFactor", 1), pump.get("spinUpMl", 0))
+            if pump.get("mlPerS", 0) > 0 and runtime < 1:
+                reasons.append({"code": "volume_below_minimum", "severity": "block",
+                                "message": f"Volume is too small for a reliable one-second {role} pump run"})
+            if runtime > _awc_run_limit_seconds(config):
+                reasons.append({"code": "runtime_limit", "severity": "block",
+                                "message": f"The {role} pump needs {runtime:.0f} s; limit is {_awc_run_limit_seconds(config):g} s. "
+                                           "Reduce the volume per change and increase schedule frequency"})
     reasons.extend(awc_engine.reservoir_preflight_reasons(acfg, target, source_role=fill_role))
     if (pick is None and target > 0
             and not any(r.get("code") in ("fresh_insufficient", "no_calibration") for r in reasons)):
@@ -8396,7 +8799,11 @@ async def _async_awc_start_locked(
         if acfg.get("ato", {}).get("suspendDuringChange", True):
             await _async_awc_suspend_ato(hass, config, context)
             state["atoSuspendedUntil"] = ""  # the "running" status covers the suspension
-        await _async_dosing_awc_suspend(hass, config, True, context)
+        if not await _async_dosing_awc_suspend(hass, config, True, context):
+            await _async_awc_emergency_fault(
+                hass, entry, config, "Dosing suspension was not confirmed — water change did not start", context)
+            return False, [{"code": "dosing_suspend_failed", "severity": "fault",
+                            "message": "Dosing suspension was not confirmed — water change did not start"}]
     # else: a micro-change is too small to fight the ATO or matter to dosing — both
     # suspends are skipped so the hourly cadence doesn't hold them around the clock.
     state["method"] = method
@@ -8444,7 +8851,10 @@ async def _async_awc_pause(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     reason: str, context: Any,
 ) -> None:
-    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
+    if not await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context):
+        await _async_awc_abort(hass, entry, config,
+                               "Pump stop could not be confirmed — inspect water levels and pumps", True, False, context)
+        return
     awc = _awc_cfg(config)
     # Credit the elapsed portion of an in-flight sequential leg before parking (R9):
     # resume replans from drained/filled, so an uncredited half-leg would be replayed
@@ -8470,7 +8880,9 @@ async def _async_awc_abort(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     reason: str, latch: bool, master_kill: bool, context: Any,
 ) -> None:
-    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
+    if not await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context):
+        latch = True
+        reason += "; pump stop could not be confirmed — disconnect pump power and inspect water levels"
     if master_kill:
         await _async_awc_kill_equipment_profile(hass, config, "return_pump", context)
     if latch and _awc_cfg(config).get("ato", {}).get("suspendDuringChange", True):
@@ -8503,6 +8915,8 @@ async def _async_awc_abort(
         if salt_delta is not None:
             awc["ledger"]["netSaltGrams"] = round(
                 _awc_num(awc["ledger"].get("netSaltGrams"), 0, -1e9, 1e9) + salt_delta, 1)
+        if filled_l > 0 and awc_engine.pump_reservoir_id(awc, fill_role) == "fresh":
+            _mixing_run_debit(hass, config, filled_l)
     if latch:
         state["status"] = "fault"
         state["fault"] = reason
@@ -8527,6 +8941,10 @@ async def _async_awc_abort(
         # A latched fault keeps dosing held (status "fault" drives _dosing_awc_suspended);
         # a plain abort releases the firmware suspend switch immediately.
         await _async_dosing_awc_suspend(hass, config, False, context)
+    else:
+        # A micro-change skipped the initial hold. A fault must assert it now,
+        # rather than merely assuming an earlier normal-change hold exists.
+        await _async_dosing_awc_suspend(hass, config, True, context)
     _append_activity(config, f"Water change {'FAULT' if latch else 'aborted'}: {reason}",
                      "warning" if latch else "control")
     await _async_awc_notify(
@@ -9142,7 +9560,10 @@ def _awc_record_history(
 async def _async_awc_finalize(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], context: Any,
 ) -> None:
-    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
+    if not await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context):
+        await _async_awc_abort(hass, entry, config,
+                               "Completion stopped: pump OFF was not confirmed", True, False, context)
+        return
     awc = _awc_cfg(config)
     state = awc["state"]
     now = datetime.now(timezone.utc)
@@ -9172,7 +9593,8 @@ async def _async_awc_finalize(
     # mixing station's batch, so keep that ledger honest too (mixing doc §9;
     # no-op when uncoupled). Under the container model (doc §27) the vessel
     # already paid when the keeper refilled the AWC's fresh container.
-    _mixing_run_debit(hass, config, filled_l)
+    if awc_engine.pump_reservoir_id(awc, fill_role) == "fresh":
+        _mixing_run_debit(hass, config, filled_l)
     holdoff = awc.get("ato", {}).get("stabilizationHoldoffMinutes", AWC_DEFAULT_HOLDOFF_MINUTES)
     if state.get("microChange"):
         holdoff = 0  # micro-changes get no stabilization hold-off of their own
@@ -9238,7 +9660,10 @@ async def _async_awc_leg_complete_locked(
     # The engine plans in generic role labels — map "fill" to the ACTIVE source.
     leg = {**leg, "pumps": [fill_role if p == "fill" else p for p in leg["pumps"]]}
     pumps = leg["pumps"]
-    await _async_awc_stop_pumps(hass, config, pumps, context)
+    if not await _async_awc_stop_pumps(hass, config, pumps, context):
+        await _async_awc_abort(hass, entry, config,
+                               "Leg stopped: pump OFF was not confirmed", True, False, context)
+        return
 
     # Anomaly: did this leg run far longer than its calibrated runtime?
     slice_l = float(leg["sliceMl"]) / 1000.0
@@ -9348,6 +9773,11 @@ async def _async_awc_exchange_tick_locked(
     # phantom-complete the change. Pause WITHOUT crediting this tick (R26).
     drain_unfinished = target_ml - _awc_moved(state, "drain") > 1e-6
     fill_unfinished = target_ml - _awc_moved(state, fill_role) > 1e-6
+    problem = _awc_running_pump_problem(
+        hass, config, [role for role, needed in (("drain", drain_unfinished), (fill_role, fill_unfinished)) if needed])
+    if problem:
+        await _async_awc_emergency_fault(hass, entry, config, problem, context)
+        return
     if (drain_unfinished and _awc_num(drain.get("mlPerS"), 0, 0, 1e9) <= 0) or (
             fill_unfinished and _awc_num(fill.get("mlPerS"), 0, 0, 1e9) <= 0):
         # Credit the HEALTHY side's progress up to now first (the helper skips
@@ -9362,6 +9792,12 @@ async def _async_awc_exchange_tick_locked(
 
     drain_ends = _parse_datetime(_awc_ends(state, "drain"))
     fill_ends = _parse_datetime(_awc_ends(state, fill_role))
+    for needed, end in ((drain_unfinished, drain_ends), (fill_unfinished, fill_ends)):
+        if needed and (end is None or now > end + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS)):
+            await _async_awc_emergency_fault(
+                hass, entry, config,
+                "Water-change pump deadline was missed — actual volume is uncertain; reconcile water levels", context)
+            return
     drain_rem_s = (drain_ends - now).total_seconds() if drain_ends else 0.0
     fill_rem_s = (fill_ends - now).total_seconds() if fill_ends else 0.0
 
@@ -9390,10 +9826,15 @@ async def _async_awc_exchange_tick_locked(
     # Best-effort per-side stops (R11): a raising turn_off (ESP unreachable) must not
     # abandon the tick half-done — the accounting save and timer re-arm below still run
     # (the watchdog + read-back cover a genuinely stuck actuator).
+    stops_confirmed = True
     if drain_done:
-        await _async_awc_stop_pumps(hass, config, ("drain",), context)
+        stops_confirmed = await _async_awc_stop_pumps(hass, config, ("drain",), context)
     if fill_done:
-        await _async_awc_stop_pumps(hass, config, (fill_role,), context)
+        stops_confirmed = (await _async_awc_stop_pumps(hass, config, (fill_role,), context)) and stops_confirmed
+    if not stops_confirmed:
+        await _async_awc_abort(hass, entry, config,
+                               "Exchange stopped: pump OFF was not confirmed", True, False, context)
+        return
 
     cap = awc.get("safety", {}).get("maxInstantaneousImbalanceLitres", AWC_DEFAULT_MAX_INSTANT_IMBALANCE_L)
     baseline = state.get("exchangeBaselineNetMl", 0)
@@ -9452,17 +9893,22 @@ async def _async_awc_timer_fired(
     """Leg/exchange timer target. The method DISPATCH happens inside the lock on the
     fresh config (R1): with a pre-lock snapshot, a change aborted-and-restarted with a
     different method could route an exchanging state into the sequential handler.
-    Sequential fires route through the mid-leg safety checkpoint (R9). The finally-arm
-    keeps the monitor alive if a handler dies mid-flight — e.g. a save failure after
-    the pumps were driven (R11): a dead timer while pumps run is the 'keep filling
-    forever' hazard."""
+    Sequential fires route through the mid-leg safety checkpoint. Unexpected failure
+    stops and latches the run, so stale persisted progress cannot replay a leg. The
+    finally-arm is only a fallback for an otherwise healthy running state."""
     try:
         async with _awc_lock(hass):
             config = _config_from_entry(entry)
-            if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
-                await _async_awc_exchange_tick_locked(hass, entry, config, context)
-            else:
-                await _async_awc_sequential_checkpoint_locked(hass, entry, config, context)
+            try:
+                if _awc_cfg(config).get("state", {}).get("method") == "batch_simultaneous":
+                    await _async_awc_exchange_tick_locked(hass, entry, config, context)
+                else:
+                    await _async_awc_sequential_checkpoint_locked(hass, entry, config, context)
+            except Exception:
+                await _async_awc_emergency_fault(
+                    hass, entry, config,
+                    "Water-change control failed unexpectedly — inspect pumps and actual water levels before clearing", context)
+                raise
     finally:
         if hass.data.setdefault(DOMAIN, {}).get(AWC_UNSUB) is None:
             state = _awc_cfg(_config_from_entry(entry)).get("state", {})
@@ -9488,10 +9934,17 @@ async def _async_awc_sequential_checkpoint_locked(
         if status in _AWC_RUNNING_STATES:
             await _async_awc_leg_complete_locked(hass, entry, config, context)
         return
+    problem = _awc_running_pump_problem(
+        hass, config, ("drain" if status == "draining" else _awc_fill_role(state),))
+    if problem:
+        await _async_awc_emergency_fault(hass, entry, config, problem, context)
+        return
     ends = _parse_datetime(state.get("legEndsAt"))
     now = datetime.now(timezone.utc)
-    if ends is None or now >= ends - timedelta(milliseconds=500):
-        await _async_awc_leg_complete_locked(hass, entry, config, context)
+    if ends is None or now > ends + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS):
+        await _async_awc_emergency_fault(
+            hass, entry, config,
+            "Water-change pump deadline was missed — actual volume is uncertain; reconcile water levels", context)
         return
     live = _awc_live_state(hass, config, fill_role=_awc_fill_role(state))
     verdict = awc_engine.in_run_safety(awc, live, status == "draining", status == "filling")
@@ -9501,6 +9954,9 @@ async def _async_awc_sequential_checkpoint_locked(
         return
     if verdict["action"] == "pause":
         await _async_awc_pause(hass, entry, config, verdict["reason"], context)
+        return
+    if now >= ends:
+        await _async_awc_leg_complete_locked(hass, entry, config, context)
         return
     await _async_arm_awc_timer(
         hass, entry, min(ends, now + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS)))
@@ -9571,17 +10027,16 @@ async def _async_arm_awc_ato_restore(
 
 
 def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
-    """Dead-reckon and credit a sequential leg that was interrupted mid-run (restart /
-    power loss). Sequential legs otherwise credit volume only when the leg timer fires, so
+    """Dead-reckon a live leg stopped by the controller, never a restart/power loss.
+    Sequential legs otherwise credit volume only when the leg timer fires, so
     resume-to-balance would replay the WHOLE slice — 8 L already moved + a 10 L replay is
     ~8 L of overfill with the reservoir debited only 10 L. We credit the elapsed portion of
     the leg (clamped to its scheduled window) at the pump's calibrated rate, mirror it into
     the reservoir model, then clear the leg stamps so a re-entry can never double-credit.
-    Directionally safe: after a power cut the pump stopped early, so elapsed-time credit can
-    only OVER-credit ⇒ the change under-delivers rather than overfills; after an HA-only
-    restart the pump genuinely kept running, and the credit is accurate up to the stamped
-    stop time (beyond it lies firmware-watchdog territory). Simultaneous legs don't need
-    this — their tick already persists per-pump progress every couple of seconds."""
+    This estimate is valid only while control has remained live. Downtime can hide a
+    stopped drain; crediting that imagined flow and replacing it would overfill. The
+    startup path clears these stamps and latches for physical reconciliation instead.
+    Simultaneous legs use their own progress helper."""
     state = awc.get("state", {})
     role = {"draining": "drain", "filling": _awc_fill_role(state)}.get(state.get("status", ""))
     started = _parse_datetime(state.get("legStartedAt"))
@@ -9613,16 +10068,10 @@ def _awc_credit_interrupted_leg(awc: dict[str, Any], now: datetime) -> None:
 
 
 def _awc_credit_interrupted_exchange(awc: dict[str, Any], now: datetime) -> None:
-    """Dead-reckon run-on for an interrupted SIMULTANEOUS exchange (R10). The tick
-    persists progress every ~2 s while HA is up, but across HA downtime the ESP kept
-    each pump running toward its persisted stop time (nothing told it otherwise) —
-    credit each side up to min(now, its stop time) before replanning, or
-    resume-to-balance re-runs volume that already moved and the reservoir models drift
-    by the same amount. Clears the per-side stop stamps so a re-entry can never
-    double-credit (begin_exchange re-stamps them). Directionally safe on a power cut
-    for the same reason as the sequential credit: over-credit ⇒ under-delivery, never
-    an overfill. Uncalibrated sides are skipped — a zero rate dead-reckons as
-    'phantom-complete', which is exactly the lie this function must not tell."""
+    """Credit a simultaneous exchange interrupted while control is still live.
+    Never use wall-clock downtime as proof of flow: startup latches instead. Clear
+    stop stamps to prevent duplicate credit. Skip uncalibrated sides, whose zero
+    rate would otherwise look like a phantom completed dose."""
     state = awc.get("state", {})
     if state.get("status") != "exchanging":
         return
@@ -9665,11 +10114,18 @@ async def _async_awc_relaunch(
     the lock (R1). ``resume_only`` restricts the relaunch to a still-PAUSED change —
     the resume paths pass it so a queued duplicate resume (double-click, or the
     minutely auto-resume racing a manual Resume) can't stop-and-restart the leg the
-    first resume just began; only the startup path may relaunch a running change."""
+    first resume just began. Startup faults uncertain runs instead of relaunching."""
     async with _awc_lock(hass):
-        return await _async_awc_relaunch_locked(
-            hass, entry, _config_from_entry(entry), context, log_message, resume_only
-        )
+        config = _config_from_entry(entry)
+        try:
+            return await _async_awc_relaunch_locked(
+                hass, entry, config, context, log_message, resume_only
+            )
+        except Exception:
+            await _async_awc_emergency_fault(
+                hass, entry, config,
+                "Water-change resume failed unexpectedly — inspect pumps and actual water levels before clearing", context)
+            raise
 
 
 async def _async_awc_relaunch_locked(
@@ -9684,6 +10140,12 @@ async def _async_awc_relaunch_locked(
         return False
     if resume_only and state.get("status") != "paused":
         return False
+    emergency = hass.data.get(DOMAIN, {}).get(AWC_RUNTIME, {}).get("emergencyFault")
+    binding_errors = _automation_binding_errors(config)
+    if emergency or (binding_errors and not _awc_sim_enabled(config)):
+        await _async_awc_emergency_fault(
+            hass, entry, config, emergency or next(iter(binding_errors.values())), context)
+        return False
     method = state.get("method") or awc.get("schedule", {}).get("method", _AWC_SAFE_METHOD)
     fill_role = _awc_fill_role(state)
     if method != "batch_simultaneous":
@@ -9692,9 +10154,8 @@ async def _async_awc_relaunch_locked(
         # already cleared the leg stamps, so this is inert for a plain paused resume).
         _awc_credit_interrupted_leg(awc, datetime.now(timezone.utc))
     else:
-        # Same for a simultaneous exchange interrupted by HA downtime: the ESP kept the
-        # pumps running toward their persisted stop times after the last tick save —
-        # credit that run-on before replanning (R10). Inert for a paused resume.
+        # A confirmed live-control pause already cleared its stop stamps;
+        # power-loss recovery never reaches this path.
         _awc_credit_interrupted_exchange(awc, datetime.now(timezone.utc))
     target_ml = state.get("targetLitres", 0) * 1000.0
     drained = _awc_moved(state, "drain")
@@ -9744,11 +10205,33 @@ async def _async_awc_relaunch_locked(
                 await _async_save_config(hass, entry, config)
             return False
 
+    if state.get("status") == "paused":
+        # Other consumers may use the source while paused. Check outstanding
+        # amounts, without requiring room for water that has already moved.
+        fill_remaining_l = max(0.0, target_ml - filled) / 1000.0
+        drain_remaining_l = max(0.0, target_ml - drained) / 1000.0
+        stock_reasons = [r for r in awc_engine.reservoir_preflight_reasons(
+            awc, fill_remaining_l, fill_role) if r["code"] == "fresh_insufficient"]
+        stock_reasons.extend(r for r in awc_engine.reservoir_preflight_reasons(
+            awc, drain_remaining_l, fill_role) if r["code"].startswith("waste_"))
+        if stock_reasons:
+            reason = stock_reasons[0]["message"]
+            if state.get("pausedReason") != reason:
+                state["pausedReason"] = reason
+                await _async_save_config(hass, entry, config)
+            return False
+
     now = datetime.now(timezone.utc)
-    # After an HA-only restart the ESP may still be running the OLD leg's pump (nothing
-    # stopped it), and the re-planned leg may drive a DIFFERENT pump — stop everything
-    # first so begin re-energises exactly the pumps the new plan calls for.
-    await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context)
+    # Confirm every pump is off and reassert holds before resuming a known plan.
+    if not await _async_awc_stop_pumps(hass, config, tuple(_awc_all_pump_roles(config)), context):
+        await _async_awc_abort(hass, entry, config,
+                               "Resume stopped: pump OFF was not confirmed", True, False, context)
+        return False
+    if not state.get("microChange") and not _awc_sim_enabled(config):
+        if awc.get("ato", {}).get("suspendDuringChange", True):
+            await _async_awc_suspend_ato(hass, config, context)
+        if not await _async_dosing_awc_suspend(hass, config, True, context):
+            raise RuntimeError("Dosing suspension could not be confirmed before resuming AWC")
     if method == "batch_simultaneous":
         begun, reason = await _async_awc_begin_exchange(hass, config, now, context)
     else:
@@ -9777,11 +10260,30 @@ async def _async_awc_try_resume(
 async def _async_awc_resume_on_startup(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
 ) -> None:
-    """On startup, recover an interrupted change. A running change is re-begun from the
-    persisted drained/filled (resume-to-balance); a paused change is re-evaluated."""
+    """Stop and latch an interrupted run: downtime gives no evidence of water moved.
+
+    A power cut may have stopped the drain immediately, while an HA-only outage may
+    have left it running. Automatically crediting the elapsed window and filling it
+    can flood the tank in the first case. Reconcile actual levels before re-arming.
+    A previously paused run has already confirmed OFF and may be re-evaluated.
+    """
     status = _awc_cfg(config).get("state", {}).get("status")
     if status in _AWC_RUNNING_STATES:
-        await _async_awc_relaunch(hass, entry, None, "Water change resumed after restart (resume-to-balance)")
+        async with _awc_lock(hass):
+            latest = _config_from_entry(entry)
+            state = _awc_cfg(latest).get("state", {})
+            if state.get("status") not in _AWC_RUNNING_STATES:
+                return
+            # Retain already-recorded progress, but do not invent any additional
+            # flow during downtime. Abort otherwise infers it from these stamps.
+            state["legStartedAt"] = ""
+            state["legEndsAt"] = ""
+            state["endsAt"] = {}
+            await _async_awc_abort(
+                hass, entry, latest,
+                "Water change interrupted by restart — actual water movement is unknown; "
+                "check and correct tank, source and waste levels before clearing this fault",
+                True, False, None)
     elif status == "paused":
         await _async_awc_try_resume(hass, entry, None)
 
@@ -10705,6 +11207,7 @@ def _maintenance_complete_apply(hass: Any, config: dict[str, Any], entry_id: Any
     return None
 
 
+@_automation_stock_transaction
 async def _handle_record_task_completion(
     hass: HomeAssistant, call: ServiceCall
 ) -> None:
@@ -10737,13 +11240,11 @@ async def websocket_get_config(
     trust_check = _trust_check_summary(hass, config, update=True)
     if entry is not None:
         _sync_alert_state(hass, config)
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SETTINGS: config}
-        )
+        _persist_entry_config(hass, entry, config)
+        escalation_before = deepcopy(config.get("alertEscalation") or {})
         if await _async_sync_alert_notifications(hass, config):
-            hass.config_entries.async_update_entry(
-                entry, options={**entry.options, CONF_SETTINGS: config}
-            )
+            _persist_alert_bookkeeping(hass, entry, escalation_before, config.get("alertEscalation") or {})
+        config = _config_from_entry(entry)
     connection.send_result(
         msg["id"],
         {
@@ -10773,6 +11274,13 @@ async def websocket_save_config(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Persist OpenReef core configuration."""
+    async with _awc_lock(hass), _dosing_lock(hass):
+        await _websocket_save_config_locked(hass, connection, msg)
+
+
+async def _websocket_save_config_locked(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -10786,6 +11294,14 @@ async def websocket_save_config(
     temp_error = spawning.temperature_profile_error(_normalise_core_config(msg["config"])["spawningProgram"])
     if temp_error and _spawning_execution_enabled(_spawning_execution_cfg(_normalise_core_config(msg["config"]))):
         connection.send_error(msg["id"], "spawning_temperature_limits", temp_error)
+        return
+
+    _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
+    _dosing_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["config"])
+    safety_error = _automation_settings_error(
+        hass, _config_from_entry(entry), _normalise_core_config(msg["config"]))
+    if safety_error:
+        connection.send_error(msg["id"], "automation_safety", safety_error)
         return
 
     # A panel posts the whole config, so anything logged since it last refreshed —
@@ -10844,6 +11360,13 @@ async def websocket_update_config_alias(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Backward-compatible alias for older Labs builds."""
+    async with _awc_lock(hass), _dosing_lock(hass):
+        await _websocket_update_config_locked(hass, connection, msg)
+
+
+async def _websocket_update_config_locked(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
@@ -10857,6 +11380,14 @@ async def websocket_update_config_alias(
     temp_error = spawning.temperature_profile_error(_normalise_core_config(msg["settings"])["spawningProgram"])
     if temp_error and _spawning_execution_enabled(_spawning_execution_cfg(_normalise_core_config(msg["settings"]))):
         connection.send_error(msg["id"], "spawning_temperature_limits", temp_error)
+        return
+
+    _awc_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
+    _dosing_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
+    safety_error = _automation_settings_error(
+        hass, _config_from_entry(entry), _normalise_core_config(msg["settings"]))
+    if safety_error:
+        connection.send_error(msg["id"], "automation_safety", safety_error)
         return
 
     _mixing_preserve_runtime(entry.options.get(CONF_SETTINGS), msg["settings"])
@@ -11155,6 +11686,7 @@ def _livestock_tombstone(rows: list[dict[str, Any]], stamp: str, now: datetime) 
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_coral_feed(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -11748,14 +12280,11 @@ async def websocket_validate_config(
     config = _config_from_entry(entry)
     if entry is not None:
         _sync_alert_state(hass, config)
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SETTINGS: config}
-        )
+        _persist_entry_config(hass, entry, config)
     validation = _validate_config(hass, config)
+    escalation_before = deepcopy(config.get("alertEscalation") or {})
     if await _async_sync_alert_notifications(hass, config) and entry is not None:
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SETTINGS: config}
-        )
+        _persist_alert_bookkeeping(hass, entry, escalation_before, config.get("alertEscalation") or {})
     connection.send_result(msg["id"], validation)
 
 
@@ -11769,14 +12298,11 @@ async def websocket_validate_mappings_alias(
     config = _config_from_entry(entry)
     if entry is not None:
         _sync_alert_state(hass, config)
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SETTINGS: config}
-        )
+        _persist_entry_config(hass, entry, config)
     validation = _validate_config(hass, config)
+    escalation_before = deepcopy(config.get("alertEscalation") or {})
     if await _async_sync_alert_notifications(hass, config) and entry is not None:
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SETTINGS: config}
-        )
+        _persist_alert_bookkeeping(hass, entry, escalation_before, config.get("alertEscalation") or {})
     connection.send_result(msg["id"], validation)
 
 
@@ -12148,6 +12674,25 @@ async def websocket_awc_abort(
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
         status = _awc_cfg(config).get("state", {}).get("status")
+        cal_state = _awc_cfg(config).get("state", {})
+        if cal_state.get("calRunRole"):
+            if not await _async_awc_stop_pumps(hass, config, _awc_all_pump_roles(config), connection.context(msg)):
+                await _async_awc_emergency_fault(hass, entry, config, "Calibration stop was not confirmed", connection.context(msg))
+            else:
+                unsub = hass.data.setdefault(DOMAIN, {}).pop(AWC_CALRUN_UNSUB, None)
+                if unsub is not None:
+                    unsub()
+                cal_state["calRunRole"] = ""
+                cal_state["calRunEndsAt"] = ""
+                _append_activity(config, "Calibration run stopped by user", "control")
+                await _async_save_config(hass, entry, config)
+            _awc_send(connection, msg, hass, _config_from_entry(entry))
+            return
+        fx_state = (((config.get("nps") or {}).get("feedExchange") or {}).get("state") or {})
+        if fx_state.get("drainStartedAt"):
+            await _async_nps_drain_fault(hass, entry, config, "stopped by user before the drain completed")
+            _awc_send(connection, msg, hass, _config_from_entry(entry))
+            return
         if status not in (*_AWC_RUNNING_STATES, "paused"):
             connection.send_error(msg["id"], "not_running", "No water change is in progress")
             return
@@ -12235,6 +12780,14 @@ async def websocket_awc_acknowledge(
                 "Clear the active AWC hazard before acknowledging: " + ", ".join(active_hazards),
             )
             return
+        if live.get("leakUnknown") or live.get("highLevelUnknown"):
+            connection.send_error(msg["id"], "hazard_unavailable",
+                                  "Restore the configured leak and high-level sensors before clearing this fault")
+            return
+        if not await _async_awc_stop_pumps(hass, config, _awc_all_pump_roles(config), connection.context(msg)):
+            connection.send_error(msg["id"], "pump_stop_unconfirmed",
+                                  "Pump OFF must be confirmed before clearing the fault")
+            return
         # Record any partial progress the faulted change made before zeroing it.
         # Abort-latched faults already recorded (and zeroed) at abort time, so this
         # only fires for begin-failure faults, whose credited volume otherwise
@@ -12254,14 +12807,17 @@ async def websocket_awc_acknowledge(
             ack_per = ack_awc["ledger"].setdefault("perSource", {})
             ack_per[ack_fill_role] = round(
                 _awc_num(ack_per.get(ack_fill_role), 0, 0, 1e9) + filled_l, 3)
+            if filled_l > 0 and awc_engine.pump_reservoir_id(ack_awc, ack_fill_role) == "fresh":
+                _mixing_run_debit(hass, config, filled_l)
         state.update({
             "status": "idle", "fault": "", "faultSince": "", "atoSuspendedUntil": "",
             "movedMl": {}, "activeSourceRole": "", "targetLitres": 0,
             "legStartedAt": "", "legEndsAt": "", "endsAt": {},
             "exchangeBaselineNetMl": 0, "method": "", "pausedReason": "",
-            "microChange": False,
+            "microChange": False, "calRunRole": "", "calRunEndsAt": "",
         })
         _append_activity(config, "Water change fault acknowledged and cleared", "control")
+        hass.data.setdefault(DOMAIN, {}).setdefault(AWC_RUNTIME, {}).pop("emergencyFault", None)
         await _async_dosing_awc_suspend(hass, config, False, None)
         config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
@@ -12327,7 +12883,10 @@ async def websocket_awc_calibrate(
     # "recalibrate, then resume".
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
-        if _awc_cfg(config).get("state", {}).get("status") in _AWC_RUNNING_STATES:
+        store = hass.data.get(DOMAIN, {})
+        if (_awc_cfg(config).get("state", {}).get("status") in _AWC_RUNNING_STATES
+                or store.get(AWC_CALRUN_UNSUB) is not None or store.get(NPS_DRAIN_UNSUB) is not None
+                or _awc_cfg(config).get("state", {}).get("calRunRole")):
             connection.send_error(msg["id"], "busy", "Finish or stop the running water change before recalibrating")
             return
         pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
@@ -12374,6 +12933,12 @@ async def websocket_awc_reset_reservoir(
     async with _awc_lock(hass):
         config = _config_from_entry(entry)  # fetched INSIDE the lock (R1)
         reservoirs = _awc_cfg(config).get("reservoirs", {})
+        store = hass.data.get(DOMAIN, {})
+        if (_awc_cfg(config).get("state", {}).get("status") in _AWC_RUNNING_STATES
+                or store.get(AWC_CALRUN_UNSUB) is not None or store.get(NPS_DRAIN_UNSUB) is not None
+                or _awc_cfg(config).get("state", {}).get("calRunRole")):
+            connection.send_error(msg["id"], "busy", "Stop pumping before resetting a reservoir level")
+            return
         if kind in ("fresh", "fresh2"):
             fresh = reservoirs.get(kind)
             if not isinstance(fresh, dict):
@@ -12435,11 +13000,14 @@ def _sanitize_imported_config(incoming: dict[str, Any], current: dict[str, Any])
     awc = incoming.get("automaticWaterChange")
     if isinstance(awc, dict):
         awc["state"] = {}  # the normaliser rebuilds a clean idle state
+        awc["enabled"] = False  # importing is never permission to start pumps
         sim = awc.get("simulation")
         if isinstance(sim, dict):
             sim["enabled"] = False
             sim["snapshot"] = None  # a foreign snapshot must never restore here
     dosing = incoming.get("dosing")
+    if isinstance(dosing, dict):
+        dosing["enabled"] = False
     if isinstance(dosing, dict) and isinstance(dosing.get("spacing"), dict):
         # A queued spacing-deferred dose is live state, not a setting — restoring
         # one from a days-old backup must never fire it into today's tank.
@@ -12448,10 +13016,20 @@ def _sanitize_imported_config(incoming: dict[str, Any], current: dict[str, Any])
         for channel in dosing["channels"].values():
             if not isinstance(channel, dict):
                 continue
+            channel["enabled"] = False
             channel["sync"] = {}  # normaliser default = unsynced, no pending writes
             ch_state = channel.get("state")
             if isinstance(ch_state, dict):
                 ch_state["suspendedUntil"] = ""
+                for key in ("haRunStartedAt", "haRunEndsAt"):
+                    ch_state[key] = ""
+                ch_state["haRunTargetMl"] = 0
+                ch_state["haRunConfirmed"] = False
+                ch_state["serviceRunUntil"] = ""
+    fx = (incoming.get("nps") or {}).get("feedExchange")
+    if isinstance(fx, dict):
+        fx["enabled"] = False
+        fx["state"] = {}
     for key in _EXPORT_STRIP_KEYS:
         if key in current:
             incoming[key] = deepcopy(current[key])
@@ -12516,14 +13094,19 @@ async def websocket_config_import(
         connection.send_error(msg["id"], "busy",
                               "Wait for the calibration run to finish before importing")
         return
-    async with _awc_lock(hass):
+    async with _awc_lock(hass), _dosing_lock(hass):
         config = _config_from_entry(entry)
-        if _awc_cfg(config).get("state", {}).get("status") in (*_AWC_RUNNING_STATES, "paused"):
+        if _awc_cfg(config).get("state", {}).get("status") in (*_AWC_RUNNING_STATES, "paused", "fault"):
             connection.send_error(msg["id"], "busy",
                                   "Stop the running water change before importing settings")
             return
         incoming = deepcopy(payload["config"])
         _sanitize_imported_config(incoming, config)
+        safety_error = _automation_settings_error(
+            hass, config, _normalise_core_config(incoming), importing=True)
+        if safety_error:
+            connection.send_error(msg["id"], "automation_safety", safety_error)
+            return
         _append_activity(
             incoming,
             f"Settings imported from backup (v{payload.get('version', '?')})", "control")
@@ -12556,7 +13139,10 @@ async def _async_awc_recover_orphaned_calrun(
         role = state.get("calRunRole")
         if not role:
             return
-        await _async_awc_stop_pumps(hass, config, (role,), None)
+        if not await _async_awc_stop_pumps(hass, config, (role,), None):
+            await _async_awc_emergency_fault(
+                hass, entry, config, "Interrupted calibration pump OFF was not confirmed — inspect the pump", None)
+            return
         state["calRunRole"] = ""
         state["calRunEndsAt"] = ""
         _append_activity(
@@ -12599,12 +13185,22 @@ async def websocket_awc_calibration_run(
             connection.send_error(msg["id"], "busy",
                                   "Calibration runs need the water change idle")
             return
+        binding_errors = _automation_binding_errors(config)
+        if binding_errors and not _awc_sim_enabled(config):
+            connection.send_error(msg["id"], "unsafe_binding", next(iter(binding_errors.values())))
+            return
         live = _awc_live_state(hass, config)
         if live.get("leak") or live.get("highLevel"):
             connection.send_error(msg["id"], "hazard_active",
                                   "Clear the leak / high-level hazard before running a pump")
             return
+        if live.get("leakUnknown") or live.get("highLevelUnknown"):
+            connection.send_error(msg["id"], "hazard_unavailable", "Restore the configured safety sensors before running a pump")
+            return
         store = hass.data.setdefault(DOMAIN, {})
+        if store.get(NPS_DRAIN_UNSUB) is not None:
+            connection.send_error(msg["id"], "busy", "An NPS feed-exchange drain is in progress")
+            return
         if store.get(AWC_CALRUN_UNSUB) is not None:
             connection.send_error(msg["id"], "busy", "A calibration run is already in progress")
             return
@@ -12615,6 +13211,7 @@ async def websocket_awc_calibration_run(
         try:
             await _async_awc_set_pump(hass, config, role, True, connection.context(msg))
         except Exception as exc:  # noqa: BLE001 - surface the failure, nothing started
+            await _async_awc_stop_pumps(hass, config, (role,), connection.context(msg))
             connection.send_error(msg["id"], "pump_start_failed",
                                   f"Could not start the {role} pump: {exc}")
             return
@@ -12631,7 +13228,10 @@ async def websocket_awc_calibration_run(
                 if latest is None:
                     return
                 cfg = _config_from_entry(latest)
-                await _async_awc_stop_pumps(hass, cfg, (role,), None)
+                if not await _async_awc_stop_pumps(hass, cfg, (role,), None):
+                    await _async_awc_emergency_fault(
+                        hass, latest, cfg, "Calibration pump OFF was not confirmed — inspect the pump", None)
+                    return
                 _awc_bump_odometer(_awc_cfg(cfg), role, seconds=seconds)
                 st = _awc_cfg(cfg).get("state", {})
                 st["calRunRole"] = ""
@@ -12765,6 +13365,11 @@ async def websocket_awc_reset_ledger(
         return
     async with _awc_lock(hass):
         config = _config_from_entry(entry)  # fetched INSIDE the lock (R1)
+        store = hass.data.get(DOMAIN, {})
+        if (_awc_cfg(config).get("state", {}).get("status") in _AWC_RUNNING_STATES
+                or store.get(AWC_CALRUN_UNSUB) is not None or store.get(NPS_DRAIN_UNSUB) is not None):
+            connection.send_error(msg["id"], "busy", "Stop pumping before resetting the water-change ledger")
+            return
         _awc_cfg(config)["ledger"] = {
             "cumulativeDrainedL": 0.0,
             "cumulativeFilledL": 0.0,
@@ -12799,11 +13404,12 @@ async def websocket_awc_tubing_replaced(
         connection.send_error(msg["id"], "no_second_source",
                               "Add the second source in Water Change settings first")
         return
-    config = _config_from_entry(entry)
-    pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
-    pump["tubingInstalledAt"] = datetime.now(timezone.utc).isoformat()
-    _append_activity(config, f"AWC {role} pump tubing replaced", "control")
-    config = await _async_save_config(hass, entry, config)
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        pump = _awc_cfg(config).setdefault("pumps", {}).setdefault(role, {})
+        pump["tubingInstalledAt"] = datetime.now(timezone.utc).isoformat()
+        _append_activity(config, f"AWC {role} pump tubing replaced", "control")
+        config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 
@@ -12854,10 +13460,11 @@ async def websocket_awc_set_schedule(
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    config = _config_from_entry(entry)
-    acfg = _awc_cfg(config)
-    acfg["schedule"] = {**acfg.get("schedule", {}), **msg["schedule"]}
-    config = await _async_save_config(hass, entry, config)
+    async with _awc_lock(hass):
+        config = _config_from_entry(entry)
+        acfg = _awc_cfg(config)
+        acfg["schedule"] = {**acfg.get("schedule", {}), **msg["schedule"]}
+        config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 
@@ -13130,7 +13737,11 @@ def _dosing_desired_writes(
         if ml_per_s > 0:
             writes["flowMlPerSNumber"] = float(ml_per_s)
             writes["spinUpMlNumber"] = float(channel.get("calibration", {}).get("spinUpMl") or 0)
-        writes["chaserSecondsNumber"] = float(channel.get("chaserSeconds") or 0)
+        # The shared AWC fill head has no ownership acknowledgement. An
+        # autonomous rinse can collide with a water change; keep it disabled.
+        writes["chaserSecondsNumber"] = 0.0
+        writes.pop("phStopNumber", None)
+        writes.pop("phResumeNumber", None)
         return writes
     steps_per_ml = channel.get("calibration", {}).get("stepsPerMl") or 0
     if steps_per_ml > 0:
@@ -13157,43 +13768,84 @@ def _dosing_desired_switches(channel: dict[str, Any], now: datetime | None = Non
     else:
         calibrated = (channel.get("calibration", {}).get("stepsPerMl") or 0) > 0
     fresh_ok = True
-    if channel.get("chemical") == "livefood":
+    if channel.get("chemical") in ("livefood", "food"):
         fresh_ok = _dosing_food_freshness(
             channel, now or datetime.now(timezone.utc), config)["status"] not in ("stale", "soaking")
     ph_ok = bool(guards.get("phEntity")) or bool(guards.get("phMissingAcknowledged")) or channel.get("chemical") != "kalk"
     schedule = channel.get("schedule", {}) if isinstance(channel.get("schedule"), dict) else {}
     schedule_on = bool(schedule.get("enabled"))
     has_volume = (schedule.get("mlPerDay") or 0) > 0
-    return {
+    master_on = config is None or (config.get("dosing") or {}).get("enabled", True)
+    suspended_until = _parse_datetime((channel.get("state") or {}).get("suspendedUntil"))
+    panic = suspended_until is not None and suspended_until > (now or datetime.now(timezone.utc))
+    switches = {
         # mlPerDay 0 is a safety edit: the enable switch must go OFF with it, or
         # the firmware keeps executing its previous schedule (R2).
-        "enabledSwitch": bool(channel.get("enabled") and schedule_on and calibrated and ph_ok and has_volume and fresh_ok),
+        "enabledSwitch": bool(master_on and not panic and channel.get("enabled") and schedule_on and calibrated and ph_ok and has_volume and fresh_ok),
         "phGuardSwitch": bool(guards.get("phEntity")),
     }
+    if dosing_engine.is_brushed(channel):
+        switches.pop("phGuardSwitch")
+    return switches
 
 
 async def _async_dosing_save(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, stale_config: dict[str, Any]
+    hass: HomeAssistant, entry: OpenReefConfigEntry, stale_config: dict[str, Any],
+    *, sync_only: bool = False, watcher_base: dict[str, Any] | None = None,
 ) -> None:
-    """Persist dosing-side mutations without clobbering concurrent writers (R32).
+    """Persist runtime fields only; user settings always come from the latest save.
 
-    The sync pass and the tick hold a config snapshot across awaited service
-    calls; saving that whole blob could silently revert an AWC leg credit or a
-    non-dosing user save that landed meanwhile. Re-fetch and graft only what
-    dosing owns — ``dosing.channels`` plus ``consumables.products`` (dose
-    events debit linked bottles, so those ledgers move on dosing's clock too).
-    NB: two concurrent writers can still interleave (the graft is wholesale per
-    block); the single event loop makes that window rare and the 60 s tick
-    self-corrects."""
-    fresh = _config_from_entry(entry)
-    stale_dosing = stale_config.get("dosing") if isinstance(stale_config.get("dosing"), dict) else {}
-    if isinstance(stale_dosing.get("channels"), dict):
-        fresh.setdefault("dosing", {})["channels"] = stale_dosing["channels"]
-    stale_consumables = stale_config.get("consumables") \
-        if isinstance(stale_config.get("consumables"), dict) else {}
-    if isinstance(stale_consumables.get("products"), dict):
-        fresh.setdefault("consumables", {})["products"] = stale_consumables["products"]
-    await _async_save_config(hass, entry, fresh)
+    In particular, a service call yielding across a user disable must never put
+    enabled/schedule/driver bindings back to their old values.
+    """
+    async with _dosing_lock(hass):
+        fresh = _config_from_entry(entry)
+        for cid, old in _dosing_channels(stale_config).items():
+            current = _dosing_channels(fresh).get(cid)
+            if current is None:
+                continue  # never resurrect a channel removed during an awaited call
+            if watcher_base is not None:
+                # The minutely watcher yields to notifications and atomic dose
+                # settlement. It owns advisory deltas only, never counters,
+                # reservoir stock, wear or in-flight stop/recovery stamps.
+                baseline = _dosing_channels(watcher_base).get(cid) or {}
+                before = baseline.get("state") or {}
+                after = old.get("state") or {}
+                current_state = current.setdefault("state", {})
+                for key in ("missedMl", "missedSince", "rolloverAnomaly", "respread", "phLatchedHigh"):
+                    if (after.get(key) != before.get(key)
+                            and current_state.get(key) == before.get(key)):
+                        current_state[key] = deepcopy(after.get(key))
+                for key, limit in (("events", DOSING_EVENTS_MAX), ("dailyLog", DOSING_DAILY_LOG_MAX)):
+                    additions = [row for row in (old.get(key) or []) if row not in (baseline.get(key) or [])]
+                    existing = current.get(key) or []
+                    current[key] = (deepcopy([row for row in additions if row not in existing]) + existing)[:limit]
+                continue
+            for key in (("sync",) if sync_only else ("sync", "dailyLog", "events")):
+                if key in old:
+                    current[key] = deepcopy(old[key])
+            if (current.get("calibration") or {}).get("calibratedAt") == (old.get("calibration") or {}).get("calibratedAt"):
+                current.setdefault("calibration", {})["syncedToDevice"] = (old.get("calibration") or {}).get("syncedToDevice", False)
+            if sync_only:
+                continue
+            for key, value in (old.get("state") or {}).items():
+                if key not in ("suspendedUntil", "lastStirredAt", "lastFlushedAt", "stirUntil", "serviceRunUntil"):
+                    current.setdefault("state", {})[key] = deepcopy(value)
+            until = _parse_datetime((current.get("state") or {}).get("suspendedUntil"))
+            if until is not None and until <= datetime.now(timezone.utc):
+                current["state"]["suspendedUntil"] = ""
+            for key in ("runSeconds", "doseCount"):
+                current.setdefault("wear", {})[key] = (old.get("wear") or {}).get(key, 0)
+            # A concurrent refill/relink owns the reservoir. Runtime accounting of
+            # observed ESP doses uses its own atomic fresh-fetch transaction below.
+            old_res = old.get("reservoir") or {}
+            current_res = current.setdefault("reservoir", {})
+            if all(current_res.get(k) == old_res.get(k) for k in
+                   ("productId", "productIsBottle", "mixedAt", "refilledAt", "volumeMl")):
+                current_res["remainingMl"] = old_res.get("remainingMl", current_res.get("remainingMl", 0))
+            if (current.get("calibration") or {}).get("calibratedAt") == (old.get("calibration") or {}).get("calibratedAt"):
+                current.setdefault("calibration", {})["syncedToDevice"] = (old.get("calibration") or {}).get("syncedToDevice", False)
+        await _async_save_config(hass, entry, fresh)
 
 
 def _clear_dosing_verify(hass: HomeAssistant) -> None:
@@ -13202,93 +13854,184 @@ def _clear_dosing_verify(hass: HomeAssistant) -> None:
         unsub()
 
 
+class _DosingStateLock(_AwcStateLock):
+    """Tracked ownership, with same-task nesting for guarded dosing helpers."""
+
+    depth: int = 0
+
+    async def acquire(self) -> bool:
+        if self.owner is asyncio.current_task():
+            self.depth += 1
+            return True
+        acquired = await super().acquire()
+        self.depth = 1
+        return acquired
+
+    def release(self) -> None:
+        if self.owner is not asyncio.current_task():
+            raise RuntimeError("Dosing lock released by a different task")
+        self.depth -= 1
+        if self.depth == 0:
+            super().release()
+
+
+def _dosing_lock(hass: HomeAssistant) -> asyncio.Lock:
+    return hass.data.setdefault(DOMAIN, {}).setdefault("dosing_state_lock", _DosingStateLock())
+
+
+def _dosing_number_matches(hass: HomeAssistant, entity: str, value: float) -> bool:
+    state = hass.states.get(entity) if entity else None
+    try:
+        current = float(state.state) if state is not None else float("nan")
+        return math.isfinite(current) and abs(current - value) <= 0.011
+    except (TypeError, ValueError):
+        return False
+
+
+async def _async_dosing_wait_state(
+    hass: HomeAssistant, entity: str, expected: str | float,
+) -> bool:
+    """Allow ESPHome feedback to arrive after a successful HA service dispatch."""
+    for attempt in range(11):
+        state = hass.states.get(entity) if entity else None
+        matched = (_dosing_number_matches(hass, entity, expected) if isinstance(expected, (int, float))
+                   else state is not None and str(state.state).lower() == expected)
+        if matched:
+            return True
+        if attempt < 10:
+            await asyncio.sleep(0.2)
+    return False
+
+
 async def _async_dosing_sync_pass(
     hass: HomeAssistant, entry: OpenReefConfigEntry, channel_id: str | None = None
 ) -> None:
-    """Diff every channel's desired firmware values against the live entities, write
-    what differs, and arm the read-back verify. Every write is acknowledged — silent
-    settings loss is the #1 doser-app trust breaker (Jebao/Kamoer lesson)."""
+    """Disable before changing configuration; enable only a verified complete plan.
+
+    Reasserting a verified enable also renews the firmware's 180-second lease.
+    A partial/offline binding never renews that lease.
+    """
+    async with _dosing_lock(hass):
+        await _async_dosing_sync_locked(hass, entry, channel_id)
+
+
+async def _async_dosing_sync_locked(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, channel_id: str | None = None
+) -> None:
+    if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+        return
     store = hass.data.setdefault(DOMAIN, {})
     runtime = store.setdefault(DOSING_RUNTIME, {})
     runtime.pop("pass_scheduled", None)
     latest_entry = _first_entry(hass)
     if latest_entry is None or latest_entry.entry_id != entry.entry_id:
-        return  # entry unloaded/replaced while the pass was queued
-    config = _config_from_entry(entry)
-    channels = _dosing_channels(config)
-    if not channels:
         return
+    config = _config_from_entry(entry)
     desired_map = runtime.setdefault("desired", {})
     retries = runtime.setdefault("retries", {})
-    now_local = dt_util.now()
-    wrote_any = False
     changed = False
-
-    for cid, channel in channels.items():
+    wrote_any = False
+    for cid, channel in _dosing_channels(config).items():
         if channel_id is not None and cid != channel_id:
             continue
+        if dosing_engine.is_ha_timed(channel):
+            continue
         entities = channel.get("driver", {}).get("entities", {})
-        entities = entities if isinstance(entities, dict) else {}
         sync = channel.setdefault("sync", {})
-        desired = _dosing_desired_writes(channel, config, now_local)
-        offline_roles: list[str] = []
-        wrote: dict[str, float] = {}
-
-        for role, value in desired.items():
-            ent = entities.get(role)
-            if not ent:
+        desired = _dosing_desired_writes(channel, config, dt_util.now())
+        switches = _dosing_desired_switches(channel, config=config)
+        enable = entities.get("enabledSwitch", "")
+        missing = [role for role in (*desired, *switches) if not entities.get(role)]
+        if _automation_binding_errors(config):
+            missing.append("conflicting actuator bindings")
+        unavailable = [role for role in (*desired, *switches)
+                       if entities.get(role) and (hass.states.get(entities[role]) is None
+                           or hass.states.get(entities[role]).state in UNAVAILABLE_STATES)]
+        mismatch = {entities[role]: value for role, value in desired.items()
+                    if entities.get(role) and not _dosing_number_matches(hass, entities[role], value)}
+        complete_values = {entities[role]: value for role, value in desired.items() if entities.get(role)}
+        if mismatch and desired_map.get(cid) == complete_values and not missing and not unavailable:
+            continue  # the armed verify timer owns this retry; saves must not loop writes
+        failed_at = _parse_datetime(runtime.setdefault("failedAt", {}).get(cid))
+        if sync.get("state") == "failed" and failed_at is not None and (datetime.now(timezone.utc) - failed_at).total_seconds() < 60:
+            continue  # a failure save schedules sync too; wait for the next watcher tick
+        try:
+            # Stop BEFORE the first configuration write. Without an acknowledged
+            # OFF, neither configuration changes nor an ON request are safe.
+            if missing or unavailable or mismatch or not switches["enabledSwitch"]:
+                if enable:
+                    await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: enable}, blocking=True)
+                    if not await _async_dosing_wait_state(hass, enable, "off"):
+                        raise ValueError("Device disable could not be verified")
+            if missing or unavailable:
+                status = dict(state="offline", lastError="Missing or unavailable: " + ", ".join(missing + unavailable),
+                              pendingWrites={role: value for role, value in desired.items()
+                                             if role in missing or role in unavailable})
+                changed = changed or any(sync.get(key) != value for key, value in status.items())
+                sync.update(status)
+                desired_map.pop(cid, None)
                 continue
-            state = hass.states.get(ent)
-            if state is None or state.state in UNAVAILABLE_STATES:
-                offline_roles.append(role)
+            # Guard switches are written before the master enable, including on
+            # a fresh boot where all numeric settings were already restored.
+            for role, want_on in switches.items():
+                if role == "enabledSwitch":
+                    continue
+                entity = entities[role]
+                expected = "on" if want_on else "off"
+                if str(hass.states.get(entity).state).lower() != expected:
+                    await hass.services.async_call("switch", "turn_" + expected,
+                                                   {ATTR_ENTITY_ID: entity}, blocking=True)
+                if not await _async_dosing_wait_state(hass, entity, expected):
+                    raise ValueError("Guard switch write could not be verified")
+            if mismatch:
+                for entity, value in mismatch.items():
+                    await hass.services.async_call("number", "set_value",
+                                                   {ATTR_ENTITY_ID: entity, "value": value}, blocking=True)
+                desired_map[cid] = {entities[role]: value for role, value in desired.items()}
+                retries[cid] = 0
+                sync.update(state="verifying", lastError="", pendingWrites=desired)
+                wrote_any = changed = True
                 continue
-            try:
-                live_value = float(state.state)
-            except (TypeError, ValueError):
-                live_value = None
-            if live_value is None or abs(live_value - value) > 0.011:
-                await hass.services.async_call(
-                    "number", "set_value", {ATTR_ENTITY_ID: ent, "value": value}, blocking=True
-                )
-                wrote[ent] = value
-
-        for role, want_on in _dosing_desired_switches(channel, config=config).items():
-            ent = entities.get(role)
-            if not ent:
+            # A settings save may have landed while service calls yielded. Never
+            # re-enable from the old plan after a user disabled/edited it.
+            latest = _config_from_entry(entry)
+            latest_channel = _dosing_channels(latest).get(cid)
+            if (store.get("unloading") or latest_channel is None
+                    or _dosing_desired_writes(latest_channel, latest, dt_util.now()) != desired
+                    or _dosing_desired_switches(latest_channel, config=latest) != switches
+                    or latest_channel.get("driver") != channel.get("driver")):
+                if enable:
+                    await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: enable}, blocking=True)
                 continue
-            state = hass.states.get(ent)
-            if state is None or state.state in UNAVAILABLE_STATES:
-                offline_roles.append(role)
-                continue
-            is_on = str(state.state).lower() == "on"
-            if is_on != want_on:
-                await hass.services.async_call(
-                    "switch", "turn_on" if want_on else "turn_off", {ATTR_ENTITY_ID: ent}, blocking=True
-                )
-
-        if offline_roles:
-            pending = {role: desired[role] for role in offline_roles if role in desired}
-            if sync.get("state") != "offline" or sync.get("pendingWrites") != pending:
-                sync["state"] = "offline"
-                sync["lastError"] = f"{len(offline_roles)} device entities unavailable"
-                sync["pendingWrites"] = pending
-                changed = True
-        elif wrote:
-            desired_map[cid] = wrote
-            retries[cid] = 0
-            wrote_any = True
-        else:
+            if switches["enabledSwitch"]:
+                await hass.services.async_call("switch", "turn_on", {ATTR_ENTITY_ID: enable}, blocking=True)
+                if not await _async_dosing_wait_state(hass, enable, "on"):
+                    raise ValueError("Device enable could not be verified")
             if sync.get("state") != "synced" or sync.get("pendingWrites"):
-                sync["state"] = "synced"
-                sync["lastSyncedAt"] = datetime.now(timezone.utc).isoformat()
-                sync["lastError"] = ""
-                sync["pendingWrites"] = {}
+                sync.update(state="synced", lastSyncedAt=datetime.now(timezone.utc).isoformat(),
+                            lastError="", pendingWrites={})
+                channel.setdefault("calibration", {})["syncedToDevice"] = True
                 changed = True
-
+            desired_map.pop(cid, None)
+        except Exception as err:  # rejected writes must leave the channel disabled
+            if enable:
+                try:
+                    await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: enable}, blocking=True)
+                except Exception:
+                    pass  # firmware enable lease expires if the device is unreachable
+            sync.update(state="failed", lastError=str(err)[:200], pendingWrites=desired)
+            runtime.setdefault("failedAt", {})[cid] = datetime.now(timezone.utc).isoformat()
+            desired_map.pop(cid, None)
+            changed = True
+            if _dosing_notify_enabled(config, "syncIssues"):
+                await _async_send_mode_notification(
+                    hass, config, f"openreef_dosing_sync_{cid}",
+                    f"Dosing sync failed: {channel.get('name', cid)}",
+                    "Device settings could not be verified. Dosing remains disabled.")
     if wrote_any:
         _async_arm_dosing_verify(hass, entry)
     if changed:
-        await _async_dosing_save(hass, entry, config)
+        await _async_dosing_save(hass, entry, config, sync_only=True)
 
 
 def _async_arm_dosing_verify(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
@@ -13307,72 +14050,68 @@ def _async_arm_dosing_verify(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
 
 
 async def _async_dosing_verify(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
-    """The read-back half of write-then-verify: every written entity must now hold
-    its value. One retry, then a loud 'failed' — never silent (reef-pi runaway lesson:
-    fire-and-forget motor config is how tanks get dumped into)."""
-    config = _config_from_entry(entry)
-    channels = _dosing_channels(config)
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
-    desired_map = runtime.setdefault("desired", {})
-    retries = runtime.setdefault("retries", {})
-    changed = False
-    rewrote = False
-
-    for cid in list(desired_map):
-        wrote = desired_map.get(cid) or {}
-        channel = channels.get(cid)
-        if channel is None:
+    """Read back all written numbers while enable remains OFF; retry once."""
+    async with _dosing_lock(hass):
+        if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+            return
+        config = _config_from_entry(entry)
+        runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+        desired_map = runtime.setdefault("desired", {})
+        retries = runtime.setdefault("retries", {})
+        retry = False
+        failed = False
+        ready = []
+        for cid, wrote in list(desired_map.items()):
+            channel = _dosing_channels(config).get(cid)
+            if channel is None:
+                desired_map.pop(cid, None)
+                continue
+            mismatched = {ent: value for ent, value in wrote.items()
+                          if not _dosing_number_matches(hass, ent, value)}
+            if not mismatched:
+                desired_map.pop(cid, None)
+                ready.append(cid)
+                continue
+            if retries.get(cid, 0) < 1:
+                retries[cid] = 1
+                try:
+                    for ent, value in mismatched.items():
+                        await hass.services.async_call("number", "set_value",
+                                                       {ATTR_ENTITY_ID: ent, "value": value}, blocking=True)
+                    retry = True
+                    continue
+                except Exception:
+                    pass
+            channel.setdefault("sync", {}).update(
+                state="failed", lastError="Device settings did not read back; dosing disabled")
+            runtime.setdefault("failedAt", {})[cid] = datetime.now(timezone.utc).isoformat()
+            enable = (channel.get("driver") or {}).get("entities", {}).get("enabledSwitch")
+            if enable:
+                try:
+                    await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: enable}, blocking=True)
+                except Exception:
+                    pass
             desired_map.pop(cid, None)
-            continue
-        sync = channel.setdefault("sync", {})
-        mismatched: dict[str, float] = {}
-        for ent, value in wrote.items():
-            state = hass.states.get(ent)
-            try:
-                live_value = float(state.state) if state is not None else None
-            except (TypeError, ValueError):
-                live_value = None
-            if live_value is None or abs(live_value - value) > 0.011:
-                mismatched[ent] = value
-        if not mismatched:
-            sync["state"] = "synced"
-            sync["lastSyncedAt"] = datetime.now(timezone.utc).isoformat()
-            sync["lastError"] = ""
-            sync["pendingWrites"] = {}
-            if (channel.get("calibration", {}).get("stepsPerMl") or 0) > 0:
-                channel.setdefault("calibration", {})["syncedToDevice"] = True
-            desired_map.pop(cid, None)
-            changed = True
-        elif retries.get(cid, 0) < 1:
-            retries[cid] = retries.get(cid, 0) + 1
-            for ent, value in mismatched.items():
-                await hass.services.async_call(
-                    "number", "set_value", {ATTR_ENTITY_ID: ent, "value": value}, blocking=True
-                )
-            desired_map[cid] = mismatched
-            rewrote = True
-        else:
-            sync["state"] = "failed"
-            sync["lastError"] = f"{len(mismatched)} values did not stick on the device"
-            desired_map.pop(cid, None)
-            changed = True
+            failed = True
             if _dosing_notify_enabled(config, "syncIssues"):
                 await _async_send_mode_notification(
                     hass, config, f"openreef_dosing_sync_{cid}",
                     f"Dosing sync failed: {channel.get('name', cid)}",
-                    "Settings written to the doser did not read back — the device may be "
-                    "offline or rejecting writes. Dosing continues on its LAST synced schedule.",
-                )
-
-    if rewrote:
-        _async_arm_dosing_verify(hass, entry)
-    if changed:
-        await _async_dosing_save(hass, entry, config)
+                    "Device settings could not be verified. Dosing is disabled until a complete sync succeeds.")
+        if failed:
+            await _async_dosing_save(hass, entry, config, sync_only=True)
+        if retry:
+            _async_arm_dosing_verify(hass, entry)
+        for cid in ready:
+            # Recompile from the latest saved settings before granting the lease.
+            await _async_dosing_sync_locked(hass, entry, cid)
 
 
 def _async_kick_dosing_sync(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
     """Schedule a sync pass out-of-band of the save that requested it (a pass saves
     its own terminal states; running it inline would recurse into save)."""
+    if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+        return
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
     if runtime.get("pass_scheduled"):
         return
@@ -13382,33 +14121,74 @@ def _async_kick_dosing_sync(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
 
 # --- AWC coordination: hold dosing during a water change -----------------------------------
 
-async def _async_dosing_awc_suspend(hass: HomeAssistant, config: dict[str, Any], active: bool, context: Any) -> None:
-    """Flip each opted-in channel's firmware HA-suspend switch. Never the master
-    enable — a dead HA mid-suspension must not silently disable dosing forever, so
-    the firmware side auto-expires this switch (~4 h) as the dead-man backstop."""
-    if _awc_sim_enabled(config):
-        return  # a simulated change must not flip real firmware suspend switches
-    for channel in _dosing_channels(config).values():
-        guards = channel.get("guards", {}) if isinstance(channel.get("guards"), dict) else {}
-        if not guards.get("suspendDuringAwc", True):
-            continue
-        ent = channel.get("driver", {}).get("entities", {}).get("haSuspendSwitch")
-        if not ent:
-            continue
-        if not active:
-            # A user panic lockout owns the switch: an AWC release (finalize/abort/
-            # holdoff/acknowledge) must not cancel it (R15). The tick's suspend
-            # reconciliation releases it when suspendedUntil lapses.
-            until = _parse_datetime((channel.get("state") or {}).get("suspendedUntil"))
-            if until is not None and until > datetime.now(timezone.utc):
+async def _async_dosing_awc_suspend(hass: HomeAssistant, config: dict[str, Any], active: bool, context: Any) -> bool:
+    """Require confirmed suspension before AWC may move water."""
+    async with _dosing_lock(hass):
+        if _awc_sim_enabled(config):
+            return True
+        confirmed = True
+        entry = _first_entry(hass)
+        latest = _config_from_entry(entry) if entry is not None else config
+        for channel in _dosing_channels(latest).values():
+            guards = channel.get("guards") or {}
+            if not guards.get("suspendDuringAwc", True):
                 continue
-        try:
+            entities = (channel.get("driver") or {}).get("entities") or {}
+            if dosing_engine.is_ha_timed(channel):
+                # An in-flight generic run has its own persisted stop/settlement
+                # ceremony. Do not begin AWC while that pump could still run.
+                if active:
+                    ent = entities.get("powerSwitch")
+                    state = hass.states.get(ent) if ent else None
+                    if ((channel.get("state") or {}).get("haRunEndsAt")
+                            or (channel.get("enabled") and (state is None or state.state != "off"))):
+                        confirmed = False
+                continue
+            ent = entities.get("haSuspendSwitch")
+            if not ent:
+                if active and channel.get("enabled"):
+                    confirmed = False
+                continue
+            if not active:
+                until = _parse_datetime((channel.get("state") or {}).get("suspendedUntil"))
+                if until is not None and until > datetime.now(timezone.utc):
+                    continue
+            try:
+                await hass.services.async_call(
+                    "switch", "turn_on" if active else "turn_off", {ATTR_ENTITY_ID: ent},
+                    blocking=True, context=context)
+                if not await _async_dosing_wait_state(hass, ent, "on" if active else "off"):
+                    confirmed = False
+            except Exception:
+                confirmed = False
+                _LOGGER.exception("Dosing: could not confirm AWC suspension switch %s", ent)
+        return confirmed
+
+
+async def _async_dosing_reconcile_suspend(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, cid: str,
+) -> None:
+    """Reconcile from current panic/AWC state, serialized with their writers."""
+    async with _awc_lock(hass), _dosing_lock(hass):
+        config = _config_from_entry(entry)
+        channel = _dosing_channels(config).get(cid)
+        if channel is None:
+            return
+        entities = (channel.get("driver") or {}).get("entities") or {}
+        ent = entities.get("haSuspendSwitch")
+        feedback = hass.states.get(ent) if ent else None
+        if feedback is None or feedback.state in UNAVAILABLE_STATES:
+            return
+        until = _parse_datetime((channel.get("state") or {}).get("suspendedUntil"))
+        active = ((until is not None and until > datetime.now(timezone.utc))
+                  or (bool((channel.get("guards") or {}).get("suspendDuringAwc", True))
+                      and _dosing_awc_suspended(config)))
+        if active or str(feedback.state).lower() == "on":
             await hass.services.async_call(
-                "switch", "turn_on" if active else "turn_off", {ATTR_ENTITY_ID: ent},
-                blocking=True, context=context,
-            )
-        except Exception:  # noqa: BLE001 — a failed suspend must not abort the water change
-            _LOGGER.exception("Dosing: failed to %s HA-suspend switch %s", "set" if active else "clear", ent)
+                "switch", "turn_on" if active else "turn_off", {ATTR_ENTITY_ID: ent}, blocking=True)
+        if until is not None and until <= datetime.now(timezone.utc):
+            channel.setdefault("state", {})["suspendedUntil"] = ""
+            await _async_save_config(hass, entry, config)
 
 
 # --- Periodic tick: accounting, missed doses, drift, alerts --------------------------------
@@ -13437,7 +14217,7 @@ async def _async_schedule_dosing_tick(
         return
     config = config or _config_from_entry(entry)
     dosing_cfg = config.get("dosing") if isinstance(config.get("dosing"), dict) else {}
-    if not dosing_cfg.get("enabled", True) or not _dosing_channels(config):
+    if not _dosing_channels(config):
         return
 
     async def _handle(now: datetime) -> None:
@@ -13514,12 +14294,27 @@ async def _async_dosing_fire_bounded_dose(
     """Actuate one bounded manual dose (write the volume, press the guarded
     firmware button) and optimistically stamp lastDoseAt so spacing sees it
     before the next sensor tick. Returns False when the button isn't bound."""
-    ent = channel.get("driver", {}).get("entities", {}).get("manualDoseMlNumber")
-    if ent:
-        await hass.services.async_call(
-            "number", "set_value", {ATTR_ENTITY_ID: ent, "value": ml}, blocking=True)
-    if not await _async_dosing_press(hass, channel, "manualDoseButton"):
+    entities = channel.get("driver", {}).get("entities", {})
+    ent = entities.get("manualDoseMlNumber")
+    max_ml = min((channel.get("guards") or {}).get("maxPerDoseMl") or DOSING_MAX_PER_DOSE_ML, DOSING_MAX_PER_DOSE_ML)
+    if not ent or not entities.get("manualDoseButton") or not math.isfinite(ml) or not 0 < ml <= max_ml:
         return False
+    async with _dosing_lock(hass):
+        state = hass.states.get(ent)
+        if state is None or state.state in UNAVAILABLE_STATES:
+            return False
+        try:
+            await hass.services.async_call(
+                "number", "set_value", {ATTR_ENTITY_ID: ent, "value": ml}, blocking=True)
+        except Exception:
+            return False
+        # A successful service call is not evidence the device accepted the
+        # value. Never press a button that might still use the previous amount.
+        if not await _async_dosing_wait_state(hass, ent, ml):
+            return False
+        if not await _async_dosing_press(hass, channel, "manualDoseButton"):
+            return False
+
     stamp = datetime.now(timezone.utc).isoformat()
     channel.setdefault("state", {})["lastDoseAt"] = stamp
     if cid:
@@ -13568,6 +14363,8 @@ async def _async_nps_feed_exchange_accrue(
         return
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
+        if dosing_engine.is_ha_timed(_dosing_channels(config).get(str(channel_id)) or {}):
+            return  # generic switches have no completed-delivery counter to match safely
         fx = (config.get("nps") or {}).get("feedExchange") or {}
         if not fx.get("enabled") or str(fx.get("channelId") or "") != str(channel_id):
             return
@@ -13622,7 +14419,57 @@ def _nps_truce_timeline_cfg(config: dict[str, Any]) -> dict[str, Any]:
     return {"enabled": bool(truce.get("enabled")), "profiles": profiles}
 
 
+def _nps_care_lock(hass: HomeAssistant) -> asyncio.Lock:
+    """Serialize truce/band/stir ownership; commits take the AWC lock afterwards."""
+    store = hass.data.setdefault(DOMAIN, {})
+    return store.setdefault("nps_care_lock", asyncio.Lock())
+
+
+async def _async_nps_care_save(
+    hass: HomeAssistant, entry: OpenReefConfigEntry,
+    before: dict[str, Any], after: dict[str, Any],
+) -> None:
+    """Commit only care-owned runtime after awaited actuator/notification calls.
+
+    A water change or user safety edit can land during those awaits. Neither its
+    run stamps nor its settings belong to this writer.
+    """
+    async with _awc_lock(hass), _dosing_lock(hass):
+        fresh = _config_from_entry(entry)
+        previous_truce = ((before.get("nps") or {}).get("truce") or {}).get("state") or {}
+        changed_truce = ((after.get("nps") or {}).get("truce") or {}).get("state") or {}
+        fresh_truce = fresh.setdefault("nps", {}).setdefault("truce", {}).setdefault("state", {})
+        for profile, value in changed_truce.items():
+            if value != previous_truce.get(profile) and fresh_truce.get(profile) == previous_truce.get(profile):
+                fresh_truce[profile] = deepcopy(value)
+        for cid, changed_channel in _dosing_channels(after).items():
+            current = _dosing_channels(fresh).get(cid)
+            previous = _dosing_channels(before).get(cid)
+            if current is None or previous is None:
+                continue
+            old_state = previous.get("state") or {}
+            new_state = changed_channel.get("state") or {}
+            current_state = current.setdefault("state", {})
+            for key in ("stirUntil", "lastStirredAt", "fridgeWarm"):
+                if new_state.get(key) != old_state.get(key) and current_state.get(key) == old_state.get(key):
+                    current_state[key] = deepcopy(new_state.get(key))
+            added = [row for row in changed_channel.get("events", []) if row not in previous.get("events", [])]
+            if added:
+                current["events"] = (added + [row for row in current.get("events", []) if row not in added])[:DOSING_EVENTS_MAX]
+        added_activity = [row for row in after.get("activity", []) if row not in before.get("activity", [])]
+        if added_activity:
+            fresh["activity"] = (added_activity + [row for row in fresh.get("activity", []) if row not in added_activity])[:ACTIVITY_MAX_ENTRIES]
+        await _async_save_config(hass, entry, fresh)
+
+
 async def _async_nps_truce_engage(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any = None
+) -> None:
+    async with _nps_care_lock(hass):
+        await _async_nps_truce_engage_locked(hass, entry, context)
+
+
+async def _async_nps_truce_engage_locked(
     hass: HomeAssistant, entry: OpenReefConfigEntry, context: Any = None
 ) -> None:
     """A food/live-food dose just landed: pause the plankton-hostile equipment
@@ -13631,6 +14478,7 @@ async def _async_nps_truce_engage(
     truce. Restore is stamp-driven — the minutely dosing tick is the backstop —
     so a restart can never leave equipment off forever."""
     config = _config_from_entry(entry)
+    before = deepcopy(config)
     truce = (config.get("nps") or {}).get("truce") or {}
     if not truce.get("enabled"):
         return
@@ -13647,7 +14495,7 @@ async def _async_nps_truce_engage(
             config,
             "Feed truce: plankton-hostile equipment paused after a food dose",
             "control")
-        await _async_save_config(hass, entry, config)
+        await _async_nps_care_save(hass, entry, before, config)
 
 
 async def _async_nps_pause_profile(
@@ -13705,11 +14553,19 @@ async def _async_nps_pause_profile(
 async def _async_nps_standing_bands_tick(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
+    async with _nps_care_lock(hass):
+        await _async_nps_standing_bands_tick_locked(hass, entry)
+
+
+async def _async_nps_standing_bands_tick_locked(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
     """The phyto drip's equipment policy (phyto-drip §5.5): a standing channel
     may hold the skimmer or the UV off for a daily band. Engages through the
     truce's registry so the restore is the same stamp-driven path — the band
     end is the restore stamp, never more than a day away."""
     config = _config_from_entry(entry)
+    before = deepcopy(config)
     now_utc = datetime.now(timezone.utc)
     now_local = dt_util.now()
     now_min = now_local.hour * 60 + now_local.minute
@@ -13739,10 +14595,17 @@ async def _async_nps_standing_bands_tick(
                     config, f"Phyto drip: {profile} held off until {policy.get('end')} (its band)",
                     "control")
     if changed:
-        await _async_save_config(hass, entry, config)
+        await _async_nps_care_save(hass, entry, before, config)
 
 
 async def _async_dosing_standing_care_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    async with _nps_care_lock(hass):
+        await _async_dosing_standing_care_tick_locked(hass, entry)
+
+
+async def _async_dosing_standing_care_tick_locked(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
     """Stage B (phyto-drip §5.4): the jar's care, from the dosing tick. The
@@ -13751,11 +14614,15 @@ async def _async_dosing_standing_care_tick(
     ends; a refrigerated jar's sensor over its ceiling files one warning and
     one push a shift. Advisory throughout — nothing here touches the pump."""
     config = _config_from_entry(entry)
+    before = deepcopy(config)
     now = datetime.now(timezone.utc)
     runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
     changed = False
     for cid, channel in _dosing_channels(config).items():
-        if not isinstance(channel, dict) or not dosing_engine.is_standing(channel) or not channel.get("enabled"):
+        if not isinstance(channel, dict):
+            continue
+        active = dosing_engine.is_standing(channel) and bool(channel.get("enabled"))
+        if not active and not (channel.get("state") or {}).get("stirUntil"):
             continue
         standing = (channel.get("schedule") or {}).get("standing") or {}
         state = channel.setdefault("state", {})
@@ -13764,7 +14631,7 @@ async def _async_dosing_standing_care_tick(
         plug = str(stir.get("switchEntity") or "")
         every_h = _awc_num(stir.get("everyHours"), 0, 0, dosing_engine.STIR_EVERY_H_MAX)
         until = _parse_datetime(state.get("stirUntil"))
-        if plug and until is not None and until <= now:
+        if plug and until is not None and (until <= now or not active):
             try:
                 await hass.services.async_call(
                     "switch", "turn_off", {ATTR_ENTITY_ID: plug}, blocking=True)
@@ -13776,7 +14643,7 @@ async def _async_dosing_standing_care_tick(
                 _dosing_record_event(
                     channel, "stir", f"Stirred — {int(_awc_num(stir.get('burstMinutes'), 2, 1, 60))} min on the plug")
                 changed = True
-        elif plug and every_h > 0 and until is None:
+        elif active and plug and every_h > 0 and until is None:
             last = _parse_datetime(state.get("lastStirredAt"))
             if last is None or (now - last).total_seconds() >= every_h * 3600:
                 burst = int(_awc_num(stir.get("burstMinutes"), dosing_engine.STIR_BURST_MIN_DEFAULT,
@@ -13814,10 +14681,17 @@ async def _async_dosing_standing_care_tick(
                     f"{name}: the fridge reads {temp:.1f} °C, above {max_c:g} °C — "
                     "the bottle will not keep as long as the shelf says.")
     if changed:
-        await _async_save_config(hass, entry, config)
+        await _async_nps_care_save(hass, entry, before, config)
 
 
 async def _async_nps_truce_tick(
+    hass: HomeAssistant, entry: OpenReefConfigEntry
+) -> None:
+    async with _nps_care_lock(hass):
+        await _async_nps_truce_tick_locked(hass, entry)
+
+
+async def _async_nps_truce_tick_locked(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
     """Restore truce-paused equipment whose window has passed (or whose truce
@@ -13825,6 +14699,7 @@ async def _async_nps_truce_tick(
     restored — a skimmer the keeper had off stays off. A failed turn-on stays
     in the list and retries next tick."""
     config = _config_from_entry(entry)
+    before = deepcopy(config)
     truce = (config.get("nps") or {}).get("truce") or {}
     state = truce.get("state") or {}
     now = datetime.now(timezone.utc)
@@ -13872,7 +14747,7 @@ async def _async_nps_truce_tick(
                 f"{'Phyto drip band over' if was_band else 'Feed truce over'}: {profile} back on{wet}",
                 "control")
     if changed:
-        await _async_save_config(hass, entry, config)
+        await _async_nps_care_save(hass, entry, before, config)
 
 
 # --- ha_switch_timed driver (Stage C): HA-executed dosing for generic pumps ------------------
@@ -13881,76 +14756,111 @@ async def _async_dosing_ha_finish(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     cid: str, channel: dict[str, Any], actual_elapsed_s: float | None = None,
 ) -> None:
-    """Stop an ha_switch_timed run and settle the books dead-reckoned: today
-    counter, lastDoseAt, reservoir ledger (+ linked bottle), wear, and the
-    feed-exchange/truce hooks the firmware channels get from their sensors.
+    """Confirm OFF and settle a generic run once, with no guessed restart dose.
 
-    ``actual_elapsed_s`` None = the stop timer fired on time (credit the target).
-    A value = the pump really ran that long (tick caught an overdue run, or a
-    restart orphaned it) — credit the honest elapsed volume, UNCAPPED: if the
-    pump over-ran, the ledger must say so, loudly."""
-    driver = channel.get("driver") or {}
-    switch_entity = (driver.get("entities") or {}).get("powerSwitch")
-    if switch_entity:
-        try:
-            await hass.services.async_call(
-                "switch", "turn_off", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
-        except Exception:  # noqa: BLE001 — could not stop: keep the stamps, retry next tick
+    HA-timed channels cannot prove delivery during downtime and cannot generate
+    automatic matched drains. Their use needs a physical independent timeout.
+    """
+    truce = False
+    async with _awc_lock(hass), _dosing_lock(hass):
+        fresh = _config_from_entry(entry)
+        current = _dosing_channels(fresh).get(cid)
+        if current is None or not (current.get("state") or {}).get("haRunEndsAt"):
             return
-    rt = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {}) \
-        .setdefault("channels", {}).setdefault(cid, {})
-    unsub = rt.pop("haRunUnsub", None)
-    if unsub is not None:
+        entities = (current.get("driver") or {}).get("entities") or {}
+        switch_entity = entities.get("powerSwitch")
+        if not switch_entity:
+            return
         try:
+            await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
+        except Exception:
+            return  # preserve the trace and retry; never acknowledge a lost OFF
+        if not await _async_dosing_wait_state(hass, switch_entity, "off"):
+            return
+        rt = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {}).setdefault("channels", {}).setdefault(cid, {})
+        unsub = rt.pop("haRunUnsub", None)
+        if unsub is not None:
             unsub()
-        except Exception:  # noqa: BLE001
-            pass
-    state = channel.setdefault("state", {})
-    target_ml = _awc_num(state.get("haRunTargetMl"), 0, 0, 100000)
-    started = _parse_datetime(state.get("haRunStartedAt"))
-    ends = _parse_datetime(state.get("haRunEndsAt"))
-    run_s = max(0.0, (ends - started).total_seconds()) \
-        if started is not None and ends is not None else 0.0
-    cal = channel.get("calibration") or {}
-    dosed_ml = target_ml
-    if actual_elapsed_s is not None:
-        run_s = actual_elapsed_s
-        dosed_ml = max(0.0, awc_engine.volume_for_runtime_l(
-            actual_elapsed_s, _awc_num(cal.get("mlPerS"), 0, 0, 200), 1.0,
-            _awc_num(cal.get("spinUpMl"), 0, -50, 50)) * 1000.0)
-        if target_ml > 0 and dosed_ml > target_ml * 1.5:
-            _dosing_record_event(
-                channel, "warn",
-                f"Pump ran unattended ~{run_s:.0f} s (~{dosed_ml:.0f} ml; the dose "
-                f"was {target_ml:.0f} ml) — likely an HA outage mid-dose. "
-                "Ledgers credited honestly; check the tank.")
-    state["haRunStartedAt"] = ""
-    state["haRunEndsAt"] = ""
-    state["haRunTargetMl"] = 0
-    if dosed_ml > 0:
-        state["haDosedTodayMl"] = round(
-            _awc_num(state.get("haDosedTodayMl"), 0, 0, 1e6) + dosed_ml, 2)
-        state["lastDoseAt"] = datetime.now(timezone.utc).isoformat()
-        reservoir = channel.setdefault("reservoir", {})
-        reservoir["remainingMl"] = round(max(
-            0.0, _awc_num(reservoir.get("remainingMl"), 0, 0, DOSING_RESERVOIR_MAX_ML)
-            - dosed_ml), 1)
-        product_id = str(reservoir.get("productId") or "")
-        if product_id and reservoir.get("productIsBottle"):
-            product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
-            if isinstance(product, dict):
-                _consumable_debit(product, dosed_ml, "pump")
-        wear = channel.setdefault("wear", {})
-        wear["runSeconds"] = round(_awc_num(wear.get("runSeconds"), 0, 0, 1e9) + run_s, 1)
-        wear["doseCount"] = int(_awc_num(wear.get("doseCount"), 0, 0, 1e9)) + 1
-        # The same NPS hooks firmware channels get from their dosed-today sensor.
-        await _async_nps_feed_exchange_accrue(hass, entry, cid, dosed_ml, 0.0)
-        if channel.get("chemical") in ("livefood", "food") and not dosing_engine.is_standing(channel):
-            await _async_nps_truce_engage(hass, entry)
-    await _async_dosing_save(hass, entry, config)
+        state = current.setdefault("state", {})
+        target_ml = _awc_num(state.get("haRunTargetMl"), 0, 0, 100000)
+        started = _parse_datetime(state.get("haRunStartedAt"))
+        ends = _parse_datetime(state.get("haRunEndsAt"))
+        run_s = max(0.0, (ends - started).total_seconds()) if started is not None and ends is not None else 0.0
+        reliable = actual_elapsed_s is None and state.get("haRunConfirmed")
+        for key in ("haRunStartedAt", "haRunEndsAt"):
+            state[key] = ""
+        state["haRunTargetMl"] = 0
+        state["haRunConfirmed"] = False
+        if not reliable:
+            current["enabled"] = False
+            _dosing_record_event(current, "warn",
+                "Pump stopped after an interrupted or unconfirmed run. Delivered volume is unknown; "
+                "channel disabled. Check the tank and reservoir before enabling again.")
+        elif target_ml > 0:
+            state["haDosedTodayMl"] = round(_awc_num(state.get("haDosedTodayMl"), 0, 0, 1e6) + target_ml, 2)
+            state["lastDoseAt"] = datetime.now(timezone.utc).isoformat()
+            reservoir = current.setdefault("reservoir", {})
+            reservoir["remainingMl"] = max(0.0, float(reservoir.get("remainingMl") or 0) - target_ml)
+            product_id = str(reservoir.get("productId") or "")
+            if product_id and reservoir.get("productIsBottle"):
+                product = ((fresh.get("consumables") or {}).get("products") or {}).get(product_id)
+                if isinstance(product, dict):
+                    _consumable_debit(product, target_ml, "pump")
+            wear = current.setdefault("wear", {})
+            wear["runSeconds"] = float(wear.get("runSeconds") or 0) + run_s
+            wear["doseCount"] = int(wear.get("doseCount") or 0) + 1
+            truce = current.get("chemical") in ("livefood", "food") and not dosing_engine.is_standing(current)
+        # Single commit: callback/tick/restart cannot double-settle a cleared run.
+        await _async_save_config(hass, entry, fresh)
+        channel.update(deepcopy(current))
+    if truce:
+        await _async_nps_truce_engage(hass, entry)
 
 
 async def _async_dosing_ha_run(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    cid: str, channel: dict[str, Any], target_ml: float, burst_s: float | None = None,
+) -> bool:
+    water_lock = _awc_lock(hass)
+    if getattr(water_lock, "owner", None) is asyncio.current_task():
+        return await _async_dosing_ha_start_locked(hass, entry, config, cid, channel, target_ml, burst_s)
+    if getattr(_dosing_lock(hass), "owner", None) is asyncio.current_task():
+        return False  # never invert AWC -> dosing ownership
+    async with water_lock:
+        return await _async_dosing_ha_start_locked(hass, entry, config, cid, channel, target_ml, burst_s)
+
+
+async def _async_dosing_ha_start_locked(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
+    cid: str, channel: dict[str, Any], target_ml: float, burst_s: float | None = None,
+) -> bool:
+    async with _dosing_lock(hass):
+        if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+            return False
+        latest = _config_from_entry(entry)
+        current = _dosing_channels(latest).get(cid)
+        if ((channel.get("guards") or {}).get("suspendDuringAwc", True)
+                and _dosing_awc_suspended(latest)):
+            return False
+        if (current is None or not (latest.get("dosing") or {}).get("enabled", True)
+                or (current.get("state") or {}).get("haRunEndsAt")
+                or any(current.get(key) != channel.get(key) for key in
+                       ("enabled", "chemical", "driver", "calibration", "guards", "schedule", "reservoir"))
+                or (current.get("state") or {}).get("suspendedUntil") != (channel.get("state") or {}).get("suspendedUntil")):
+            return False
+        # Execute against the fresh ledger as well as fresh settings. A watcher
+        # snapshot must not reset a completed run's daily cap or delivery record.
+        today = dt_util.now().strftime("%Y-%m-%d")
+        current_state = current.setdefault("state", {})
+        if current_state.get("haDoseDate") != today:
+            current_state["haDoseDate"] = today
+            current_state["haDosedTodayMl"] = 0.0
+        started = await _async_dosing_ha_run_locked(hass, entry, latest, cid, current, target_ml, burst_s)
+        channel.update(deepcopy(current))
+        return started
+
+
+async def _async_dosing_ha_run_locked(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     cid: str, channel: dict[str, Any], target_ml: float, burst_s: float | None = None,
 ) -> bool:
@@ -13959,9 +14869,16 @@ async def _async_dosing_ha_run(
     nothing — the prime/calibration ceremony. Arms the stop timer and stamps the
     persisted in-flight trace (the matched-drain pattern). Caller validates
     guards; this validates the physics."""
+    if _automation_binding_errors(config) or channel.get("chemical") == "kalk":
+        return False
+    if (channel.get("state") or {}).get("haRunEndsAt"):
+        return False
     driver = channel.get("driver") or {}
     switch_entity = (driver.get("entities") or {}).get("powerSwitch")
     if not switch_entity:
+        return False
+    switch_state = hass.states.get(switch_entity)
+    if switch_state is None or str(switch_state.state).lower() != "off":
         return False
     cal = channel.get("calibration") or {}
     if burst_s is not None:
@@ -13971,6 +14888,10 @@ async def _async_dosing_ha_run(
         ml_per_s = _awc_num(cal.get("mlPerS"), 0, 0, 200)
         if ml_per_s <= 0 or target_ml <= 0:
             return False
+        maximum = dosing_engine.compile_schedule(channel, None, dt_util.now())["plan"].get("maxDailyMl") or 0
+        already = float((channel.get("state") or {}).get("haDosedTodayMl") or 0)
+        if maximum > 0 and already + target_ml > maximum + 0.001:
+            return False
         runtime_s = awc_engine.runtime_for_volume_s(
             target_ml / 1000.0, ml_per_s, 1.0, _awc_num(cal.get("spinUpMl"), 0, -50, 50))
         if runtime_s <= 0 or runtime_s > DOSING_HA_MAX_DOSE_RUN_S:
@@ -13979,17 +14900,13 @@ async def _async_dosing_ha_run(
                 f"Dose skipped: {target_ml:g} ml needs {runtime_s:.0f} s — over the "
                 f"{DOSING_HA_MAX_DOSE_RUN_S:.0f} s per-dose safety cap (check the flow calibration)")
             return False
-    try:
-        await hass.services.async_call(
-            "switch", "turn_on", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
-    except Exception:  # noqa: BLE001 — nothing started
-        return False
     started = datetime.now(timezone.utc)
     ends = started + timedelta(seconds=runtime_s)
     state = channel.setdefault("state", {})
     state["haRunStartedAt"] = started.isoformat()
     state["haRunEndsAt"] = ends.isoformat()
     state["haRunTargetMl"] = round(float(target_ml), 2)
+    state["haRunConfirmed"] = False
     # Persist the stamps BEFORE arming the timer (the matched-drain rule): a
     # short dose's stop can fire before the tick's own save lands, and the
     # stop path fetches fresh — without this it would find no run to settle.
@@ -14008,7 +14925,26 @@ async def _async_dosing_ha_run(
     rt = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {}) \
         .setdefault("channels", {}).setdefault(cid, {})
     rt["haRunUnsub"] = async_track_point_in_time(hass, _stop, ends)
-    return True
+    # The recovery trace and bounded stop timer exist BEFORE energising. An
+    # accepted command followed by a network error must still have a stop path.
+    if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+        return False
+    try:
+        await hass.services.async_call(
+            "switch", "turn_on", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
+        confirmed = await _async_dosing_wait_state(hass, switch_entity, "on")
+        if confirmed:
+            state["haRunConfirmed"] = True
+            await _async_dosing_save(hass, entry, config)
+            return True
+    except Exception:
+        pass  # command outcome is uncertain; attempt OFF immediately below
+    try:
+        await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: switch_entity}, blocking=True)
+    except Exception:
+        pass
+    return False  # keep the stop timer and persisted trace for reconciliation
+
 
 
 async def _async_dosing_ha_executor(
@@ -14036,14 +14972,22 @@ async def _async_dosing_ha_executor(
             changed = True
         ends = _parse_datetime(state.get("haRunEndsAt"))
         if ends is not None:
-            if now_utc >= ends:
-                # The stop timer missed (reload/latency): settle with the honest
-                # elapsed volume, not the target.
+            until = _parse_datetime(state.get("suspendedUntil"))
+            stop_requested = (not (config.get("dosing") or {}).get("enabled", True)
+                              or not channel.get("enabled")
+                              or (until is not None and until > now_utc)
+                              or ((channel.get("guards") or {}).get("suspendDuringAwc", True)
+                                  and _dosing_awc_suspended(config)))
+            if now_utc >= ends or stop_requested:
+                # The stop timer missed or a stop was requested: the finish
+                # path records uncertainty rather than guessing delivered water.
                 started = _parse_datetime(state.get("haRunStartedAt"))
                 elapsed = max(0.0, (now_utc - started).total_seconds()) if started else 0.0
                 await _async_dosing_ha_finish(
                     hass, entry, config, cid, channel, actual_elapsed_s=elapsed)
                 changed = True
+            continue
+        if not (config.get("dosing") or {}).get("enabled", True):
             continue
         if channel.get("chemical") == "kalk":
             continue  # refused outright — kalk needs firmware failsafes
@@ -14076,6 +15020,8 @@ async def _async_dosing_ha_executor(
             continue
         live = _dosing_live_state(hass, channel, config)
         live["dosedTodayMl"] = dosed_today
+        live["awcActive"] = _dosing_awc_suspended(config)
+        live["now"] = now_utc
         reasons = dosing_engine.guard_reasons(channel, live, now_minutes, False, now_utc)
         if any(r.get("severity") == "block" for r in reasons):
             continue
@@ -14106,6 +15052,26 @@ async def _async_dosing_ha_recover(
             hass, entry, config, cid, channel, actual_elapsed_s=elapsed)
 
 
+async def _async_nps_drain_fault(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], reason: str,
+) -> None:
+    """An uncertain drain must never be replayed or credited as measured water."""
+    fx = (config.get("nps") or {}).get("feedExchange") or {}
+    st = fx.setdefault("state", {})
+    owed = _awc_num(st.get("owedMl"), 0, 0, 1e9)
+    st["droppedMl"] = _awc_num(st.get("droppedMl"), 0, 0, 1e9) + owed
+    st.update({"owedMl": 0, "drainStartedAt": "", "drainEndsAt": "", "drainTargetMl": 0,
+               "lastBlockedReason": "drain_uncertain"})
+    fx["enabled"] = False
+    unsub = hass.data.setdefault(DOMAIN, {}).pop(NPS_DRAIN_UNSUB, None)
+    if unsub is not None:
+        unsub()
+    message = (f"Feed-exchange stopped: {reason}. Actual drainage is unknown; pending drainage was "
+               "cancelled. Correct tank and waste levels before clearing the fault and re-enabling feed exchange")
+    _append_activity(config, message, "warning")
+    await _async_awc_emergency_fault(hass, entry, config, message, None)
+
+
 async def _async_nps_drain_finish(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any],
     drained_ml: float, seconds: float, note: str = "",
@@ -14114,7 +15080,10 @@ async def _async_nps_drain_finish(
     shrinks, the AWC drained ledger grows. Called from the stop timer (full
     planned volume) and from orphan recovery (elapsed-time partial). Caller
     holds the AWC lock."""
-    await _async_awc_stop_pumps(hass, config, ("drain",), None)
+    problem = _awc_running_pump_problem(hass, config, ("drain",))
+    if problem or not await _async_awc_stop_pumps(hass, config, ("drain",), None):
+        await _async_nps_drain_fault(hass, entry, config, problem or "drain pump OFF was not confirmed")
+        return
     acfg = _awc_cfg(config)
     _awc_bump_odometer(acfg, "drain", seconds=seconds)
     drained_ml = max(0.0, float(drained_ml or 0))
@@ -14164,6 +15133,8 @@ async def _async_nps_matched_drain_maybe(
         fx_state = fx.setdefault("state", {})
         if acfg.get("state", {}).get("status") != "idle":
             return False
+        if store.get(AWC_CALRUN_UNSUB) is not None or store.get(NPS_DRAIN_UNSUB) is not None:
+            return False
 
         async def _note_blocked(reason_code: str, message: str) -> None:
             # Activity once per distinct blocker, not once per minute.
@@ -14172,6 +15143,14 @@ async def _async_nps_matched_drain_maybe(
                 _append_activity(config, f"Feed-exchange drain waiting: {message}", "warning")
                 await _async_save_config(hass, entry, config)
 
+        linked_channel = _dosing_channels(config).get(str(fx.get("channelId") or ""))
+        if linked_channel is not None and dosing_engine.is_ha_timed(linked_channel):
+            await _note_blocked("unverified_source", "matched drainage requires confirmed firmware dose telemetry")
+            return False
+        binding_errors = _automation_binding_errors(config)
+        if binding_errors and not _awc_sim_enabled(config):
+            await _note_blocked("unsafe_binding", next(iter(binding_errors.values())))
+            return False
         live = _awc_live_state(hass, config)
         # fill_role="drain" narrows the pump checks to the drain alone — a
         # matched drain needs no fill source. Hazard/fail-closed/quiet-hours
@@ -14185,6 +15164,9 @@ async def _async_nps_matched_drain_maybe(
         waste = (acfg.get("reservoirs") or {}).get("waste") or {}
         headroom_ml = None
         cap_l = _awc_num(waste.get("capacityLitres"), 0, 0, 100000)
+        if cap_l <= 0:
+            await _note_blocked("waste_capacity_unknown", "set the waste reservoir capacity first")
+            return False
         if cap_l > 0:
             headroom_ml = max(
                 0.0, cap_l * 1000.0 - _awc_num(waste.get("filledMl"), 0, 0, 1e9))
@@ -14207,7 +15189,7 @@ async def _async_nps_matched_drain_maybe(
             return False
         # Never exceed the safety max-runtime (the firmware watchdog would
         # fail-lock the pump): shrink the batch to fit; the rest stays owed.
-        max_run_s = _awc_num((acfg.get("safety") or {}).get("maxRuntimeSeconds"), 0, 0, 36000)
+        max_run_s = _awc_run_limit_seconds(config)
         if max_run_s > 0 and runtime_s > max_run_s:
             batch_ml = max(0.0, awc_engine.volume_for_runtime_l(
                 max_run_s, ml_per_s, factor, spin_up) * 1000.0)
@@ -14216,8 +15198,8 @@ async def _async_nps_matched_drain_maybe(
                 return False
         try:
             await _async_awc_set_pump(hass, config, "drain", True, None)
-        except Exception:  # noqa: BLE001 — nothing started; try again next tick
-            await _note_blocked("pump_start_failed", "the drain pump did not switch on")
+        except Exception:  # noqa: BLE001 — dispatch may have reached the actuator
+            await _async_nps_drain_fault(hass, entry, config, "drain pump ON was not confirmed")
             return False
         started_at = datetime.now(timezone.utc)
         ends_at = started_at + timedelta(seconds=runtime_s)
@@ -14230,9 +15212,31 @@ async def _async_nps_matched_drain_maybe(
                 if latest is None:
                     return
                 cfg = _config_from_entry(latest)
-                await _async_nps_drain_finish(hass, latest, cfg, batch_ml, runtime_s)
+                latest_state = ((cfg.get("nps") or {}).get("feedExchange") or {}).get("state") or {}
+                if not latest_state.get("drainStartedAt"):
+                    return
+                try:
+                    verdict = awc_engine.in_run_safety(_awc_cfg(cfg), _awc_live_state(hass, cfg), True, False)
+                    problem = _awc_running_pump_problem(hass, cfg, ("drain",))
+                    if verdict["action"] != "ok" or problem:
+                        await _async_nps_drain_fault(hass, latest, cfg, problem or verdict["reason"])
+                        return
+                    finish_at = _parse_datetime(latest_state.get("drainEndsAt"))
+                    now = datetime.now(timezone.utc)
+                    if finish_at is None or now > finish_at + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS):
+                        await _async_nps_drain_fault(hass, latest, cfg, "drain timer missed its deadline")
+                        return
+                    if now < finish_at:
+                        store[NPS_DRAIN_UNSUB] = async_track_point_in_time(
+                            hass, _stop, min(finish_at, now + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS)))
+                        return
+                    await _async_nps_drain_finish(hass, latest, cfg, batch_ml, runtime_s)
+                except Exception:
+                    await _async_nps_drain_fault(hass, latest, cfg, "drain control or persistence failed")
+                    raise
 
-        store[NPS_DRAIN_UNSUB] = async_track_point_in_time(hass, _stop, ends_at)
+        store[NPS_DRAIN_UNSUB] = async_track_point_in_time(
+            hass, _stop, min(ends_at, started_at + timedelta(seconds=AWC_EXCHANGE_TICK_SECONDS)))
         # Persist the in-flight run: the stop timer is in-memory only, so these
         # stamps are the sole trace a restart has for stopping the orphan.
         fx_state["drainStartedAt"] = started_at.isoformat()
@@ -14243,7 +15247,11 @@ async def _async_nps_matched_drain_maybe(
             config,
             f"Feed-exchange drain started: {batch_ml:.0f} ml (~{runtime_s:.0f} s) to match "
             "live-food dosing", "control")
-        await _async_save_config(hass, entry, config)
+        try:
+            await _async_save_config(hass, entry, config)
+        except Exception:
+            await _async_nps_drain_fault(hass, entry, config, "drain start could not be saved")
+            raise
         # Optional camera trace (opt-in trigger): the feeding journal writes itself.
         _dispatch_capture(hass, entry, "nps_feed_exchange",
                           f"Feed-exchange drain {batch_ml:.0f} ml")
@@ -14253,31 +15261,13 @@ async def _async_nps_matched_drain_maybe(
 async def _async_nps_recover_orphaned_drain(
     hass: HomeAssistant, entry: OpenReefConfigEntry
 ) -> None:
-    """A matched drain's stop timer is in-memory only: if HA restarted mid-run,
-    the drain pump is still physically running with nothing armed to stop it.
-    The persisted drainStartedAt/TargetMl stamps are the trace — stop it and
-    credit the elapsed-time partial volume (the interrupted-leg pattern)."""
+    """Stop and latch an orphaned drain; wall-clock downtime does not prove flow."""
     peek = (_config_from_entry(entry).get("nps") or {}).get("feedExchange") or {}
     if not (peek.get("state") or {}).get("drainStartedAt"):
         return
     async with _awc_lock(hass):
         config = _config_from_entry(entry)
-        fx = (config.get("nps") or {}).get("feedExchange") or {}
-        st = fx.get("state") or {}
-        started = _parse_datetime(st.get("drainStartedAt"))
-        target_ml = _awc_num(st.get("drainTargetMl"), 0, 0, 100000)
-        pump = (_awc_cfg(config).get("pumps") or {}).get("drain") or {}
-        elapsed_s = 0.0
-        if started is not None:
-            elapsed_s = max(0.0, (datetime.now(timezone.utc) - started).total_seconds())
-        moved_ml = min(target_ml, max(0.0, awc_engine.volume_for_runtime_l(
-            elapsed_s,
-            _awc_num(pump.get("mlPerS"), 0, 0, 1000),
-            _awc_num(pump.get("exchangeFactor"), 1.0, 0.1, 10),
-            _awc_num(pump.get("spinUpMl"), 0, -50, 50)) * 1000.0))
-        await _async_nps_drain_finish(
-            hass, entry, config, moved_ml, elapsed_s,
-            note=" (interrupted by a restart — elapsed-time credit)")
+        await _async_nps_drain_fault(hass, entry, config, "drain interrupted by a restart")
 
 
 async def _async_dosing_fire_queued(
@@ -14286,56 +15276,57 @@ async def _async_dosing_fire_queued(
     """Fire (or re-schedule, or drop) the queued spacing-deferred dose. Peeked from
     the tick's snapshot; every mutation happens on a FRESH fetch + save so the
     tick's graft-save never carries (or clobbers) spacing state."""
-    not_before = _parse_datetime(queued_peek.get("notBefore"))
-    if not_before is not None and not_before > datetime.now(timezone.utc):
-        return
-    config = _config_from_entry(entry)
-    spacing = config.get("dosing", {}).get("spacing", {})
-    queued = spacing.get("queued")
-    if not queued:
-        return
-    cid = str(queued.get("channelId") or "")
-    channel = _dosing_channels(config).get(cid)
-    if channel is None:
-        spacing["queued"] = None
-        await _async_save_config(hass, entry, config)
-        return
-    verdict = dosing_engine.spacing_verdict(
-        spacing, channel.get("chemical"), _dosing_group_last_dose(hass, config),
-        datetime.now(timezone.utc))
-    if not verdict["ok"]:
-        # Another group dosed meanwhile — push the slot forward, never spin.
-        spacing["queued"] = {**queued, "notBefore": (
-            datetime.now(timezone.utc) + timedelta(minutes=verdict["waitMinutes"])
-        ).isoformat()}
-        await _async_save_config(hass, entry, config)
-        return
-    # The ordinary manual gates re-apply at FIRE time (fail-closed: a channel that
-    # went stale/uncalibrated/suspended while queued must not dose).
-    now_local = dt_util.now()
-    live = _dosing_live_state(hass, channel, config)
-    live["awcActive"] = _dosing_awc_suspended(config)
-    live["now"] = datetime.now(timezone.utc)
-    blocked = [
-        r for r in dosing_engine.guard_reasons(
-            channel, live, now_local.hour * 60 + now_local.minute, manual=True,
-            now=datetime.now(timezone.utc))
-        if r["severity"] == "block" and r["code"] != "disabled"
-    ]
-    if blocked:
+    async with _dosing_lock(hass):
+        not_before = _parse_datetime(queued_peek.get("notBefore"))
+        if not_before is not None and not_before > datetime.now(timezone.utc):
+            return
+        config = _config_from_entry(entry)
+        spacing = config.get("dosing", {}).get("spacing", {})
+        queued = spacing.get("queued")
+        if not queued:
+            return
+        cid = str(queued.get("channelId") or "")
+        channel = _dosing_channels(config).get(cid)
+        if channel is None:
+            spacing["queued"] = None
+            await _async_save_config(hass, entry, config)
+            return
+        verdict = dosing_engine.spacing_verdict(
+            spacing, channel.get("chemical"), _dosing_group_last_dose(hass, config),
+            datetime.now(timezone.utc))
+        if not verdict["ok"]:
+            # Another group dosed meanwhile — push the slot forward, never spin.
+            spacing["queued"] = {**queued, "notBefore": (
+                datetime.now(timezone.utc) + timedelta(minutes=verdict["waitMinutes"])
+            ).isoformat()}
+            await _async_save_config(hass, entry, config)
+            return
+        # The ordinary manual gates re-apply at FIRE time (fail-closed: a channel that
+        # went stale/uncalibrated/suspended while queued must not dose).
+        now_local = dt_util.now()
+        live = _dosing_live_state(hass, channel, config)
+        live["awcActive"] = _dosing_awc_suspended(config)
+        live["now"] = datetime.now(timezone.utc)
+        blocked = [
+            r for r in dosing_engine.guard_reasons(
+                channel, live, now_local.hour * 60 + now_local.minute, manual=True,
+                now=datetime.now(timezone.utc))
+            if r["severity"] == "block" and r["code"] != "disabled"
+        ]
+        if blocked:
+            spacing["queued"] = None
+            _dosing_record_event(
+                channel, "spacing_queue", f"Queued dose dropped — {blocked[0]['code']}")
+            await _async_save_config(hass, entry, config)
+            return
+        ml = _awc_num(queued.get("ml"), 0, 0, DOSING_MAX_PER_DOSE_ML)
+        fired = ml > 0 and await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=cid)
         spacing["queued"] = None
         _dosing_record_event(
-            channel, "spacing_queue", f"Queued dose dropped — {blocked[0]['code']}")
+            channel, "spacing_queue",
+            f"Queued {ml:g} ml dose fired — spacing gap clear" if fired
+            else "Queued dose dropped — manual-dose button not bound")
         await _async_save_config(hass, entry, config)
-        return
-    ml = _awc_num(queued.get("ml"), 0, 0, DOSING_MAX_PER_DOSE_ML)
-    fired = ml > 0 and await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=cid)
-    spacing["queued"] = None
-    _dosing_record_event(
-        channel, "spacing_queue",
-        f"Queued {ml:g} ml dose fired — spacing gap clear" if fired
-        else "Queued dose dropped — manual-dose button not bound")
-    await _async_save_config(hass, entry, config)
 
 
 async def _async_nps_hatch_ready_push(
@@ -14467,11 +15458,80 @@ async def _async_nps_hatch_ready_push(
         _persist_entry_config(hass, entry, config)
 
 
+async def _async_dosing_account_observation(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, snapshot: dict[str, Any],
+    cid: str, channel: dict[str, Any], observed_ml: float, proposed_delta: float, now: datetime,
+) -> None:
+    """Atomically commit observed input and its matching-drain obligation.
+
+    The cumulative sample is the idempotency key. Never persist drain credit
+    without persisting the matching sample, even if HA restarts after this save.
+    """
+    async with _awc_lock(hass), _dosing_lock(hass):
+        config = _config_from_entry(entry)
+        current = _dosing_channels(config).get(cid)
+        if current is None:
+            return
+        state = current.setdefault("state", {})
+        previous_at = _parse_datetime(state.get("lastSensorAt"))
+        if previous_at is not None and previous_at > now:
+            return  # a slower watcher must not replay a newer committed sample as a reset
+        previous = float(state.get("lastSensorMl") or 0)
+        if state.get("lastSensorAt"):
+            delta = observed_ml if observed_ml < previous else max(0.0, observed_ml - previous)
+        else:
+            delta = proposed_delta  # first baseline is established without old-dose credit
+        state["lastSensorMl"] = observed_ml
+        state["lastSensorAt"] = now.isoformat()
+        if delta > 0:
+            state["lastDoseAt"] = now.isoformat()
+            reservoir = current.setdefault("reservoir", {})
+            reservoir["remainingMl"] = max(0.0, float(reservoir.get("remainingMl") or 0) - delta)
+            product_id = str(reservoir.get("productId") or "")
+            if product_id and reservoir.get("productIsBottle"):
+                product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
+                if isinstance(product, dict):
+                    _consumable_debit(product, delta, "pump", coalesce_day=dosing_engine.is_standing(current))
+            cal = current.get("calibration") or {}
+            wear = current.setdefault("wear", {})
+            if dosing_engine.is_brushed(current):
+                flow = float(cal.get("mlPerS") or 0)
+                run_seconds = delta / flow if flow > 0 else 0
+            else:
+                entities = (current.get("driver") or {}).get("entities") or {}
+                speed_state = hass.states.get(entities.get("doseSpeedNumber", ""))
+                speed = _awc_num(speed_state.state, 400, 1, 1e6) if speed_state is not None else 400
+                run_seconds = dosing_engine.tube_wear_increment(delta, cal.get("stepsPerMl") or 0, speed)
+            wear["runSeconds"] = float(wear.get("runSeconds") or 0) + run_seconds
+            per_dose = dosing_engine.compile_schedule(current, None, dt_util.now())["plan"].get("perDoseMl") or 0
+            wear["doseCount"] = int(wear.get("doseCount") or 0) + (max(1, round(delta / per_dose)) if per_dose > 0 else 1)
+            fx = (config.get("nps") or {}).get("feedExchange") or {}
+            if fx.get("enabled") and str(fx.get("channelId") or "") == cid:
+                fx_state = fx.setdefault("state", {})
+                owed, dropped = nps_engine.feed_exchange_owed(fx_state.get("owedMl"), delta, 0.0, fx.get("maxOwedMl"))
+                fx_state["owedMl"] = owed
+                if dropped:
+                    fx_state["droppedMl"] = float(fx_state.get("droppedMl") or 0) + dropped
+                    _append_activity(config, f"Feed-exchange cap reached — {dropped:.0f} ml requires manual review", "warning")
+                ledger = _awc_cfg(config).setdefault("ledger", {})
+                ledger["cumulativeFilledL"] = round(float(ledger.get("cumulativeFilledL") or 0) + delta / 1000, 3)
+        await _async_save_config(hass, entry, config)
+        # The caller's later runtime flush must not restore pre-accounting totals.
+        channel["reservoir"] = deepcopy(current.get("reservoir") or {})
+        channel["wear"] = deepcopy(current.get("wear") or {})
+        for key in ("lastSensorMl", "lastSensorAt", "lastDoseAt"):
+            if key in state:
+                channel.setdefault("state", {})[key] = state[key]
+        snapshot["consumables"] = deepcopy(config.get("consumables") or {})
+
+
 async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
     """The 60 s watcher. Accounting deltas accumulate in hass.data and flush to the
     config blob hourly or on a transition — kalk doses ~144x/day and every blob save
     runs the full pipeline, so per-dose saves are deliberately off the table (per-dose
     granularity lives in the recorder history of the firmware's Dosed Today sensor)."""
+    if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+        return
     # Feed-truce restore backstop (Stage C): stamp-driven, fetch-fresh — runs
     # before the snapshot below so a restore can never be clobbered by it.
     await _async_nps_truce_tick(hass, entry)
@@ -14484,6 +15544,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     await _async_nps_hatch_ready_push(hass, entry)
 
     config = _config_from_entry(entry)
+    watcher_base = deepcopy(config)
     channels = _dosing_channels(config)
     if not channels:
         return
@@ -14521,7 +15582,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 new_ml = float(sensor_state.state)
             except (TypeError, ValueError):
                 new_ml = None
-            if new_ml is not None:
+            if new_ml is not None and math.isfinite(new_ml) and new_ml >= 0:
                 sensor_trusted = True
                 prev = rt.get("lastSensorMl")
                 if prev is None:
@@ -14538,15 +15599,10 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                     state["rolloverAnomaly"] = not near_midnight
                     gap = 0.0
                     if near_midnight:
-                        # Pre-midnight blind window (R34): doses landing between the
-                        # tick's last sample and the firmware reset would otherwise
-                        # never be debited from reservoir/wear. Reconcile against
-                        # the plan, clamped to the daily cap headroom.
-                        if channel.get("enabled") and channel.get("schedule", {}).get("enabled"):
-                            expected_eod = dosing_engine.expected_dosed_ml(plan, 1440)
-                            max_daily = plan.get("maxDailyMl") or 0
-                            headroom = max(0.0, max_daily - prev) if max_daily > 0 else float("inf")
-                            gap = min(max(0.0, expected_eod - prev), headroom)
+                        # A reset hides any unobserved last-minute doses.
+                        # Record the measured total only. A planned dose is not
+                        # evidence that water entered the tank, and must never
+                        # create an automatic matched-drain obligation.
                         log = channel.setdefault("dailyLog", [])
                         log.insert(0, {
                             "date": (now_local.date() - timedelta(days=1)).isoformat(),
@@ -14581,45 +15637,14 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 if delta > 0:
                     rt["lastDoseAt"] = now_utc.isoformat()
                     state["lastDoseAt"] = now_utc.isoformat()
-                    rt["pendingReservoirMl"] = rt.get("pendingReservoirMl", 0.0) + delta
-                    speed = 400.0
-                    speed_ent = entities.get("doseSpeedNumber")
-                    if speed_ent:
-                        speed_state = hass.states.get(speed_ent)
-                        if speed_state is not None and speed_state.state not in UNAVAILABLE_STATES:
-                            try:
-                                speed = float(speed_state.state) or speed
-                            except (TypeError, ValueError):
-                                pass
-                    rt["pendingRunSeconds"] = rt.get("pendingRunSeconds", 0.0) + dosing_engine.tube_wear_increment(
-                        delta, channel.get("calibration", {}).get("stepsPerMl") or 0, speed
-                    )
-                    per_dose = plan.get("perDoseMl") or 0
-                    if per_dose > 0:
-                        rt["pendingDoses"] = rt.get("pendingDoses", 0) + max(1, round(delta / per_dose))
-                    # Post-dose fresh chaser (brushed live-food heads): the firmware
-                    # ran a rinse from the AWC fresh line after each dose — debit the
-                    # AWC models for it, unless the firmware says it skipped (the AWC
-                    # owned the fresh pump at the time).
-                    chaser_s = _awc_num(channel.get("chaserSeconds"), 0, 0, 120)
-                    chaser_credit_ml = 0.0
-                    if chaser_s > 0 and dosing_engine.is_brushed(channel):
-                        skipped_ent = entities.get("chaserSkippedSensor")
-                        skipped_state = hass.states.get(skipped_ent) if skipped_ent else None
-                        skipped = (skipped_state is not None
-                                   and str(skipped_state.state).lower() == "on")
-                        flow = _awc_num(channel.get("calibration", {}).get("mlPerS"), 0, 0, 200)
-                        doses = max(1, round(delta / per_dose)) if per_dose > 0 else 1
-                        if not skipped and flow > 0:
-                            chaser_credit_ml = chaser_s * flow * doses
-                            await _async_awc_credit_chaser_fill(
-                                hass, entry, chaser_credit_ml)
-                    # Feed-exchange (Stage B): the dose AND its chaser rinse are
-                    # water IN — bank both as owed matched drain. The chaser is
-                    # the bigger number at brine scale; skipping it would leave
-                    # the tank creeping up every feeding day.
-                    await _async_nps_feed_exchange_accrue(
-                        hass, entry, cid, delta, chaser_credit_ml)
+                if (delta > 0 or new_ml != float(state.get("lastSensorMl") or 0)
+                        or not state.get("lastSensorAt")):
+                    # Persist the sensor baseline and water-accounting effects
+                    # together. Restarting between hourly ledger flushes must
+                    # never bank the same matched drain twice.
+                    await _async_dosing_account_observation(hass, entry, config, cid, channel, new_ml, delta, now_utc)
+                    transition = True
+                if delta > 0:
                     # Feed truce (Stage C): a food dose landed — pause UV/ozone/
                     # skimmer for their windows so the food survives to be eaten.
                     # A standing drip's pulses never do (phyto-drip §5.5): sixty
@@ -14635,41 +15660,16 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
             _async_kick_dosing_sync(hass, entry)
             transition = True
 
-        # --- suspend-switch reconciliation (R3): the firmware's 4 h auto-expiry is
-        # a dead-man for a DEAD HA — a live HA must re-assert the hold every tick
-        # so a 24 h panic lockout (or a long AWC fault hold) never silently lapses
-        # at hour 4; conversely a lapsed lockout releases on time, not at expiry.
-        suspend_ent = entities.get("haSuspendSwitch")
-        if suspend_ent:
-            suspend_state = hass.states.get(suspend_ent)
-            if suspend_state is not None and suspend_state.state not in UNAVAILABLE_STATES:
-                until = _parse_datetime(state.get("suspendedUntil"))
-                lockout_active = until is not None and until > now_utc
-                awc_hold = (
-                    bool(channel.get("guards", {}).get("suspendDuringAwc", True))
-                    and _dosing_awc_suspended(config)
-                )
-                switch_on = str(suspend_state.state).lower() == "on"
-                if lockout_active or awc_hold:
-                    # (Re)assert even when already on: the turn_on restarts the
-                    # firmware's auto-expiry window.
-                    await hass.services.async_call(
-                        "switch", "turn_on", {ATTR_ENTITY_ID: suspend_ent}, blocking=True
-                    )
-                elif switch_on:
-                    await hass.services.async_call(
-                        "switch", "turn_off", {ATTR_ENTITY_ID: suspend_ent}, blocking=True
-                    )
-                if until is not None and not lockout_active and state.get("suspendedUntil"):
-                    state["suspendedUntil"] = ""
-                    transition = True
+        # Re-fetch after accounting/notifications: a newer panic or AWC hold
+        # must never be released by this watcher's earlier idle snapshot.
+        await _async_dosing_reconcile_suspend(hass, entry, cid)
 
         # --- live-food freshness posture (Stage C): the firmware can't see
         # freshness, so HA owns the signal and the device holds the posture — the
         # enable switch is asserted OFF every tick while the culture is stale
         # (mirror of the suspend re-assertion above); after a refresh the sync's
         # desired-switches path turns it back on.
-        if channel.get("chemical") == "livefood":
+        if channel.get("chemical") in ("livefood", "food"):
             fresh = _dosing_food_freshness(channel, now_utc, config)
             was_stale = bool(rt.get("staleFood"))
             is_stale = fresh["status"] in ("stale", "soaking")
@@ -14699,20 +15699,6 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 # Fresh again (mark_refreshed landed): re-assert the desired ON state
                 # promptly rather than waiting for drift repair.
                 _async_kick_dosing_sync(hass, entry)
-        elif channel.get("chemical") == "food" and dosing_engine.is_standing(channel):
-            # The drip's jar past its day is a nag, never a stop (phyto-drip
-            # §5.4): the pump keeps running, the keeper gets one push a day.
-            fresh = _dosing_food_freshness(channel, now_utc, config)
-            if fresh["status"] == "stale":
-                if _dosing_notify_enabled(config, "staleFood"):
-                    await _async_dosing_notify_once(
-                        hass, config, runtime, f"stale_{cid}", 20 * 3600,
-                        "Load today's phyto",
-                        f"{channel.get('name') or cid}: the jar is past its day — "
-                        "load fresh phyto and tap 'Loaded'.")
-            else:
-                runtime.setdefault("notified", {}).pop(f"stale_{cid}", None)
-
         # --- missed-dose watcher (baselined, availability-gated, 2-tick debounce) ----
         # The baseline anchors "expected" to the moment the current plan took effect,
         # so a mid-day schedule edit or enable-flip can never manufacture a phantom
@@ -14845,6 +15831,8 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
         # swallow a future GENUINE external-edit notification.
         rt.pop("suppressDriftNotify", None)
 
+    _async_kick_dosing_sync(hass, entry)  # renew only after all device values verify
+
     # --- ha_switch_timed executor (Stage C): HA-side scheduling for generic pumps ------
     if await _async_dosing_ha_executor(hass, entry, config, now_utc, now_local, lighting_off):
         transition = True
@@ -14887,7 +15875,7 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
                 state["lastSensorMl"] = rt["lastSensorMl"]
                 state["lastSensorAt"] = now_utc.isoformat()
         runtime["lastFlushAt"] = now_utc.isoformat()
-        await _async_dosing_save(hass, entry, config)
+        await _async_dosing_save(hass, entry, config, watcher_base=watcher_base)
 
 
 # --- Dosing WebSocket API -------------------------------------------------------------------
@@ -14901,14 +15889,59 @@ def _dosing_channel_for_msg(
     return channel
 
 
+async def _async_dosing_service_press(
+    hass: HomeAssistant, entry: OpenReefConfigEntry, cid: str, role: str,
+) -> dict[str, Any] | None:
+    """Persist the bounded maintenance-run trace before touching a motor button."""
+    async with _dosing_lock(hass):
+        config = _config_from_entry(entry)
+        channel = _dosing_channels(config).get(cid)
+        if channel is None or _automation_binding_errors(config):
+            return None
+        state = channel.setdefault("state", {})
+        until = _parse_datetime(state.get("serviceRunUntil"))
+        now = datetime.now(timezone.utc)
+        if until is not None and until > now:
+            return None
+        if role == "primeButton":
+            seconds = 15.0
+            kind, detail = "prime", "Requested one bounded prime (~5 s)"
+            channel.setdefault("reservoir", {})["primedAt"] = now.isoformat()
+        elif dosing_engine.is_brushed(channel):
+            seconds = 40.0
+            kind, detail = "calibrate_run", "30 s calibration burst requested"
+        else:
+            entities = (channel.get("driver") or {}).get("entities") or {}
+            observed = hass.states.get(entities.get("doseSpeedNumber", ""))
+            speed = _awc_num(observed.state, 50, 50, 2000) if observed is not None else 50
+            seconds = min(7200.0, 5.0 + 1.5 * 320000.0 / speed)  # firmware watchdog bound
+            kind, detail = "calibrate_run", "100-revolution calibration run requested"
+        state["serviceRunUntil"] = (now + timedelta(seconds=seconds)).isoformat()
+        _dosing_record_event(channel, kind, detail)
+        config = await _async_save_config(hass, entry, config)
+        channel = _dosing_channels(config)[cid]
+        if not await _async_dosing_press(hass, channel, role):
+            # Keep the stamp: a service exception can follow an accepted command.
+            return None
+        return config
+
+
 async def _async_dosing_press(hass: HomeAssistant, channel: dict[str, Any], role: str) -> bool:
+    if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+        return False
+    entry = _first_entry(hass)
+    if entry is not None and _automation_binding_errors(_config_from_entry(entry)):
+        return False
     ent = channel.get("driver", {}).get("entities", {}).get(role)
     if not ent:
         return False
     state = hass.states.get(ent)
-    if state is None or state.state in UNAVAILABLE_STATES:
+    if state is None or str(state.state).lower() == "unavailable":
         return False
-    await hass.services.async_call("button", "press", {ATTR_ENTITY_ID: ent}, blocking=True)
+    try:
+        await hass.services.async_call("button", "press", {ATTR_ENTITY_ID: ent}, blocking=True)
+    except Exception:
+        return False  # never retry an actuator command with an uncertain outcome
     return True
 
 
@@ -15011,39 +16044,37 @@ async def websocket_dosing_calibrate_start(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Press the firmware's bounded 100-revolution calibration button."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    if dosing_engine.is_ha_timed(channel):
-        # Generic adapter: no firmware button — a raw timed 30 s burst into the
-        # measuring vessel (credits nothing; the run stamps make it crash-safe).
-        if (channel.get("state") or {}).get("haRunEndsAt"):
-            connection.send_error(msg["id"], "busy", "The pump is already running")
+    async with _awc_lock(hass), _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
             return
-        if not await _async_dosing_ha_run(
-                hass, entry, config, msg["channel_id"], channel, 0.0,
-                burst_s=DOSING_BRUSHED_CAL_RUN_S):
-            connection.send_error(msg["id"], "not_bound",
-                                  "Bind the pump switch entity first")
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
             return
-        _dosing_record_event(channel, "calibrate_run", "30 s calibration burst started")
-        config = await _async_save_config(hass, entry, config)
+        if dosing_engine.is_ha_timed(channel):
+            # Generic adapter: no firmware button — a raw timed 30 s burst into the
+            # measuring vessel (credits nothing; the run stamps make it crash-safe).
+            if (channel.get("state") or {}).get("haRunEndsAt"):
+                connection.send_error(msg["id"], "busy", "The pump is already running")
+                return
+            if not await _async_dosing_ha_run(
+                    hass, entry, config, msg["channel_id"], channel, 0.0,
+                    burst_s=DOSING_BRUSHED_CAL_RUN_S):
+                connection.send_error(msg["id"], "not_bound",
+                                      "Bind the pump switch entity first")
+                return
+            _dosing_record_event(channel, "calibrate_run", "30 s calibration burst started")
+            await _async_dosing_save(hass, entry, config)
+            config = _config_from_entry(entry)
+            _awc_send(connection, msg, hass, config)
+            return
+        config = await _async_dosing_service_press(hass, entry, msg["channel_id"], "calibrateButton")
+        if config is None:
+            connection.send_error(msg["id"], "not_bound", "Pump busy, conflicting bindings, or calibration button unavailable")
+            return
         _awc_send(connection, msg, hass, config)
-        return
-    if not await _async_dosing_press(hass, channel, "calibrateButton"):
-        connection.send_error(msg["id"], "not_bound", "Calibrate button entity is not bound or unavailable")
-        return
-    _dosing_record_event(
-        channel, "calibrate_run",
-        "30 s calibration burst started" if dosing_engine.is_brushed(channel)
-        else "100-revolution calibration run started")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -15059,53 +16090,54 @@ async def websocket_dosing_calibrate(
     """Store the measured 100-rev volume: derive steps/ml, append the drift-comparison
     history entry (AWC overwrites; dosing deliberately keeps history), and push the
     value to the firmware with read-back verification."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    now_iso = datetime.now(timezone.utc).isoformat()
-    cal = channel.setdefault("calibration", {})
-    history = cal.setdefault("history", [])
-    if dosing_engine.is_brushed(channel) or dosing_engine.is_ha_timed(channel):
-        # Flow-calibrated drivers (brushed heads, generic HA switches) calibrate
-        # in ml/s from the fixed 30 s burst.
-        ml_per_s = dosing_engine.brushed_calibration_from_run(msg["measured_ml"])
-        if ml_per_s <= 0:
-            connection.send_error(msg["id"], "invalid_measurement",
-                                  "Measured volume must be positive")
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
             return
-        derived = {"mlPerS": ml_per_s, "measuredMl": round(float(msg["measured_ml"]), 1)}
-        history.insert(0, {"mlPerS": ml_per_s, "measuredMl": derived["measuredMl"],
-                           "calibratedAt": now_iso})
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cal = channel.setdefault("calibration", {})
+        history = cal.setdefault("history", [])
+        if dosing_engine.is_brushed(channel) or dosing_engine.is_ha_timed(channel):
+            # Flow-calibrated drivers (brushed heads, generic HA switches) calibrate
+            # in ml/s from the fixed 30 s burst.
+            ml_per_s = dosing_engine.brushed_calibration_from_run(msg["measured_ml"])
+            if ml_per_s <= 0:
+                connection.send_error(msg["id"], "invalid_measurement",
+                                      "Measured volume must be positive")
+                return
+            derived = {"mlPerS": ml_per_s, "measuredMl": round(float(msg["measured_ml"]), 1)}
+            history.insert(0, {"mlPerS": ml_per_s, "measuredMl": derived["measuredMl"],
+                               "calibratedAt": now_iso})
+            del history[DOSING_CAL_HISTORY_MAX:]
+            cal["mlPerS"] = ml_per_s
+            cal["measuredMl"] = derived["measuredMl"]
+            cal["calibratedAt"] = now_iso
+            cal["syncedToDevice"] = False
+            _dosing_record_event(channel, "calibrated",
+                                 f"{ml_per_s:g} ml/s from {derived['measuredMl']:g} ml in 30 s")
+            config = await _async_save_config(hass, entry, config)
+            _async_kick_dosing_sync(hass, entry)
+            _awc_send(connection, msg, hass, config, calibration=derived)
+            return
+        derived = dosing_engine.calibration_from_measured(msg["measured_ml"])
+        if derived is None:
+            connection.send_error(msg["id"], "invalid_measurement", "Measured volume must be 1–1000 ml")
+            return
+        history.insert(0, {"stepsPerMl": derived["stepsPerMl"], "measuredMl": derived["measuredMl"], "calibratedAt": now_iso})
         del history[DOSING_CAL_HISTORY_MAX:]
-        cal["mlPerS"] = ml_per_s
+        cal["stepsPerMl"] = derived["stepsPerMl"]
         cal["measuredMl"] = derived["measuredMl"]
         cal["calibratedAt"] = now_iso
         cal["syncedToDevice"] = False
-        _dosing_record_event(channel, "calibrated",
-                             f"{ml_per_s:g} ml/s from {derived['measuredMl']:g} ml in 30 s")
+        _dosing_record_event(channel, "calibrated", f"{derived['stepsPerMl']:.1f} steps/ml from {derived['measuredMl']:g} ml")
         config = await _async_save_config(hass, entry, config)
         _async_kick_dosing_sync(hass, entry)
         _awc_send(connection, msg, hass, config, calibration=derived)
-        return
-    derived = dosing_engine.calibration_from_measured(msg["measured_ml"])
-    if derived is None:
-        connection.send_error(msg["id"], "invalid_measurement", "Measured volume must be 1–1000 ml")
-        return
-    history.insert(0, {"stepsPerMl": derived["stepsPerMl"], "measuredMl": derived["measuredMl"], "calibratedAt": now_iso})
-    del history[DOSING_CAL_HISTORY_MAX:]
-    cal["stepsPerMl"] = derived["stepsPerMl"]
-    cal["measuredMl"] = derived["measuredMl"]
-    cal["calibratedAt"] = now_iso
-    cal["syncedToDevice"] = False
-    _dosing_record_event(channel, "calibrated", f"{derived['stepsPerMl']:.1f} steps/ml from {derived['measuredMl']:g} ml")
-    config = await _async_save_config(hass, entry, config)
-    _async_kick_dosing_sync(hass, entry)
-    _awc_send(connection, msg, hass, config, calibration=derived)
 
 
 @websocket_api.websocket_command({
@@ -15122,81 +16154,84 @@ async def websocket_dosing_dose_now(
     """Bounded manual dose — never an unbounded ON (Apex's OFF/AUTO/ON tri-state
     caused a verified 4x overdose). The volume rides the firmware's guarded
     manual-dose script, so the same guard chain and daily accounting apply."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    ml = float(msg["ml"])
-    max_ml = min(channel.get("guards", {}).get("maxPerDoseMl") or DOSING_MAX_PER_DOSE_ML, DOSING_MAX_PER_DOSE_ML)
-    if not 0 < ml <= max_ml:
-        connection.send_error(msg["id"], "dose_out_of_bounds", f"Manual dose must be 0–{max_ml:g} ml")
-        return
-    now_local = dt_util.now()
-    live = _dosing_live_state(hass, channel, config)
-    live["awcActive"] = _dosing_awc_suspended(config)
-    live["now"] = datetime.now(timezone.utc)
-    reasons = [
-        r for r in dosing_engine.guard_reasons(
-            channel, live, now_local.hour * 60 + now_local.minute, manual=True,
-            now=datetime.now(timezone.utc))
-        if r["severity"] == "block" and r["code"] != "disabled"
-    ]
-    if reasons:
-        _awc_send(connection, msg, hass, config, started=False, reasons=reasons)
-        return
-    spacing = config.get("dosing", {}).get("spacing", {})
-    verdict = dosing_engine.spacing_verdict(
-        spacing, channel.get("chemical"), _dosing_group_last_dose(hass, config),
-        datetime.now(timezone.utc))
-    if not verdict["ok"]:
-        if msg.get("queue"):
-            # Single-slot deferred dose: the 60 s tick fires it once the gap
-            # clears (persisted — survives a restart). A newer queue request
-            # replaces the old slot; one pending catch-up is the honest maximum.
-            not_before = datetime.now(timezone.utc) + timedelta(minutes=verdict["waitMinutes"])
-            config["dosing"]["spacing"]["queued"] = {
-                "channelId": msg["channel_id"], "ml": ml,
-                "requestedAt": datetime.now(timezone.utc).isoformat(),
-                "notBefore": not_before.isoformat(),
-            }
-            _dosing_record_event(
-                channel, "spacing_queue",
-                f"{ml:g} ml queued — {verdict['conflict']} dosed too recently "
-                f"(fires in ~{verdict['waitMinutes']:.0f} min)")
-            config = await _async_save_config(hass, entry, config)
-            _awc_send(connection, msg, hass, config, started=False, queued=True,
-                      notBefore=not_before.isoformat())
+    async with _awc_lock(hass), _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
             return
-        _awc_send(connection, msg, hass, config, started=False, reasons=[{
-            "code": "spacing", "severity": "block",
-            "message": (f"{verdict['conflict']} dosed too recently — wait "
-                        f"~{verdict['waitMinutes']:.0f} min (or queue it)")}])
-        return
-    if dosing_engine.is_ha_timed(channel):
-        # Generic adapter: HA times the run itself; accounting settles when the
-        # stop timer fires (the same guarded, bounded shape as firmware doses).
-        if (channel.get("state") or {}).get("haRunEndsAt"):
-            connection.send_error(msg["id"], "busy", "The pump is already running")
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
             return
-        if not await _async_dosing_ha_run(
-                hass, entry, config, msg["channel_id"], channel, ml):
-            connection.send_error(msg["id"], "not_bound",
-                                  "Bind the pump switch entity and calibrate the flow first")
+        ml = float(msg["ml"])
+        max_ml = min(channel.get("guards", {}).get("maxPerDoseMl") or DOSING_MAX_PER_DOSE_ML, DOSING_MAX_PER_DOSE_ML)
+        if not 0 < ml <= max_ml:
+            connection.send_error(msg["id"], "dose_out_of_bounds", f"Manual dose must be 0–{max_ml:g} ml")
             return
-        _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose started", ml=ml)
-        config = await _async_save_config(hass, entry, config)
+        now_local = dt_util.now()
+        live = _dosing_live_state(hass, channel, config)
+        live["awcActive"] = _dosing_awc_suspended(config)
+        live["now"] = datetime.now(timezone.utc)
+        reasons = [
+            r for r in dosing_engine.guard_reasons(
+                channel, live, now_local.hour * 60 + now_local.minute, manual=True,
+                now=datetime.now(timezone.utc))
+            if r["severity"] == "block" and r["code"] != "disabled"
+        ]
+        if reasons:
+            _awc_send(connection, msg, hass, config, started=False, reasons=reasons)
+            return
+        spacing = config.get("dosing", {}).get("spacing", {})
+        verdict = dosing_engine.spacing_verdict(
+            spacing, channel.get("chemical"), _dosing_group_last_dose(hass, config),
+            datetime.now(timezone.utc))
+        if not verdict["ok"]:
+            if msg.get("queue"):
+                # Single-slot deferred dose: the 60 s tick fires it once the gap
+                # clears (persisted — survives a restart). A newer queue request
+                # replaces the old slot; one pending catch-up is the honest maximum.
+                not_before = datetime.now(timezone.utc) + timedelta(minutes=verdict["waitMinutes"])
+                config["dosing"]["spacing"]["queued"] = {
+                    "channelId": msg["channel_id"], "ml": ml,
+                    "requestedAt": datetime.now(timezone.utc).isoformat(),
+                    "notBefore": not_before.isoformat(),
+                }
+                _dosing_record_event(
+                    channel, "spacing_queue",
+                    f"{ml:g} ml queued — {verdict['conflict']} dosed too recently "
+                    f"(fires in ~{verdict['waitMinutes']:.0f} min)")
+                config = await _async_save_config(hass, entry, config)
+                _awc_send(connection, msg, hass, config, started=False, queued=True,
+                          notBefore=not_before.isoformat())
+                return
+            _awc_send(connection, msg, hass, config, started=False, reasons=[{
+                "code": "spacing", "severity": "block",
+                "message": (f"{verdict['conflict']} dosed too recently — wait "
+                            f"~{verdict['waitMinutes']:.0f} min (or queue it)")}])
+            return
+        if dosing_engine.is_ha_timed(channel):
+            # Generic adapter: HA times the run itself; accounting settles when the
+            # stop timer fires (the same guarded, bounded shape as firmware doses).
+            if (channel.get("state") or {}).get("haRunEndsAt"):
+                connection.send_error(msg["id"], "busy", "The pump is already running")
+                return
+            if not await _async_dosing_ha_run(
+                    hass, entry, config, msg["channel_id"], channel, ml):
+                connection.send_error(msg["id"], "not_bound",
+                                      "Bind the pump switch entity and calibrate the flow first")
+                return
+            _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose started", ml=ml)
+            await _async_dosing_save(hass, entry, config)
+            config = _config_from_entry(entry)
+            _awc_send(connection, msg, hass, config, started=True)
+            return
+        if not await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=msg["channel_id"]):
+            connection.send_error(msg["id"], "not_bound", "Manual-dose button entity is not bound or unavailable")
+            return
+        _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose requested")
+        await _async_dosing_save(hass, entry, config)
+        config = _config_from_entry(entry)
         _awc_send(connection, msg, hass, config, started=True)
-        return
-    if not await _async_dosing_fire_bounded_dose(hass, channel, ml, cid=msg["channel_id"]):
-        connection.send_error(msg["id"], "not_bound", "Manual-dose button entity is not bound or unavailable")
-        return
-    _dosing_record_event(channel, "manual_dose", f"{ml:g} ml manual dose requested")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config, started=True)
 
 
 @websocket_api.websocket_command({
@@ -15209,40 +16244,39 @@ async def websocket_dosing_dose_now(
 async def websocket_dosing_prime(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Bounded prime: the firmware button runs ~5 s per press; we press it
-    ceil(seconds/5) times, capped at 30 s total."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    seconds = min(DOSING_MANUAL_PRIME_MAX_S, max(1.0, float(msg.get("seconds") or 5.0)))
-    if dosing_engine.is_ha_timed(channel):
-        # Generic adapter: a raw timed burst instead of firmware button presses.
-        if (channel.get("state") or {}).get("haRunEndsAt"):
-            connection.send_error(msg["id"], "busy", "The pump is already running")
+    """One bounded firmware prime per deliberate click (no queued retries).
+    Generic HA pumps retain their explicitly bounded runtime.
+    """
+    async with _awc_lock(hass), _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
             return
-        if not await _async_dosing_ha_run(
-                hass, entry, config, msg["channel_id"], channel, 0.0, burst_s=seconds):
-            connection.send_error(msg["id"], "not_bound", "Bind the pump switch entity first")
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
             return
-        channel.setdefault("reservoir", {})["primedAt"] = datetime.now(timezone.utc).isoformat()
-        _dosing_record_event(channel, "prime", f"Primed ~{seconds:.0f} s")
-        config = await _async_save_config(hass, entry, config)
+        seconds = min(DOSING_MANUAL_PRIME_MAX_S, max(1.0, float(msg.get("seconds") or 5.0)))
+        if dosing_engine.is_ha_timed(channel):
+            # Generic adapter: a raw timed burst instead of firmware button presses.
+            if (channel.get("state") or {}).get("haRunEndsAt"):
+                connection.send_error(msg["id"], "busy", "The pump is already running")
+                return
+            if not await _async_dosing_ha_run(
+                    hass, entry, config, msg["channel_id"], channel, 0.0, burst_s=seconds):
+                connection.send_error(msg["id"], "not_bound", "Bind the pump switch entity first")
+                return
+            channel.setdefault("reservoir", {})["primedAt"] = datetime.now(timezone.utc).isoformat()
+            _dosing_record_event(channel, "prime", f"Primed ~{seconds:.0f} s")
+            await _async_dosing_save(hass, entry, config)
+            config = _config_from_entry(entry)
+            _awc_send(connection, msg, hass, config)
+            return
+        config = await _async_dosing_service_press(hass, entry, msg["channel_id"], "primeButton")
+        if config is None:
+            connection.send_error(msg["id"], "not_bound", "Pump busy, conflicting bindings, or prime button unavailable")
+            return
         _awc_send(connection, msg, hass, config)
-        return
-    presses = max(1, math.ceil(seconds / 5.0))
-    for _ in range(presses):
-        if not await _async_dosing_press(hass, channel, "primeButton"):
-            connection.send_error(msg["id"], "not_bound", "Prime button entity is not bound or unavailable")
-            return
-    channel.setdefault("reservoir", {})["primedAt"] = datetime.now(timezone.utc).isoformat()
-    _dosing_record_event(channel, "prime", f"Primed ~{presses * 5} s")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -15257,32 +16291,33 @@ async def websocket_dosing_reset_reservoir(
     """'Refilled' — reset the ledger to full and stamp refilledAt. The response nudges
     a re-prime: refill-without-reprime is a dose-integrity flag (air in the line
     silently under-doses)."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    reservoir = channel.setdefault("reservoir", {})
-    before_ml = max(0.0, float(reservoir.get("remainingMl") or 0.0))
-    reservoir["remainingMl"] = reservoir.get("volumeMl") or 0
-    reservoir["refilledAt"] = datetime.now(timezone.utc).isoformat()
-    # Consumables bridge: refilling the pump reservoir from a tracked bottle
-    # debits the bottle by the transferred volume (unless the bottle IS the
-    # reservoir — pump doses already debit it directly there).
-    product_id = str(reservoir.get("productId") or "")
-    if product_id and not reservoir.get("productIsBottle"):
-        product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
-        if isinstance(product, dict):
-            added_ml = max(0.0, float(reservoir.get("volumeMl") or 0.0) - before_ml)
-            _consumable_debit(product, added_ml, "transfer")
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
-    (runtime.get("channels", {}).get(msg["channel_id"]) or {}).pop("pendingReservoirMl", None)
-    _dosing_record_event(channel, "refill", "Reservoir refilled — ledger reset to full")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config, reprimeRecommended=True)
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        reservoir = channel.setdefault("reservoir", {})
+        before_ml = max(0.0, float(reservoir.get("remainingMl") or 0.0))
+        reservoir["remainingMl"] = reservoir.get("volumeMl") or 0
+        reservoir["refilledAt"] = datetime.now(timezone.utc).isoformat()
+        # Consumables bridge: refilling the pump reservoir from a tracked bottle
+        # debits the bottle by the transferred volume (unless the bottle IS the
+        # reservoir — pump doses already debit it directly there).
+        product_id = str(reservoir.get("productId") or "")
+        if product_id and not reservoir.get("productIsBottle"):
+            product = ((config.get("consumables") or {}).get("products") or {}).get(product_id)
+            if isinstance(product, dict):
+                added_ml = max(0.0, float(reservoir.get("volumeMl") or 0.0) - before_ml)
+                _consumable_debit(product, added_ml, "transfer")
+        runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+        (runtime.get("channels", {}).get(msg["channel_id"]) or {}).pop("pendingReservoirMl", None)
+        _dosing_record_event(channel, "refill", "Reservoir refilled — ledger reset to full")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config, reprimeRecommended=True)
 
 
 @websocket_api.websocket_command({
@@ -15300,40 +16335,41 @@ async def websocket_dosing_mark_refreshed(
     """'Refreshed' — stamp the live-food culture as newly mixed. The freshness clock
     restarts; the sync re-asserts the firmware enable switch if staleness had it
     held off."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    reservoir = channel.setdefault("reservoir", {})
-    reservoir["mixedAt"] = datetime.now(timezone.utc).isoformat()
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
-    runtime.setdefault("channels", {}).setdefault(msg["channel_id"], {})["staleFood"] = False
-    runtime.setdefault("notified", {}).pop(f"stale_{msg['channel_id']}", None)
-    loaded_note = ""
-    if msg.get("debit"):
-        product_id = str(reservoir.get("productId") or "")
-        product = ((config.get("consumables") or {}).get("products") or {}).get(product_id) \
-            if product_id and not reservoir.get("productIsBottle") else None
-        volume = max(0.0, float(reservoir.get("volumeMl") or 0.0))
-        before = max(0.0, float(reservoir.get("remainingMl") or 0.0))
-        added = max(0.0, volume - before)
-        if isinstance(product, dict) and added > 0:
-            _consumable_debit(product, added, "transfer")
-            reservoir["remainingMl"] = volume
-            reservoir["refilledAt"] = reservoir["mixedAt"]
-            (runtime.get("channels", {}).get(msg["channel_id"]) or {}).pop("pendingReservoirMl", None)
-            loaded_note = f" from {product.get('name') or 'the bottle'} — {added:g} ml off it"
-    _dosing_record_event(
-        channel, "refresh",
-        f"Jar loaded{loaded_note} — the day's clock restarted" if dosing_engine.is_standing(channel)
-        else "Culture refreshed — freshness clock restarted")
-    config = await _async_save_config(hass, entry, config)
-    _async_kick_dosing_sync(hass, entry)
-    _awc_send(connection, msg, hass, config)
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        reservoir = channel.setdefault("reservoir", {})
+        reservoir["mixedAt"] = datetime.now(timezone.utc).isoformat()
+        runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+        runtime.setdefault("channels", {}).setdefault(msg["channel_id"], {})["staleFood"] = False
+        runtime.setdefault("notified", {}).pop(f"stale_{msg['channel_id']}", None)
+        loaded_note = ""
+        if msg.get("debit"):
+            product_id = str(reservoir.get("productId") or "")
+            product = ((config.get("consumables") or {}).get("products") or {}).get(product_id) \
+                if product_id and not reservoir.get("productIsBottle") else None
+            volume = max(0.0, float(reservoir.get("volumeMl") or 0.0))
+            before = max(0.0, float(reservoir.get("remainingMl") or 0.0))
+            added = max(0.0, volume - before)
+            if isinstance(product, dict) and added > 0:
+                _consumable_debit(product, added, "transfer")
+                reservoir["remainingMl"] = volume
+                reservoir["refilledAt"] = reservoir["mixedAt"]
+                (runtime.get("channels", {}).get(msg["channel_id"]) or {}).pop("pendingReservoirMl", None)
+                loaded_note = f" from {product.get('name') or 'the bottle'} — {added:g} ml off it"
+        _dosing_record_event(
+            channel, "refresh",
+            f"Jar loaded{loaded_note} — the day's clock restarted" if dosing_engine.is_standing(channel)
+            else "Culture refreshed — freshness clock restarted")
+        config = await _async_save_config(hass, entry, config)
+        _async_kick_dosing_sync(hass, entry)
+        _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -15349,45 +16385,46 @@ async def websocket_dosing_mark_standing(
     """Stage B: the jar's two hand taps. 'stirred' — the keeper shook the jar
     (or ran the stirrer by hand); 'flushed' — fresh water went through the
     line, which also marks the line-flush chore done when the drip has one."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    if not dosing_engine.is_standing(channel):
-        connection.send_error(msg["id"], "not_standing", "That pump is not a phyto drip")
-        return
-    now = datetime.now(timezone.utc)
-    state = channel.setdefault("state", {})
-    if msg["what"] == "stirred":
-        state["lastStirredAt"] = now.isoformat()
-        _dosing_record_event(channel, "stir", "Stirred by hand")
-    else:
-        state["lastFlushedAt"] = now.isoformat()
-        _dosing_record_event(channel, "flush", "Line flushed")
-        maintenance = config.get("maintenance")
-        tasks = maintenance.get("tasks") if isinstance(maintenance, dict) else None
-        task_id = _dosing_flush_task_id(str(msg["channel_id"]))
-        if isinstance(tasks, dict) and isinstance(tasks.get(task_id), dict):
-            completions = maintenance.setdefault("completions", {})
-            if not isinstance(completions, dict):
-                completions = maintenance["completions"] = {}
-            entries = completions.setdefault(task_id, [])
-            if not isinstance(entries, list):
-                entries = completions[task_id] = []
-            stamp = now.isoformat()
-            entries.insert(0, {
-                "id": f"{task_id}:dosing:{stamp}", "timestamp": stamp,
-                "notes": "Logged automatically — Flushed tapped on the pump card",
-                "source": MAINTENANCE_SOURCE_DOSING,
-            })
-            del entries[MAINTENANCE_COMPLETIONS_MAX:]
-            tasks[task_id]["snoozedUntil"] = None
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        if not dosing_engine.is_standing(channel):
+            connection.send_error(msg["id"], "not_standing", "That pump is not a phyto drip")
+            return
+        now = datetime.now(timezone.utc)
+        state = channel.setdefault("state", {})
+        if msg["what"] == "stirred":
+            state["lastStirredAt"] = now.isoformat()
+            _dosing_record_event(channel, "stir", "Stirred by hand")
+        else:
+            state["lastFlushedAt"] = now.isoformat()
+            _dosing_record_event(channel, "flush", "Line flushed")
+            maintenance = config.get("maintenance")
+            tasks = maintenance.get("tasks") if isinstance(maintenance, dict) else None
+            task_id = _dosing_flush_task_id(str(msg["channel_id"]))
+            if isinstance(tasks, dict) and isinstance(tasks.get(task_id), dict):
+                completions = maintenance.setdefault("completions", {})
+                if not isinstance(completions, dict):
+                    completions = maintenance["completions"] = {}
+                entries = completions.setdefault(task_id, [])
+                if not isinstance(entries, list):
+                    entries = completions[task_id] = []
+                stamp = now.isoformat()
+                entries.insert(0, {
+                    "id": f"{task_id}:dosing:{stamp}", "timestamp": stamp,
+                    "notes": "Logged automatically — Flushed tapped on the pump card",
+                    "source": MAINTENANCE_SOURCE_DOSING,
+                })
+                del entries[MAINTENANCE_COMPLETIONS_MAX:]
+                tasks[task_id]["snoozedUntil"] = None
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config)
 
 
 # --- Consumables (NPS food shelf) WebSocket API ---------------------------------------------
@@ -15547,6 +16584,7 @@ def _consumable_for_msg(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_consumable_log_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -15612,6 +16650,7 @@ async def websocket_consumable_log_dose(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_consumable_skip_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -15672,6 +16711,7 @@ def _drop_completion(config: dict[str, Any], task_id: str, stamp: str) -> None:
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_consumable_undo_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -15724,6 +16764,7 @@ async def websocket_consumable_undo_dose(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_hand_feed_undo(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -15773,6 +16814,7 @@ async def websocket_nps_hand_feed_undo(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_consumable_refill(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -16714,6 +17756,7 @@ def _nps_canonical_reservoir(config: dict[str, Any]) -> dict[str, Any]:
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_hatch_start(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -16884,6 +17927,7 @@ async def websocket_nps_hatch_clock(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_hatch_cancel(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -16986,6 +18030,7 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_hatch_enrich(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -17239,6 +18284,7 @@ async def websocket_nps_enrich_cancel(
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_dose"})
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_enrich_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -17261,6 +18307,7 @@ async def websocket_nps_enrich_dose(
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_enrich_second_dose"})
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_enrich_second_dose(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -17321,6 +18368,7 @@ def _nps_batch_is_stale(loaded_iso: Any, stamps: dict[str, Any], now: datetime) 
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_fridge_bottle(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -17475,6 +18523,7 @@ async def websocket_nps_fridge_bottle(
 @websocket_api.websocket_command({vol.Required("type"): "openreef/nps_reservoir_discard"})
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_reservoir_discard(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -17504,6 +18553,7 @@ async def websocket_nps_reservoir_discard(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_nps_hand_feed(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -19227,6 +20277,7 @@ async def websocket_cultures_summary(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_seed(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -19390,6 +20441,7 @@ async def websocket_cultures_seed(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_log(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20359,6 +21411,7 @@ def _cultures_feed_credit(config: dict[str, Any], jar: dict[str, Any], jar_id: s
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_undo(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20488,6 +21541,7 @@ def _cultures_restart_apply(hass: HomeAssistant, config: dict[str, Any], jar_id:
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_restart(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20514,6 +21568,7 @@ async def websocket_cultures_restart(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_water_change(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20575,6 +21630,7 @@ async def websocket_cultures_water_change(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_split(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20612,6 +21668,7 @@ async def websocket_cultures_split(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_fresh_vessel(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20640,6 +21697,7 @@ async def websocket_cultures_fresh_vessel(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_consumable_mark_shaken(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -20795,6 +21853,7 @@ def _cultures_backup_refresh_apply(hass: HomeAssistant, config: dict[str, Any], 
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_cultures_refresh_backup(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -21031,6 +22090,7 @@ async def _async_cultures_push_due(hass: HomeAssistant, config: dict[str, Any], 
     return len(plan)
 
 
+@_automation_stock_transaction
 async def _async_notification_action(hass: HomeAssistant, event: Any) -> None:
     """A button tapped on a phone push: the same core the tab's buttons call.
     Unknown or stale actions are ignored; a refusal is logged to the activity
@@ -21612,6 +22672,7 @@ async def websocket_nps_summary(
 })
 @websocket_api.require_admin
 @websocket_api.async_response
+@_automation_stock_transaction
 async def websocket_consumable_delete(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
@@ -21643,25 +22704,26 @@ async def websocket_dosing_reset_tube(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Tube replaced: zero the wear odometer (the awc_reset_ledger template)."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    wear = channel.setdefault("wear", {})
-    wear["runSeconds"] = 0.0
-    wear["doseCount"] = 0
-    wear["tubeInstalledAt"] = datetime.now(timezone.utc).isoformat()
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
-    rt = runtime.get("channels", {}).get(msg["channel_id"]) or {}
-    rt.pop("pendingRunSeconds", None)
-    rt.pop("pendingDoses", None)
-    _dosing_record_event(channel, "tube_reset", "Tube replaced — wear counter reset")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        wear = channel.setdefault("wear", {})
+        wear["runSeconds"] = 0.0
+        wear["doseCount"] = 0
+        wear["tubeInstalledAt"] = datetime.now(timezone.utc).isoformat()
+        runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+        rt = runtime.get("channels", {}).get(msg["channel_id"]) or {}
+        rt.pop("pendingRunSeconds", None)
+        rt.pop("pendingDoses", None)
+        _dosing_record_event(channel, "tube_reset", "Tube replaced — wear counter reset")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -21677,61 +22739,62 @@ async def websocket_dosing_respread_missed(
     """The ask-first missed-dose decision: skip clears the state; respread tightens
     today's interval under the caps (kalk always resolves to skip — never a catch-up
     bolus). Missed volume is NEVER re-dosed automatically."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    state = channel.setdefault("state", {})
-    missed_ml = state.get("missedMl") or 0.0
-    if msg.get("skip"):
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        state = channel.setdefault("state", {})
+        missed_ml = state.get("missedMl") or 0.0
+        if msg.get("skip"):
+            state["missedMl"] = 0.0
+            state["missedSince"] = ""
+            _dosing_record_event(channel, "missed_skipped", f"{missed_ml:.1f} ml missed volume skipped")
+            config = await _async_save_config(hass, entry, config)
+            _awc_send(connection, msg, hass, config, applied=False, skipped=True)
+            return
+        now_local = dt_util.now()
+        now_minutes = now_local.hour * 60 + now_local.minute
+        live = _dosing_live_state(hass, channel, config)
+        if not live.get("dosedSensorTrusted"):
+            # Without a readable dosed-today sensor the cap preflight would run
+            # against 0.0 — refusing beats re-dosing already-delivered volume (R33).
+            _awc_send(connection, msg, hass, config, applied=False,
+                      reason="Dosed-today sensor is unavailable — re-spread refused until OpenReef can verify what's been delivered.")
+            return
+        compiled = dosing_engine.compile_schedule(channel, _dosing_lighting_off_window(config, now_local), now_local)
+        plan_result = dosing_engine.respread_plan(channel, compiled["plan"], missed_ml, now_minutes, live["dosedTodayMl"])
+        if plan_result.get("recommendation") != "respread":
+            state["missedMl"] = 0.0
+            state["missedSince"] = ""
+            _dosing_record_event(channel, "missed_skipped", plan_result.get("reason", "Respread not possible"))
+            config = await _async_save_config(hass, entry, config)
+            _awc_send(connection, msg, hass, config, applied=False, reason=plan_result.get("reason", ""))
+            return
+        # Record the plan this respread was computed AGAINST: a later schedule edit
+        # that changes these base values self-invalidates the override (R17).
+        base_channel = {**channel, "state": {**state, "respread": {}}}
+        base_plan = dosing_engine.compile_schedule(
+            base_channel, _dosing_lighting_off_window(config, now_local), now_local
+        )["plan"]
+        state["respread"] = {
+            "date": now_local.date().isoformat(),
+            "dayIntervalMin": plan_result["dayIntervalMin"],
+            "nightIntervalMin": plan_result["nightIntervalMin"],
+            "basePerDoseMl": base_plan["perDoseMl"],
+            "baseDayIntervalMin": base_plan["dayIntervalMin"],
+            "baseNightIntervalMin": base_plan["nightIntervalMin"],
+        }
         state["missedMl"] = 0.0
         state["missedSince"] = ""
-        _dosing_record_event(channel, "missed_skipped", f"{missed_ml:.1f} ml missed volume skipped")
+        _dosing_record_event(channel, "missed_respread", plan_result.get("note", "Missed volume re-spread"))
         config = await _async_save_config(hass, entry, config)
-        _awc_send(connection, msg, hass, config, applied=False, skipped=True)
-        return
-    now_local = dt_util.now()
-    now_minutes = now_local.hour * 60 + now_local.minute
-    live = _dosing_live_state(hass, channel, config)
-    if not live.get("dosedSensorTrusted"):
-        # Without a readable dosed-today sensor the cap preflight would run
-        # against 0.0 — refusing beats re-dosing already-delivered volume (R33).
-        _awc_send(connection, msg, hass, config, applied=False,
-                  reason="Dosed-today sensor is unavailable — re-spread refused until OpenReef can verify what's been delivered.")
-        return
-    compiled = dosing_engine.compile_schedule(channel, _dosing_lighting_off_window(config, now_local), now_local)
-    plan_result = dosing_engine.respread_plan(channel, compiled["plan"], missed_ml, now_minutes, live["dosedTodayMl"])
-    if plan_result.get("recommendation") != "respread":
-        state["missedMl"] = 0.0
-        state["missedSince"] = ""
-        _dosing_record_event(channel, "missed_skipped", plan_result.get("reason", "Respread not possible"))
-        config = await _async_save_config(hass, entry, config)
-        _awc_send(connection, msg, hass, config, applied=False, reason=plan_result.get("reason", ""))
-        return
-    # Record the plan this respread was computed AGAINST: a later schedule edit
-    # that changes these base values self-invalidates the override (R17).
-    base_channel = {**channel, "state": {**state, "respread": {}}}
-    base_plan = dosing_engine.compile_schedule(
-        base_channel, _dosing_lighting_off_window(config, now_local), now_local
-    )["plan"]
-    state["respread"] = {
-        "date": now_local.date().isoformat(),
-        "dayIntervalMin": plan_result["dayIntervalMin"],
-        "nightIntervalMin": plan_result["nightIntervalMin"],
-        "basePerDoseMl": base_plan["perDoseMl"],
-        "baseDayIntervalMin": base_plan["dayIntervalMin"],
-        "baseNightIntervalMin": base_plan["nightIntervalMin"],
-    }
-    state["missedMl"] = 0.0
-    state["missedSince"] = ""
-    _dosing_record_event(channel, "missed_respread", plan_result.get("note", "Missed volume re-spread"))
-    config = await _async_save_config(hass, entry, config)
-    _async_kick_dosing_sync(hass, entry)
-    _awc_send(connection, msg, hass, config, applied=True, note=plan_result.get("note", ""))
+        _async_kick_dosing_sync(hass, entry)
+        _awc_send(connection, msg, hass, config, applied=True, note=plan_result.get("note", ""))
 
 
 @websocket_api.websocket_command({
@@ -21746,22 +22809,23 @@ async def websocket_dosing_acknowledge(
 ) -> None:
     """Explicit user acknowledgments (currently: 'ph_missing' — running kalk with no
     pH failsafe, schedule and volume caps as the only protection)."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    if msg["kind"] != "ph_missing":
-        connection.send_error(msg["id"], "unknown_kind", "Unknown acknowledgment kind")
-        return
-    channel.setdefault("guards", {})["phMissingAcknowledged"] = True
-    _dosing_record_event(channel, "ack_no_ph", "Acknowledged: no pH failsafe configured")
-    config = await _async_save_config(hass, entry, config)
-    _async_kick_dosing_sync(hass, entry)
-    _awc_send(connection, msg, hass, config)
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        if msg["kind"] != "ph_missing":
+            connection.send_error(msg["id"], "unknown_kind", "Unknown acknowledgment kind")
+            return
+        channel.setdefault("guards", {})["phMissingAcknowledged"] = True
+        _dosing_record_event(channel, "ack_no_ph", "Acknowledged: no pH failsafe configured")
+        config = await _async_save_config(hass, entry, config)
+        _async_kick_dosing_sync(hass, entry)
+        _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -21773,13 +22837,19 @@ async def websocket_dosing_acknowledge(
 async def websocket_dosing_sync_now(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    await _async_dosing_sync_pass(hass, entry, msg.get("channel_id"))
-    config = _config_from_entry(entry)
-    _awc_send(connection, msg, hass, config)
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+        if msg.get("channel_id"):
+            runtime.setdefault("failedAt", {}).pop(msg["channel_id"], None)
+        else:
+            runtime.pop("failedAt", None)
+        await _async_dosing_sync_pass(hass, entry, msg.get("channel_id"))
+        config = _config_from_entry(entry)
+        _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -21792,26 +22862,54 @@ async def websocket_dosing_sync_now(
 async def websocket_dosing_suspend(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Panic lockout: flip the firmware HA-suspend switch (never the master enable —
-    user intent and automation must not be conflated) for up to 24 h. The firmware's
-    own auto-expiry backstops a dead HA."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+    """Persist the panic first, then stop; an unreachable pump cannot erase it."""
+    finish_generic = False
+    confirmed = False
+    async with _awc_lock(hass), _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        hours = min(float(DOSING_SUSPEND_MAX_HOURS), max(1.0, float(msg.get("hours") or 24.0)))
+        channel.setdefault("state", {})["suspendedUntil"] = (
+            datetime.now(timezone.utc) + timedelta(hours=hours)
+        ).isoformat()
+        _dosing_record_event(channel, "suspend", f"Dosing lockout for {hours:g} h")
+        # No awaited notification or hardware call can precede durable intent.
+        _persist_entry_config(hass, entry, config)
+        generic = dosing_engine.is_ha_timed(channel)
+        entities = (channel.get("driver") or {}).get("entities") or {}
+        ent = entities.get("powerSwitch" if generic else "haSuspendSwitch")
+        if ent:
+            try:
+                await hass.services.async_call(
+                    "switch", "turn_off" if generic else "turn_on", {ATTR_ENTITY_ID: ent}, blocking=True)
+                confirmed = await _async_dosing_wait_state(hass, ent, "off" if generic else "on")
+            except Exception:
+                _LOGGER.exception("Dosing panic: stop could not be confirmed for %s", ent)
+        if not confirmed and not generic and entities.get("enabledSwitch"):
+            # Revoke the firmware lease as a second stop route. The persisted
+            # panic also keeps every later sync from renewing that lease.
+            try:
+                enable = entities["enabledSwitch"]
+                await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: enable}, blocking=True)
+                confirmed = await _async_dosing_wait_state(hass, enable, "off")
+            except Exception:
+                _LOGGER.exception("Dosing panic: enable revocation also failed")
+        finish_generic = generic and confirmed and bool((channel.get("state") or {}).get("haRunEndsAt"))
+        if not confirmed:
+            _dosing_record_event(channel, "warn", "Panic saved, but pump stop is unconfirmed. Check the pump immediately.")
+        config = await _async_save_config(hass, entry, config)
+    if finish_generic:
+        await _async_dosing_ha_finish(hass, entry, config, str(msg["channel_id"]), channel, actual_elapsed_s=0)
+        config = _config_from_entry(entry)
+    if not confirmed:
+        connection.send_error(msg["id"], "stop_unconfirmed", "Panic lockout saved, but pump stop is unconfirmed. Check the pump immediately.")
         return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    hours = min(float(DOSING_SUSPEND_MAX_HOURS), max(1.0, float(msg.get("hours") or 24.0)))
-    channel.setdefault("state", {})["suspendedUntil"] = (
-        datetime.now(timezone.utc) + timedelta(hours=hours)
-    ).isoformat()
-    ent = channel.get("driver", {}).get("entities", {}).get("haSuspendSwitch")
-    if ent:
-        await hass.services.async_call("switch", "turn_on", {ATTR_ENTITY_ID: ent}, blocking=True)
-    _dosing_record_event(channel, "suspend", f"Dosing lockout for {hours:g} h")
-    config = await _async_save_config(hass, entry, config)
     _awc_send(connection, msg, hass, config)
 
 
@@ -21824,21 +22922,22 @@ async def websocket_dosing_suspend(
 async def websocket_dosing_resume(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    channel.setdefault("state", {})["suspendedUntil"] = ""
-    ent = channel.get("driver", {}).get("entities", {}).get("haSuspendSwitch")
-    if ent and not _dosing_awc_suspended(config):
-        await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: ent}, blocking=True)
-    _dosing_record_event(channel, "resume", "Dosing lockout cleared")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    async with _awc_lock(hass), _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        channel.setdefault("state", {})["suspendedUntil"] = ""
+        ent = channel.get("driver", {}).get("entities", {}).get("haSuspendSwitch")
+        if ent and not _dosing_awc_suspended(config):
+            await hass.services.async_call("switch", "turn_off", {ATTR_ENTITY_ID: ent}, blocking=True)
+        _dosing_record_event(channel, "resume", "Dosing lockout cleared")
+        config = await _async_save_config(hass, entry, config)
+        _awc_send(connection, msg, hass, config)
 
 
 @websocket_api.websocket_command({
@@ -21879,25 +22978,26 @@ async def websocket_dosing_ramp_checkpoint(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
     """Log a new-tank ramp test checkpoint; the advisory target steps up in response."""
-    entry = _first_entry(hass)
-    if entry is None:
-        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
-        return
-    config = _config_from_entry(entry)
-    channel = _dosing_channel_for_msg(connection, msg, config)
-    if channel is None:
-        return
-    ramp = channel.setdefault("ramp", {})
-    checkpoints = ramp.setdefault("checkpoints", [])
-    checkpoints.append({
-        "at": datetime.now(timezone.utc).isoformat(),
-        "testedValue": float(msg["tested_value"]),
-    })
-    del checkpoints[20:]
-    _dosing_record_event(channel, "ramp_checkpoint", f"Test logged: {float(msg['tested_value']):g}")
-    config = await _async_save_config(hass, entry, config)
-    ml_per_day = channel.get("schedule", {}).get("mlPerDay") or 0
-    _awc_send(connection, msg, hass, config, ramp=dosing_engine.ramp_target(ramp, ml_per_day))
+    async with _dosing_lock(hass):
+        entry = _first_entry(hass)
+        if entry is None:
+            connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+            return
+        config = _config_from_entry(entry)
+        channel = _dosing_channel_for_msg(connection, msg, config)
+        if channel is None:
+            return
+        ramp = channel.setdefault("ramp", {})
+        checkpoints = ramp.setdefault("checkpoints", [])
+        checkpoints.append({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "testedValue": float(msg["tested_value"]),
+        })
+        del checkpoints[20:]
+        _dosing_record_event(channel, "ramp_checkpoint", f"Test logged: {float(msg['tested_value']):g}")
+        config = await _async_save_config(hass, entry, config)
+        ml_per_day = channel.get("schedule", {}).get("mlPerDay") or 0
+        _awc_send(connection, msg, hass, config, ramp=dosing_engine.ramp_target(ramp, ml_per_day))
 
 
 @websocket_api.websocket_command({
@@ -21909,24 +23009,30 @@ async def websocket_dosing_ramp_checkpoint(
 async def websocket_dosing_delete_channel(
     hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
 ) -> None:
-    """Remove a channel. Unlinking only — the pump's on-device schedule keeps running
-    until its enable switch is turned off, and the panel warns exactly that."""
+    """Remove only a disabled channel whose previous actuators are confirmed OFF."""
     entry = _first_entry(hass)
     if entry is None:
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
-    config = _config_from_entry(entry)
-    channels = _dosing_channels(config)
-    if msg["channel_id"] not in channels:
-        connection.send_error(msg["id"], "unknown_channel", "No such dosing channel")
-        return
-    channels.pop(msg["channel_id"])
-    runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
-    runtime.get("channels", {}).pop(msg["channel_id"], None)
-    runtime.get("desired", {}).pop(msg["channel_id"], None)
-    _append_activity(config, f"Removed dosing channel: {msg['channel_id']}", "control")
-    config = await _async_save_config(hass, entry, config)
-    _awc_send(connection, msg, hass, config)
+    async with _awc_lock(hass):
+        async with _dosing_lock(hass):
+            config = _config_from_entry(entry)
+            channels = _dosing_channels(config)
+            if msg["channel_id"] not in channels:
+                connection.send_error(msg["id"], "unknown_channel", "No such dosing channel")
+                return
+            stored = deepcopy(config)
+            channels.pop(msg["channel_id"])
+            safety_error = _automation_settings_error(hass, stored, config)
+            if safety_error:
+                connection.send_error(msg["id"], "automation_safety", safety_error)
+                return
+            runtime = hass.data.setdefault(DOMAIN, {}).setdefault(DOSING_RUNTIME, {})
+            runtime.get("channels", {}).pop(msg["channel_id"], None)
+            runtime.get("desired", {}).pop(msg["channel_id"], None)
+            _append_activity(config, f"Removed dosing channel: {msg['channel_id']}", "control")
+            config = await _async_save_config(hass, entry, config)
+            _awc_send(connection, msg, hass, config)
 
 
 # --- Saltwater Mixing Station: orchestration + websocket actions ---------------------------
@@ -21941,12 +23047,13 @@ def _mixing_cfg(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mixing_lock(hass: HomeAssistant) -> asyncio.Lock:
-    """The per-instance mixing state lock (see MIXING_STATE_LOCK). Held by the
-    top-level entry points only — never acquire it from an inner helper."""
-    store = hass.data.setdefault(DOMAIN, {})
-    lock = store.get(MIXING_STATE_LOCK)
-    if lock is None:
-        lock = store[MIXING_STATE_LOCK] = asyncio.Lock()
+    """Share water-operation ownership with AWC and coupled stock consumers.
+
+    A mixing actuator await must not let a source debit land and then restore
+    its older stock snapshot. Only top-level mixing entry/timer paths acquire.
+    """
+    lock = _awc_lock(hass)
+    hass.data.setdefault(DOMAIN, {})[MIXING_STATE_LOCK] = lock
     return lock
 
 
@@ -21958,6 +23065,8 @@ def _mixing_sim_enabled(config: dict[str, Any]) -> bool:
 async def _async_mixing_set_switch(
     hass: HomeAssistant, config: dict[str, Any], role: str, on: bool, context: Any
 ) -> None:
+    if on and hass.data.get(DOMAIN, {}).get("unloading"):
+        raise RuntimeError("OpenReef is unloading; new water runs are blocked")
     if _mixing_sim_enabled(config):
         # Before the entity check on purpose — a dry run needs no real plugs at all.
         sim = hass.data.setdefault(DOMAIN, {}).setdefault(
@@ -26786,6 +27895,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
     """Set up OpenReef from a config entry."""
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = entry
+    hass.data[DOMAIN].pop("unloading", None)
     if LEGACY_GUARDIAN_KEYS in entry.options:
         # The Guardian avatar is gone; don't leave its API keys sitting in the
         # entry options for a feature that can no longer use them.
@@ -26803,11 +27913,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
         hass.config_entries.async_update_entry(
             entry, options={**entry.options, CONF_SETTINGS: normalised}
         )
+    escalation_before = deepcopy(normalised.get("alertEscalation") or {})
     await _async_refresh_issues(hass, entry)
     if await _async_sync_alert_notifications(hass, normalised):
-        hass.config_entries.async_update_entry(
-            entry, options={**entry.options, CONF_SETTINGS: normalised}
-        )
+        _persist_alert_bookkeeping(hass, entry, escalation_before, normalised.get("alertEscalation") or {})
+    normalised = _config_from_entry(entry)
     await _async_schedule_mode_timer(hass, entry, normalised)
     await _async_schedule_equipment_timers(hass, entry, normalised)
     await _async_schedule_max_off_timers(hass, entry, normalised)
@@ -26826,9 +27936,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_arm_awc_ato_restore(hass, entry, _config_from_entry(entry))
     # Stop a calibration-run pump orphaned by a restart mid-run.
     await _async_awc_recover_orphaned_calrun(hass, entry)
-    # Stop a feed-exchange drain orphaned the same way (partial-volume credit).
+    # Stop an orphaned feed-exchange drain; uncertain volume requires reconciliation.
     await _async_nps_recover_orphaned_drain(hass, entry)
-    # Stop ha_switch_timed pumps orphaned mid-dose (honest elapsed credit).
+    # Stop orphaned HA-timed doses; never infer delivery from downtime.
     await _async_dosing_ha_recover(hass, entry)
     # Mixing station plugs orphaned mid-batch: booster/heater off, pumps
     # re-asserted during salting (doc §11 fail-safe directions), a mid-burst
@@ -26851,8 +27961,136 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     return True
 
 
+_AUTOMATION_SHUTDOWN_TIMEOUT_S = 5.0
+
+
+async def _async_shutdown_dosing_and_awc(
+    hass: HomeAssistant, entry: OpenReefConfigEntry,
+) -> bool:
+    """Stop owned dosing/water outputs before discarding their stop callbacks.
+
+    Keep persisted dosing/AWC run traces unchanged: an unload during a run
+    leaves an uncertain partial volume for startup recovery, never a full-dose
+    credit. Unconfirmed stops retain the callbacks by refusing this unload.
+    """
+    store = hass.data.setdefault(DOMAIN, {})
+    store["unloading"] = True
+    ato_task = store.pop("ato_duty_cycle_task", None)
+    if ato_task is not None and not ato_task.done():
+        ato_task.cancel()
+
+    acquired = []
+    failed = []
+    try:
+        # Same-task timeout preserves tracked lock ownership. Leave callbacks
+        # armed while waiting for any already-dispatched ON to finish.
+        try:
+            async with asyncio.timeout(_AUTOMATION_SHUTDOWN_TIMEOUT_S):
+                for lock in (_awc_lock(hass), _dosing_lock(hass)):
+                    await lock.acquire()
+                    acquired.append(lock)
+        except TimeoutError:
+            failed.append("actuator ownership")
+            _LOGGER.error("OpenReef unload could not acquire actuator ownership; attempting all stops")
+
+        config = _config_from_entry(entry)
+        targets: dict[str, bool] = {}
+        stopped_at: dict[str, str] = {}
+
+        def request(entity: Any, on: bool = False) -> None:
+            entity = _normalise_entity_id(entity)
+            if entity:
+                # OFF wins if a pre-existing invalid mapping reuses an output
+                # as both a motor/enable and a suspension control.
+                targets[entity] = targets.get(entity, True) and on
+
+        if not _awc_sim_enabled(config):
+            for pump in (_awc_cfg(config).get("pumps") or {}).values():
+                if isinstance(pump, dict):
+                    request(pump.get("switchEntity"))
+            if (config.get("interlocks") or {}).get("atoDutyCycleEnabled"):
+                for _, mapped in _armed_equipment_by_profile(config, "ato"):
+                    request(mapped.get("switch_entity_id"))
+        for channel in _dosing_channels(config).values():
+            entities = (channel.get("driver") or {}).get("entities") or {}
+            if dosing_engine.is_ha_timed(channel):
+                request(entities.get("powerSwitch"))
+            else:
+                request(entities.get("enabledSwitch"))
+                # Calibration can run while enabled is already OFF. The
+                # suspension edge also cancels those bounded service scripts.
+                request(entities.get("haSuspendSwitch"), True)
+        mixing = _mixing_cfg(config)
+        if not _mixing_sim_enabled(config):
+            batch = mixing.get("batch") or {}
+            rodi = mixing.get("rodi") or {}
+            roles = set()
+            if (rodi.get("draw") or {}).get("active") or (rodi.get("calibration") or {}).get("active"):
+                roles.add("rodiBooster")
+            if batch.get("circulateUntil") or batch.get("state") in ("heating", "salting"):
+                roles.update(("mixPumpA", "mixPumpB"))
+            if batch.get("state") in ("heating", "salting"):
+                roles.add("heater")
+            for role in roles:
+                request(((mixing.get("switches") or {}).get(role) or {}).get("switchEntity"))
+
+        async def stop_output(entity: str, on: bool) -> None:
+            try:
+                async with asyncio.timeout(_AUTOMATION_SHUTDOWN_TIMEOUT_S):
+                    await hass.services.async_call(
+                        "switch", "turn_on" if on else "turn_off",
+                        {ATTR_ENTITY_ID: entity}, blocking=True,
+                    )
+                    if not await _async_dosing_wait_state(hass, entity, "on" if on else "off"):
+                        raise RuntimeError("actuator did not confirm shutdown state")
+                    if not on:
+                        stopped_at[entity] = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                failed.append(entity)
+                _LOGGER.exception("OpenReef unload could not confirm shutdown of %s", entity)
+
+        # Each output has its own bound. One unreachable pump must never delay
+        # or prevent the other pumps and firmware leases from being stopped.
+        await asyncio.gather(*(stop_output(entity, on) for entity, on in targets.items()))
+        booster = _normalise_entity_id(
+            ((mixing.get("switches") or {}).get("rodiBooster") or {}).get("switchEntity")
+        )
+        if len(acquired) == 2 and booster in stopped_at and not _mixing_sim_enabled(config):
+            # The booster is now physically OFF. Leaving an active draw stamp
+            # would let reload count the OFF downtime as water production.
+            # Preserve its target/start for review, credit no guessed volume.
+            latest = _config_from_entry(entry)
+            rodi = _mixing_cfg(latest).get("rodi") or {}
+            draw = rodi.get("draw") or {}
+            cal = rodi.get("calibration") or {}
+            changed = False
+            if draw.get("active"):
+                draw.update(active=False, endsAt="")
+                _append_activity(
+                    latest, "Mixing station: RODI draw interrupted by unload — booster stopped; "
+                    "actual volume is unknown. Check the water and correct its level.", "warning")
+                changed = True
+            if cal.get("active") and not cal.get("stoppedAt"):
+                cal["stoppedAt"] = stopped_at[booster]
+                _append_activity(
+                    latest, "Mixing station: flow calibration stopped by unload — "
+                    "read the jug and enter the measured litres.", "warning")
+                changed = True
+            if changed:
+                _persist_entry_config(hass, entry, latest)
+    finally:
+        for lock in reversed(acquired):
+            lock.release()
+    store["shutdownFailures"] = failed
+    return not failed
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> bool:
     """Unload an OpenReef config entry."""
+    if not await _async_shutdown_dosing_and_awc(hass, entry):
+        # Preserve stop timers and recovery stamps. New starts stay blocked by
+        # the unloading marker until a later successful unload/setup cycle.
+        return False
     _clear_mode_timer(hass)
     _clear_equipment_timers(hass)
     _clear_max_off_timers(hass)
@@ -26887,7 +28125,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     if _awc_calrun is not None:
         _awc_calrun()
     # Same for a feed-exchange drain: cancel the timer, the persisted
-    # drainStartedAt stamp lets the next setup stop and credit the pump.
+    # drainStartedAt stamp lets the next setup stop and fault the uncertain run.
     _nps_drain = _store.pop(NPS_DRAIN_UNSUB, None)
     if _nps_drain is not None:
         _nps_drain()
@@ -26895,7 +28133,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     _mixing_circ = _store.pop(MIXING_CIRC_UNSUB, None)
     if _mixing_circ is not None:
         _mixing_circ()
-    # And the RODI draw/calibration leg — its stamps re-arm it too.
+    # RODI draws were interrupted without credit above; a stopped calibration
+    # retains its measurement window for the next setup.
     _mixing_rodi = _store.pop(MIXING_RODI_UNSUB, None)
     if _mixing_rodi is not None:
         _mixing_rodi()
@@ -26959,5 +28198,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
 
 async def async_reload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
     """Reload an OpenReef config entry."""
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+    if await async_unload_entry(hass, entry):
+        await async_setup_entry(hass, entry)

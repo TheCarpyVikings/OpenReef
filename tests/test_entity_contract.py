@@ -208,6 +208,36 @@ def test_dosingnode_yaml_has_no_relay_and_no_hardware_sensors():
     )
 
 
+def test_dosingnode_motion_is_serialised_and_trip_covers_the_stepper():
+    # Lost INDEX feedback used to leave the stepper running forever, outside
+    # the node's kill routine. Every entry point must use one bounded executor.
+    src = open(_DOSINGNODE_YAML, encoding="utf-8").read()
+    kill = src.split("  - id: kill_all_pumps\n", 1)[1].split("  - id: stop_stepper\n", 1)[0]
+    assert "script.execute: stop_stepper" in kill
+    stop = src.split("  - id: stop_stepper\n", 1)[1].split("  - id: stepper_watchdog\n", 1)[0]
+    for action in ("script.stop: run_stepper", "script.stop: run_dose", "script.stop: stepper_watchdog", "id(kalk_driver).enable(false)"):
+        assert action in stop, action
+    motion = src.split("  - id: run_stepper\n", 1)[1].split("  - id: trip_lock\n", 1)[0]
+    assert "mode: single" in motion and "!id(awc_locked)" in motion
+    assert "id: stepper_watchdog" in motion and "has_reached_target()" in motion
+    assert src.count("- stepper.set_target:") == 1, "prime, calibration and doses share the bounded executor"
+    dose = src.split("  - id: run_dose\n", 1)[1].split("  - id: do_one_dose\n", 1)[0]
+    assert "script.wait: run_stepper" in dose, "a dose stays busy until motion finishes"
+    for guard in ("check_guards", "lf_check_guards"):
+        body = src.split(f"  - id: {guard}\n", 1)[1].split("  - id:", 1)[0]
+        assert "id(awc_locked)" in body and 'reason = "busy"' in body
+
+
+def test_dosingnode_dependency_and_boot_configuration_are_reproducible():
+    src = open(_DOSINGNODE_YAML, encoding="utf-8").read()
+    assert re.search(r"github://slimcdk/esphome-custom-components@[0-9a-f]{40}", src)
+    assert "ota:\n  - platform: esphome" in src
+    stepper = src.split("\nstepper:\n", 1)[1].split("\nbutton:\n", 1)[0]
+    assert "on_boot:" not in stepper, "TMC setup belongs to esphome.on_boot, not the driver schema"
+    boot = src.split("\nesphome:\n", 1)[1].split("\nesp32:\n", 1)[0]
+    assert "tmc2209.configure" in boot and "tmc2209.currents" in boot
+
+
 def _main() -> int:
     tests = sorted(
         (name, obj) for name, obj in globals().items()

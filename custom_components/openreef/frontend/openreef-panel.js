@@ -2202,7 +2202,7 @@ class OpenReefPanel extends HTMLElement {
         { type: "openreef/dosing_mark_standing", channel_id: id, what: "flushed" }, "Line flushed — the flush chore is marked done.");
       if (action === "remove-doser-channel") this._removeDoserChannel(id);
       if (action === "doser-autobind") this._doserAutoBind(id);
-      if (action === "doser-prime") this._doserCall({ type: "openreef/dosing_prime", channel_id: id, seconds: 10 }, "Priming ~10 s.");
+      if (action === "doser-prime") this._doserCall({ type: "openreef/dosing_prime", channel_id: id, seconds: 5 }, "One bounded prime requested. Wait for it to finish before repeating.");
       if (action === "doser-dose-now") this._doserDoseNow(id);
       if (action === "doser-cal-run") this._doserCall({ type: "openreef/dosing_calibrate_start", channel_id: id }, "Calibration run started — catch the output and measure it.");
       if (action === "doser-cal-save") this._doserCalibrateSave(id);
@@ -17297,7 +17297,7 @@ const rigSteps = [
     const standing = !!channel.schedule?.standing?.enabled;
     const line = fresh.status === "stale"
       ? standing
-        ? `<strong>⚠ Past its day.</strong> Load today's phyto, then tap Loaded — the drip keeps running meanwhile.`
+        ? `<strong>⛔ Past its day — the drip is held off.</strong> Load today's phyto, then tap Loaded.`
         : `<strong>⛔ Stale — dosing is held off.</strong> Refresh the culture, then tap Refreshed.`
       : fresh.status === "aging"
         ? `⚠ Aging — about ${this._format(fresh.hoursLeft, 0)} h left.`
@@ -17309,7 +17309,7 @@ const rigSteps = [
         <small>${line}</small>
         <div class="mini-grid">
           <label>Shelf life (days)<input type="number" min="0" max="60" step="0.5" data-scope="dosing-channel-reservoir" data-id="${eid}" data-field="shelfLifeDays" value="${res.shelfLifeDays ?? 1}"${res.refrigerated ? " readonly" : ""}><small>${res.refrigerated ? "Read from the linked bottle's shelf life once opened." : standing ? "A room-temperature jar keeps about a day — load it fresh each morning; an air line in the jar stops the phyto settling." : "0 = never expires. Phyto/pods/baby brine keep about a day."}</small></label>
-          <label>Fresh chaser (s)<input type="number" min="0" max="120" step="1" data-scope="dosing-channel" data-id="${eid}" data-field="chaserSeconds" value="${channel.chaserSeconds ?? 0}"><small>Post-dose rinse from the AWC fresh line — keeps the food line clear. 0 = off.</small></label>
+          <label>Automatic rinse<input type="text" value="Disabled" disabled><small>The rinse shares the AWC fill pump and is disabled until pump coordination is verified. Flush the food line manually.</small></label>
         </div>
         <div class="button-row">
           <button class="secondary" data-action="doser-mark-refreshed" data-id="${eid}">${standing ? "Loaded today" : "Refreshed today"}</button>
@@ -17354,7 +17354,7 @@ const rigSteps = [
       calibration: {},
       driver: { type: presetDriver || "openreef_esphome_stepper", entities: {} },
     };
-    if (chemical === "livefood") channels[id].chaserSeconds = 5;
+    if (chemical === "livefood") channels[id].chaserSeconds = 0;
     this._doserMessage = "";
     this._setDirty(true);
     this._recordActivity(`Added dosing channel: ${label}`);
@@ -17367,17 +17367,16 @@ const rigSteps = [
     const channels = this._doserChannels();
     const channel = channels[id];
     if (!channel) return;
-    const enabledEntity = channel.driver?.entities?.enabledSwitch;
-    const pumpOn = enabledEntity && this._state(enabledEntity)?.state === "on";
-    if (pumpOn && this._doserRemoveConfirm !== id) {
-      // Removing only unlinks OpenReef — the on-device schedule keeps dosing.
-      this._doserRemoveConfirm = id;
+    const enabledEntity = channel.driver?.entities?.enabledSwitch || channel.driver?.entities?.powerSwitch;
+    const pumpOff = !enabledEntity || this._state(enabledEntity)?.state === "off";
+    if (channel.enabled || !pumpOff || channel.state?.haRunStartedAt) {
+      this._doserMessage = "Disable and save this channel, then confirm its pump is off before removing it.";
       this._render();
       return;
     }
     this._doserRemoveConfirm = "";
     this._doserCall({ type: "openreef/dosing_delete_channel", channel_id: id },
-      "Channel removed. The pump's on-device schedule keeps running until its enable switch is turned off.");
+      "Stopped channel removed.");
   }
 
   _doserAutoBind(id) {
@@ -17389,6 +17388,7 @@ const rigSteps = [
     const driver = channel.driver = channel.driver || {};
     const entities = driver.entities = driver.entities || {};
     let bound = 0;
+    let ambiguous = 0;
     for (const [role, pattern] of Object.entries(suffixes)) {
       const dot = pattern.indexOf(".");
       const domain = pattern.slice(0, dot);
@@ -17396,12 +17396,14 @@ const rigSteps = [
       // A node without friendly_name yields prefix-less ids (`number.kalk_…`) —
       // accept the exact bare id as well as the suffix-with-prefix form.
       const bare = domain + "." + suffix.slice(1);
-      const match = keys.find((e) => e === bare || (e.startsWith(domain + ".") && e.endsWith(suffix)));
-      if (match) { entities[role] = match; bound += 1; }
+      const matches = keys.filter((e) => e === bare || (e.startsWith(domain + ".") && e.endsWith(suffix)));
+      if (matches.length > 1) { ambiguous += 1; continue; }
+      if (matches.length === 1) { entities[role] = matches[0]; bound += 1; }
     }
     this._doserMessage = bound
       ? `Auto-bind matched ${bound} of ${Object.keys(suffixes).length} entities by the reference-firmware names. Review the overrides for any misses, then Save.`
       : "No OpenReef doser entities found — is the device flashed, online, and named per the reference firmware?";
+    if (ambiguous) this._doserMessage = `${bound} roles matched; ${ambiguous} have multiple matching devices. Select those entities in the overrides. Existing bindings were kept for ambiguous roles.`;
     if (bound) this._setDirty(true);
     this._render();
   }
@@ -17764,7 +17766,7 @@ const rigSteps = [
           ${guardLine}
         </ul>
         <div class="button-row dose-actions">
-          <button class="secondary" data-action="doser-prime" data-id="${this._escape(id)}">Prime 10 s</button>
+          <button class="secondary" data-action="doser-prime" data-id="${this._escape(id)}">Prime once (~5 s)</button>
           <input type="number" min="0.1" step="0.1" max="${verifyMl}" placeholder="ml" data-doser-ml="${this._escape(id)}" class="dose-ml-input">
           <button class="secondary" data-action="doser-dose-now" data-id="${this._escape(id)}">Dose now</button>
         </div>
@@ -17849,7 +17851,7 @@ const rigSteps = [
 
   _doserSettingsSections() {
     const ids = this._doserChannelIds();
-    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["other", "Other"]];
+    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["livefood", "Live food"], ["other", "Other"]];
     return `
       <section class="mapping-section awc-settings-block">
         <div class="awc-section-title"><p class="eyebrow">Dosing channels</p></div>
@@ -17884,18 +17886,11 @@ const rigSteps = [
     const eid = this._escape(id);
     const kalkish = channel.chemical === "kalk";
     const continuous = (s.mode || "continuous") === "continuous";
-    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["other", "Other"]];
+    const chemicals = [["kalk", "Kalkwasser"], ["alk", "Alkalinity"], ["ca", "Calcium"], ["mg", "Magnesium"], ["trace", "Trace"], ["food", "Food"], ["livefood", "Live food"], ["other", "Other"]];
     const foodish = ["food", "livefood"].includes(channel.chemical);
     const standing = s.standing || {};
     const standingSum = this._doserSummary?.summary?.[id]?.standing || null;
     const derivedMl = standingSum && standingSum.mode === "density" ? Number(standingSum.derivedMlPerDay) : null;
-
-    const removeRow = this._doserRemoveConfirm === id
-      ? `<div class="notice warning-notice"><small>The pump's enable switch is ON — removing only unlinks OpenReef; the on-device schedule keeps dosing until that switch is turned off.</small>
-          <div class="button-row">
-            <button class="secondary" data-action="remove-doser-channel" data-id="${eid}">Remove anyway</button>
-          </div></div>`
-      : "";
 
     const noPhBlock = kalkish && !guards.phEntity && !guards.phMissingAcknowledged
       ? `<div class="notice warning-notice">
@@ -17926,7 +17921,6 @@ const rigSteps = [
           <strong>${esc(channel.name || id)} <span class="pill muted">${this._escape(this._doserChemicalLabel(channel.chemical))}</span></strong>
           <button class="secondary inline-btn" data-action="remove-doser-channel" data-id="${eid}">Remove</button>
         </div>
-        ${removeRow}
         <div class="mini-grid">
           <label>Name<input type="text" data-scope="dosing-channel" data-id="${eid}" data-field="name" value="${esc(channel.name || id)}"></label>
           <label>Chemical<select data-scope="dosing-channel" data-id="${eid}" data-field="chemical">
@@ -18043,7 +18037,7 @@ const rigSteps = [
         </label>` : ""}
         <div class="button-row">
           <button class="secondary" data-action="doser-reset-reservoir" data-id="${eid}">Refilled — reset ledger</button>
-          <button class="secondary" data-action="doser-prime" data-id="${eid}">Re-prime 10 s</button>
+          <button class="secondary" data-action="doser-prime" data-id="${eid}">Prime once (~5 s)</button>
         </div>
         ${channel.chemical === "livefood" || standing.enabled ? this._doserFreshnessBlock(eid, channel) : ""}
 
@@ -31900,7 +31894,8 @@ const rigSteps = [
     const foodChannelOpts = [`<option value="">— pick a live-food channel —</option>`]
       .concat(this._npsFoodChannelIds().map((id) => {
         const ch = this._doserChannels()[id] || {};
-        return `<option value="${this._escape(id)}" ${fxCfg.channelId === id ? "selected" : ""}>${this._escape(ch.name || id)} (${this._escape(this._doserChemicalLabel(ch.chemical))})</option>`;
+        const generic = ch.driver?.type === "ha_switch_timed";
+        return `<option value="${this._escape(id)}" ${fxCfg.channelId === id ? "selected" : ""} ${generic ? "disabled" : ""}>${this._escape(ch.name || id)} (${this._escape(this._doserChemicalLabel(ch.chemical))})${generic ? " — no completed-dose counter" : ""}</option>`;
       }))
       .join("");
 
@@ -31913,11 +31908,11 @@ const rigSteps = [
       <div class="awc-section-title"><p class="eyebrow">Species &amp; shelf</p></div>
       <small class="awc-hint">The species you keep and the bottles on the food shelf are livestock and stock, not settings — they are edited from the NPS tab. <button class="secondary compact-button" data-action="nps-library-open">Open Species &amp; shelf</button></small>
       <div class="awc-section-title"><p class="eyebrow">Brine feed-exchange</p></div>
-      <small class="awc-hint">Every dose on the linked channel — and its line-flush chaser — banks a matched drain the AWC drain pump runs back out when idle.</small>
+      <small class="awc-hint">Completed doses reported by the linked firmware channel bank a matched drain the AWC drain pump runs back out when idle. Generic HA switches cannot use matched drain. Automatic rinse is disabled.</small>
       <small class="awc-hint">⚠️ <strong>Salinity rule:</strong> only link a channel whose reservoir is <strong>tank-salinity</strong> (rinsed brine resuspended in tank-strength saltwater). Matching a drain to phyto, bacteria or any unmatched liquid removes salt against a fresh addition and slowly freshens the tank — those pumps are deliberately left out of the exchange.</small>
       <label class="toggle-card compact-toggle">
         <input type="checkbox" data-scope="nps-exchange" data-field="enabled" ${fxCfg.enabled ? "checked" : ""}>
-        <span><strong>Matched drain on</strong><small>Drains dose + chaser back out via the AWC drain pump.</small></span>
+        <span><strong>Matched drain on</strong><small>Drains the reported food volume back out via the AWC drain pump.</small></span>
       </label>
       <div class="mini-grid">
         <label>Live-food channel<select data-scope="nps-exchange" data-field="channelId">${foodChannelOpts}</select></label>

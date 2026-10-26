@@ -100,6 +100,14 @@ def _fire_leg(hass, entry):
     run(integration._async_awc_leg_complete(hass, entry, None))
 
 
+def _save_awc_settings(hass, entry, config):
+    # AWC settings writers own the same lock as their production WS handlers.
+    async def save():
+        async with integration._awc_lock(hass):
+            await integration._async_save_config(hass, entry, config)
+    run(save())
+
+
 def _drive(hass, entry, max_legs=12):
     for _ in range(max_legs):
         if _state(entry)["status"] not in integration._AWC_RUNNING_STATES:
@@ -359,8 +367,8 @@ def test_ato_suspended_during_change_and_blocks_turn_on():
 
 # --- Resume-to-balance on restart -------------------------------------------
 
-def test_resume_to_balance_on_startup():
-    # Simulate a crash at a leg boundary: drained 2 L, fill leg NOT yet begun (no stamps).
+def test_restart_at_leg_boundary_requires_reconciliation():
+    # Even a restart at a recorded boundary requires inspection before more pumping.
     entry = _entry("batch_sequential")
     awc = _awc(entry)
     awc["state"].update({
@@ -372,18 +380,15 @@ def test_resume_to_balance_on_startup():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     run(integration._async_awc_resume_on_startup(hass, entry, config))
-    # the fill leg is re-begun (resume-to-balance), pumps re-energised
-    assert _state(entry)["status"] == "filling"
-    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
-    _drive(hass, entry)
-    assert _state(entry)["status"] == "idle"
-    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-6)
+    assert _state(entry)["status"] == "fault"
+    assert "restart" in _state(entry)["fault"]
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    assert all(row.get("partial") for row in _awc(entry)["history"])
 
 
-def test_sequential_restart_mid_leg_credits_elapsed_no_replay():
-    # Crash 8 s into a 20 s fill leg (100 ml/s): the elapsed 0.8 L must be CREDITED, and
-    # the resumed leg must move only the remaining 1.2 L — not replay the whole 2 L
-    # (the old behaviour: 0.8 L already in the tank + 2 L replay = 0.8 L overfill).
+def test_sequential_restart_mid_leg_never_credits_downtime():
+    # Downtime is not proof of delivery: preserve recorded progress and latch.
     entry = _entry("batch_sequential")
     awc = _awc(entry)
     now = datetime.now(timezone.utc)
@@ -398,20 +403,15 @@ def test_sequential_restart_mid_leg_credits_elapsed_no_replay():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     run(integration._async_awc_resume_on_startup(hass, entry, config))
-    st = _state(entry)
-    assert st["status"] == "filling"
-    assert _close(st["movedMl"]["fill"], 800.0, 20.0)  # ~8 s x 100 ml/s credited
-    # the reservoir model was debited for the credited volume too
-    assert _close(_awc(entry)["reservoirs"]["fresh"]["remainingMl"], 25000 - st["movedMl"]["fill"], 1.0)
-    _drive(hass, entry)
-    assert _state(entry)["status"] == "idle"
-    # total accounted fill is the 2 L target — nothing replayed
-    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 0.05)
+    assert _state(entry)["status"] == "fault"
+    assert "restart" in _state(entry)["fault"]
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    assert all(row.get("partial") for row in _awc(entry)["history"])
 
 
-def test_sequential_restart_after_leg_elapsed_finalizes_no_replay():
-    # Crash discovered AFTER the fill leg's whole window elapsed: full credit ⇒ the change
-    # finalizes instead of re-pumping another 2 L into the tank.
+def test_sequential_restart_after_deadline_never_credits_downtime():
+    # An expired wall-clock window cannot establish how much water actually moved.
     entry = _entry("batch_sequential")
     awc = _awc(entry)
     awc["state"].update({
@@ -424,9 +424,11 @@ def test_sequential_restart_after_leg_elapsed_finalizes_no_replay():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     run(integration._async_awc_resume_on_startup(hass, entry, config))
-    assert _state(entry)["status"] == "idle"
+    assert _state(entry)["status"] == "fault"
+    assert "restart" in _state(entry)["fault"]
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
-    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-6)
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    assert all(row.get("partial") for row in _awc(entry)["history"])
 
 
 # --- WebSocket handlers ------------------------------------------------------
@@ -632,13 +634,17 @@ def test_abort_best_effort_stops_all_pumps_and_latches():
         return await real_call(domain, service, data, **kwargs)
 
     hass.services.async_call = flaky
-    run(integration._async_awc_abort(hass, entry, config, "test fault", True, False, None))
+    async def abort_locked():
+        async with integration._awc_lock(hass):
+            await integration._async_awc_abort(hass, entry, config, "test fault", True, False, None)
+    run(abort_locked())
 
     # the fill pump was still commanded off despite the drain turn_off raising
     assert _has_call(hass.services.calls, "turn_off", "switch.awc_fill")
     # and the state transition completed: fault latched (not left mid-abort)
     assert _state(entry)["status"] == "fault"
-    assert _state(entry)["fault"] == "test fault"
+    assert _state(entry)["fault"].startswith("test fault")
+    assert "stop could not be confirmed" in _state(entry)["fault"]
 
 
 def test_ws_acknowledge_clears_fault():
@@ -756,7 +762,9 @@ def _interval_entry(**sched_over):
             "everyMinutes": 60, "windowStart": "00:00", "windowEnd": "00:00",
             "amount": 0.96, "amountUnit": "litres", "period": "day"}
     base.update(sched_over)
-    return _entry("batch_sequential", awc_over={"schedule": base})
+    return _entry("batch_sequential", awc_over={"schedule": base, "pumps": {
+        "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 10},
+        "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 10}}})
 
 
 def test_interval_schedule_starts_micro_change():
@@ -806,7 +814,7 @@ def test_editing_interval_cadence_rearms_schedule():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     config["automaticWaterChange"]["schedule"]["everyMinutes"] = 120
-    run(integration._async_save_config(hass, entry, config))
+    _save_awc_settings(hass, entry, config)
     assert _state(entry)["scheduleArmedAt"]
 
 
@@ -847,7 +855,7 @@ def test_enabling_schedule_does_not_fire_passed_slot():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     config["automaticWaterChange"]["schedule"]["enabled"] = True
-    run(integration._async_save_config(hass, entry, config))
+    _save_awc_settings(hass, entry, config)
     assert _state(entry)["scheduleArmedAt"]
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     assert _state(entry)["status"] == "idle"
@@ -863,7 +871,7 @@ def test_enabling_master_awc_does_not_fire_passed_slot():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     config["automaticWaterChange"]["enabled"] = True
-    run(integration._async_save_config(hass, entry, config))
+    _save_awc_settings(hass, entry, config)
     assert _state(entry)["scheduleArmedAt"]
     run(integration._async_awc_schedule_tick(hass, entry, _now(3, 0)))
     assert _state(entry)["status"] == "idle"
@@ -1251,6 +1259,8 @@ def test_micro_change_skips_ato_and_dosing_suspend():
     entry = _entry("batch_sequential", awc_over={
         "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 15,
                 "microChangeThresholdMl": 100}})
+    for pump in _awc(entry)["pumps"].values():
+        pump["mlPerS"] = 20  # micro-dose needs a measurable run, not a subsecond pulse
     hass = _hass(entry)
     assert _start(hass, entry, 0.05, method="batch_sequential")[0]  # 50 ml ≤ 100 ml
     assert _state(entry)["microChange"] is True
@@ -1284,6 +1294,8 @@ def test_micro_change_preserves_prior_holdoff():
     entry = _entry("batch_sequential", awc_over={
         "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 60,
                 "microChangeThresholdMl": 100}})
+    for pump in _awc(entry)["pumps"].values():
+        pump["mlPerS"] = 20  # micro-dose needs a measurable run, not a subsecond pulse
     hass = _hass(entry)
     assert _start(hass, entry, 2.0, method="batch_sequential")[0]  # normal change
     _drive(hass, entry)
@@ -1306,6 +1318,8 @@ def test_micro_change_fault_kills_ato_equipment():
     entry = _entry("batch_sequential", equipment=equipment, awc_over={
         "ato": {"suspendDuringChange": True, "stabilizationHoldoffMinutes": 15,
                 "microChangeThresholdMl": 100}})
+    for pump in _awc(entry)["pumps"].values():
+        pump["mlPerS"] = 20  # micro-dose needs a measurable run, not a subsecond pulse
     hass = _hass(entry, states={"switch.my_ato": "on"})
     assert _start(hass, entry, 0.05, method="batch_sequential")[0]
     assert not _has_call(hass.services.calls, "turn_off", "switch.my_ato")  # micro: no kill
@@ -1546,8 +1560,7 @@ def test_simultaneous_intermediate_tick_no_false_abort():
 
 
 def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
-    # crash after drain done (2 L) but fill only 0.5 L: resume must NOT re-run drain,
-    # and the 1.5 L pre-existing gap must NOT false-abort (re-baselined imbalance cap).
+    # A deliberately paused, confirmed-stopped change resumes known remaining volume.
     entry = _entry("batch_simultaneous")  # default cap 0.5 L — would abort without baseline
     awc = _awc(entry)
     awc["state"].update({
@@ -1557,7 +1570,8 @@ def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
-    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    _state(entry)["status"] = "paused"  # known, previously stopped progress
+    run(integration._async_awc_try_resume(hass, entry, None))
     st = _state(entry)
     assert st["status"] == "exchanging"
     assert _close(st["exchangeBaselineNetMl"], 1500, 1)  # SIGNED: drained ahead ⇒ positive
@@ -1575,7 +1589,7 @@ def test_simultaneous_resume_to_balance_only_restarts_unfinished_side():
 
 
 def test_simultaneous_resume_uncalibrated_faults_not_completes():
-    # both pumps uncalibrated on resume must FAULT, never finalize as a phantom complete.
+    # Known paused progress stays paused until missing calibration is supplied.
     entry = _entry("batch_simultaneous", awc_over={"pumps": {
         "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 0},
         "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 0},
@@ -1588,9 +1602,10 @@ def test_simultaneous_resume_uncalibrated_faults_not_completes():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
-    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    _state(entry)["status"] = "paused"  # known, previously stopped progress
+    run(integration._async_awc_try_resume(hass, entry, None))
     st = _state(entry)
-    assert st["status"] == "fault" and "calibrat" in st["fault"].lower()
+    assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
     assert not _awc(entry)["history"]  # never recorded a (zero-volume) completion
 
 
@@ -1654,8 +1669,7 @@ def test_sequential_checkpoint_ok_rearms_without_completing():
 
 
 def test_exchange_tick_survives_unreachable_pump_stop():
-    # R11: a raising turn_off (ESP unreachable) must not abandon the tick — the
-    # accounting still persists and the monitor timer still re-arms.
+    # Failure to confirm OFF must stop the other side and latch the exchange.
     sched = install_scheduler(integration)
     entry = _entry("batch_simultaneous", awc_over={"safety": {
         "highLevelEntity": "binary_sensor.high", "leakEntity": "binary_sensor.leak",
@@ -1665,17 +1679,15 @@ def test_exchange_tick_survives_unreachable_pump_stop():
     hass.services.fail_on.add(("switch", "turn_off", "switch.awc_drain"))
     _fire_exchange(hass, entry, age_done=("drain",))
     st = _state(entry)
-    assert st["status"] == "exchanging"
-    assert _close(st["movedMl"]["drain"], 2000, 5)  # accounting persisted despite the failure
-    assert sched.pending()                    # monitor re-armed
+    assert st["status"] == "fault"
+    assert _close(_awc(entry)["history"][0]["drainedL"], 2, .005)  # accounting persisted despite the failure
+    assert not sched.pending()                # fault never continues pumping
     hass.services.fail_on.clear()
     install_scheduler(integration)
 
 
-def test_timer_fired_rearms_monitor_after_handler_crash():
-    # R11: if the handler dies mid-flight (here: the save), the finally-arm must keep
-    # the monitor alive — a dead timer while pumps run is the 'keep filling forever'
-    # hazard.
+def test_timer_failure_stops_and_faults_without_replaying_progress():
+    # Save failure after actuation must stop and latch, never replay stale progress.
     sched = install_scheduler(integration)
     entry = _entry("batch_simultaneous")
     hass = _hass(entry)
@@ -1695,14 +1707,15 @@ def test_timer_fired_rearms_monitor_after_handler_crash():
     finally:
         integration._async_save_config = real_save
     assert raised
-    assert sched.pending()  # the finally-arm re-armed the monitor
-    assert _state(entry)["status"] == "exchanging"
+    assert not sched.pending()  # stale progress must never be re-executed
+    assert _state(entry)["status"] == "fault"
+    assert hass.states.get("switch.awc_drain").state == "off"
+    assert hass.states.get("switch.awc_fill").state == "off"
     install_scheduler(integration)
 
 
 def test_sequential_resume_uncalibrated_faults_not_replays():
-    # Resume lands on a fill leg whose pump lost its calibration: begin-leg must fault
-    # (R8), never energise a pump on a zero-length timer.
+    # A paused fill with missing calibration must not energise the pump.
     entry = _entry("batch_sequential", awc_over={"pumps": {
         "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
         "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 0},
@@ -1715,16 +1728,15 @@ def test_sequential_resume_uncalibrated_faults_not_replays():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
-    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    _state(entry)["status"] = "paused"  # known, previously stopped progress
+    run(integration._async_awc_try_resume(hass, entry, None))
     st = _state(entry)
-    assert st["status"] == "fault" and "calibrat" in st["fault"].lower()
+    assert st["status"] == "paused" and "calibrat" in st["pausedReason"].lower()
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
 
 
-def test_sequential_resume_sliver_completes_without_fault():
-    # Resume with 30 ml left on the fill leg while spin-up is 50 ml: the sliver's
-    # runtime rounds to ≤ 0 on a CALIBRATED pump — run a floor tick and finish,
-    # never latch a 'not calibrated' fault (R13 parity for the sequential path).
+def test_sequential_resume_sliver_below_minimum_requires_reconciliation():
+    # Do not replace a 30 ml remainder with an arbitrary, larger one-second burst.
     entry = _entry("batch_sequential", awc_over={"pumps": {
         "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
         "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100, "spinUpMl": 50},
@@ -1737,12 +1749,12 @@ def test_sequential_resume_sliver_completes_without_fault():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
-    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    _state(entry)["status"] = "paused"  # known, previously stopped progress
+    run(integration._async_awc_try_resume(hass, entry, None))
     st = _state(entry)
-    assert st["status"] == "filling", st.get("fault")
-    _fire_leg(hass, entry)  # the floor tick's completion credits the sliver → finalize
-    assert _state(entry)["status"] == "idle"
-    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+    assert st["status"] == "fault" and "minimum" in st["fault"]
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _awc(entry)["history"]  # no phantom completion / arbitrary floor run
 
 
 def test_acknowledge_records_partial_progress_history():
@@ -1769,9 +1781,8 @@ def test_acknowledge_records_partial_progress_history():
     assert _close(_awc(entry)["ledger"]["cumulativeDrainedL"], 1.5, 1e-6)
 
 
-def test_simultaneous_resume_near_end_completes_without_fault():
-    # Crash with 30 ml left on the fill side while its spin-up correction is 50 ml:
-    # the sliver's fitted runtime is ≤ 0 — that side is DONE, not 'uncalibrated' (R13).
+def test_simultaneous_resume_sliver_below_minimum_requires_reconciliation():
+    # A sub-minimum remainder is not phantom-completed without pumping.
     entry = _entry("batch_simultaneous", awc_over={"pumps": {
         "drain": {"switchEntity": "switch.awc_drain", "mlPerS": 100},
         "fill": {"switchEntity": "switch.awc_fill", "mlPerS": 100, "spinUpMl": 50},
@@ -1784,17 +1795,16 @@ def test_simultaneous_resume_near_end_completes_without_fault():
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(entry.options[CONF_SETTINGS])
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
-    run(integration._async_awc_resume_on_startup(hass, entry, config))
+    _state(entry)["status"] = "paused"  # known, previously stopped progress
+    run(integration._async_awc_try_resume(hass, entry, None))
     st = _state(entry)
-    assert st["status"] != "fault", st.get("fault")
-    _fire_exchange(hass, entry, age_done=("drain", "fill"))
-    assert _state(entry)["status"] == "idle"
+    assert st["status"] == "fault" and "minimum" in st["fault"]
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert not _awc(entry)["history"]  # no phantom completion / arbitrary floor run
 
 
-def test_simultaneous_relaunch_dead_reckons_run_on():
-    # HA died mid-exchange; by the time it's back both persisted stop times have
-    # passed — the ESP kept pumping toward them, so the run-on must be credited before
-    # replanning (R10): resume finalizes instead of re-running already-moved volume.
+def test_simultaneous_restart_never_credits_downtime():
+    # Only persisted progress survives; no inferred run-on or automatic restart.
     entry = _entry("batch_simultaneous")
     awc = _awc(entry)
     now = datetime.now(timezone.utc)
@@ -1808,13 +1818,11 @@ def test_simultaneous_relaunch_dead_reckons_run_on():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     run(integration._async_awc_resume_on_startup(hass, entry, config))
-    st = _state(entry)
-    assert st["status"] == "idle"
-    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+    assert _state(entry)["status"] == "fault"
+    assert "restart" in _state(entry)["fault"]
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
-    # the run-on was mirrored into the reservoir models (fill delta 1.5 L, drain 0.5 L)
-    assert _close(_awc(entry)["reservoirs"]["fresh"]["remainingMl"], 23500.0, 1.0)
-    assert _close(_awc(entry)["reservoirs"]["waste"]["filledMl"], 500.0, 1.0)
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
+    assert all(row.get("partial") for row in _awc(entry)["history"])
 
 
 def test_exchange_tick_rate_zeroed_mid_run_pauses_without_credit():
@@ -1966,10 +1974,8 @@ def test_ws_calibrate_rejects_implausible_intercept():
 
 # --- Stage B: N-source (fill2/fresh2), state migration, salt ledger ------------
 
-def test_legacy_state_blob_migrates_and_resumes():
-    # A pre-Stage-B persisted blob (drainedMl/filledMl/exchangeBaselineGapMl scalars)
-    # must migrate to movedMl/endsAt/exchangeBaselineNetMl — with the SIGN recovered
-    # from whichever side was ahead — and then resume-to-balance to completion.
+def test_legacy_state_blob_migrates_and_latches_on_restart():
+    # Legacy progress migrates, but restart still requires manual reconciliation.
     entry = _entry("batch_simultaneous")
     awc = _awc(entry)
     st = awc["state"]
@@ -1990,12 +1996,11 @@ def test_legacy_state_blob_migrates_and_resumes():
     hass = _hass(entry)
     config = integration._config_from_entry(entry)
     run(integration._async_awc_resume_on_startup(hass, entry, config))
-    assert _state(entry)["status"] == "exchanging"
-    assert _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
+    assert _state(entry)["status"] == "fault"
+    assert "restart" in _state(entry)["fault"]
+    assert not _has_call(hass.services.calls, "turn_on", "switch.awc_fill")
     assert not _has_call(hass.services.calls, "turn_on", "switch.awc_drain")
-    _fire_exchange(hass, entry, age_done=("drain", "fill"))
-    assert _state(entry)["status"] == "idle"
-    assert _close(_awc(entry)["history"][0]["filledL"], 2.0, 1e-3)
+    assert all(row.get("partial") for row in _awc(entry)["history"])
 
 
 def _two_source_entry(fresh2_over=None, policy=None):

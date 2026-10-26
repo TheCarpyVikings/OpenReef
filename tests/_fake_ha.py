@@ -173,7 +173,7 @@ class FakeHass:
             coro.close()
         except (AttributeError, RuntimeError):
             pass
-        return SimpleNamespace(name=name)
+        return SimpleNamespace(name=name, done=lambda: True, cancel=lambda: None)
 
 
 class FakeConnection:

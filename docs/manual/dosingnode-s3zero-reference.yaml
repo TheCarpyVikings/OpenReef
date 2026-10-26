@@ -45,11 +45,11 @@
 #
 # -----------------------------------------------------------------------------
 # Safety model on THIS node (be honest — it is thinner than the reefnode's):
-#   1. Everything boots OFF (ALWAYS_OFF).
+#   1. Dosing enables boot OFF and expire without a verified HA sync heartbeat.
 #   2. Per-pump MAX-RUNTIME watchdogs FAIL-LOCK the node (latched re-arm via
 #      Clear Lock). This is a SOFTWARE latch: there is no master relay here.
-#   3. Reservoir empty-guards are the SOFTWARE ledgers in OpenReef; the
-#      reservoir-low floats are stubbed clear below (no floats fitted).
+#   3. Reservoir volumes are estimates in OpenReef, not physical empty
+#      interlocks; reservoir-low floats are stubbed clear (no floats fitted).
 #   4. Flood-hazard sensing (leak, display-high) belongs to a future sensor
 #      node; HA-side guards act on it once bound.
 #
@@ -84,9 +84,35 @@ substitutions:
 esphome:
   name: ${node_name}
   friendly_name: ${friendly_name}
+  # Validated and compiled with ESPHome 2026.10.0, Arduino / ESP-IDF 5.5.6.
+  min_version: 2026.10.0
   on_boot:
     priority: -100          # very late: only after everything initialised cleanly
     then:
+      # Cut ENN BEFORE any UART transaction. The upstream stepper's disable()
+      # sends a UART stop first; a broken UART must not delay the physical cut.
+      - lambda: |-
+          id(kalk_driver).TMC2209Component::enable(false);
+          id(node_ready) = true;
+          if (id(kalk_in_progress) || id(lf_in_progress) || id(kalk_driver).is_failed()) {
+            id(trip_lock).execute();
+          }
+      - tmc2209.configure:
+          id: kalk_driver
+          microsteps: 16
+          interpolation: true
+      - tmc2209.currents:
+          id: kalk_driver
+          standstill_mode: freewheeling
+          run_current: !lambda 'return id(kalk_run_current).state;'
+          ihold: 0
+          iholddelay: 0
+          tpowerdown: 0
+      # Use the driver's C++ method: upstream's disable action does not wrap
+      # its constant for ESPHome 2026.10's TemplatableFn code generation.
+      - lambda: |-
+          id(kalk_driver).TMC2209Component::enable(false);
+          id(kalk_driver).enable(false);
       - logger.log: "Dosing node boot complete. No master relay on this node — pumps stay OFF until commanded."
 
 esp32:
@@ -96,14 +122,19 @@ esp32:
     type: arduino
 
 external_components:
-  # PIN this to a known-good ref before first compile and verify the
-  # stepper/tmc2209 API names (see kalk-doser-esphome-design.md §7).
-  - source: github://slimcdk/esphome-custom-components
+  # Pinned so an upstream change cannot silently change pump behaviour.
+  - source: github://slimcdk/esphome-custom-components@b5f0e44ae8732f68b9bbeaed9e962ca052d04cdb
     components: [ tmc2209_hub, tmc2209, stepper ]
+  # Copy this folder beside the YAML in ESPHome. It prevents the upstream
+  # driver's unconditional setup-time enable and cuts ENN before UART stops.
+  - source: esphome_components
+    components: [ openreef_tmc2209 ]
 
-# Local network/API — NONE of the safety below depends on it being up.
+# Local watchdogs do not depend on HA. Scheduled food delivery additionally
+# requires a verified enable heartbeat from OpenReef at least every 180 s.
 api:
 ota:
+  - platform: esphome
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
@@ -129,13 +160,6 @@ time:
   - platform: sntp
     id: reef_time
     timezone: ${timezone}
-    on_time:
-      # SNTP local midnight — reset both dosers' daily totals.
-      - seconds: 0
-        minutes: 0
-        hours: 0
-        then:
-          - script.execute: reset_daily_total
 
 uart:
   id: tmc_uart
@@ -147,14 +171,56 @@ uart:
 globals:
   - id: awc_locked
     type: bool
-    restore_value: no
+    restore_value: true
     initial_value: "false"
+  - id: node_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: kalk_in_progress
+    type: bool
+    restore_value: true
+    initial_value: "false"
+  - id: lf_in_progress
+    type: bool
+    restore_value: true
+    initial_value: "false"
+  - id: dose_day
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: kalk_enable_heartbeat
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: lf_enable_heartbeat
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: lf_stopping_normally
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: stepper_last_position
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: stepper_progress_at
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
   # Kalk channel (design authority: kalk-doser-esphome-design.md §5)
   - id: steps_per_ml
     type: float
     restore_value: true
     initial_value: '0'          # 0 = NOT CALIBRATED — blocks all kalk dosing
   - id: dosed_today_ml
+    type: float
+    restore_value: true
+    initial_value: '0'
+  # Cap reservations include interrupted doses. The public sensors report only
+  # completed commands: matched export must never drain for an unfinished dose.
+  - id: completed_today_ml
     type: float
     restore_value: true
     initial_value: '0'
@@ -189,6 +255,10 @@ globals:
     type: float
     restore_value: true
     initial_value: '0'
+  - id: lf_completed_today_ml
+    type: float
+    restore_value: true
+    initial_value: '0'
   - id: lf_guard_pass
     type: bool
     restore_value: false
@@ -204,11 +274,80 @@ script:
     then:
       - switch.turn_off: drain_pump
       - switch.turn_off: fresh_pump
+      - script.execute: stop_livefood
+      - script.execute: stop_stepper
+  - id: stop_livefood
+    then:
+      - lambda: 'id(lf_stopping_normally) = false;'
       - switch.turn_off: livefood_pump
+      - script.stop: lf_run_dose
+      - script.stop: lf_service_run
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && id(lf_in_progress) && !id(awc_locked);'
+          then:
+            - script.execute: trip_lock
+  - id: stop_stepper
+    then:
+      - lambda: |-
+          if (id(node_ready)) {
+            id(kalk_driver).TMC2209Component::enable(false);
+          }
+      - script.stop: run_stepper
+      - script.stop: run_dose
+      - script.stop: stepper_watchdog
+      - lambda: |-
+          if (id(node_ready)) {
+            id(kalk_driver).enable(false);
+            if (id(kalk_in_progress) && !id(awc_locked)) id(trip_lock).execute();
+          }
+  - id: stepper_watchdog
+    mode: restart
+    parameters:
+      timeout_ms: int
+    then:
+      - delay: !lambda 'return timeout_ms;'
+      - logger.log: "Stepper failed to finish in time — tripping. Check INDEX feedback."
+      - script.execute: trip_lock
+  - id: run_stepper
+    mode: single
+    parameters:
+      steps: int
+    then:
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && !id(awc_locked) && !id(kalk_ha_suspend).state && !id(kalk_driver).is_failed() && steps > 0 && steps <= 2000000 && std::isfinite(id(kalk_speed).state) && id(kalk_speed).state >= 50.0f && id(kalk_speed).state <= 2000.0f;'
+          then:
+            - stepper.set_speed:
+                id: kalk_driver
+                speed: !lambda 'return id(kalk_speed).state;'
+            - stepper.report_position:
+                id: kalk_driver
+                position: 0
+            - lambda: |-
+                id(stepper_last_position) = 0;
+                id(stepper_progress_at) = millis();
+            - stepper.set_target:
+                id: kalk_driver
+                target: !lambda 'return steps;'
+            - script.execute:
+                id: stepper_watchdog
+                # Bound a lost INDEX signal as well as a stalled run. At the
+                # default 400 steps/s, 100 rev takes about 13 min 20 s.
+                timeout_ms: !lambda 'return (int) fminf(7200000.0f, 5000.0f + 1500.0f * steps / fmaxf(50.0f, id(kalk_speed).state));'
+            - wait_until:
+                lambda: 'return id(kalk_driver).has_reached_target();'
+            - script.stop: stepper_watchdog
+            - lambda: |-
+                id(kalk_driver).TMC2209Component::enable(false);
+                id(kalk_driver).enable(false);
   - id: trip_lock
     then:
       - globals.set: { id: awc_locked, value: "true" }
       - script.execute: kill_all_pumps
+      - lambda: |-
+          awc_locked->update();
+          global_preferences->sync();
       - logger.log:
           level: WARN
           # SOFTWARE latch only on this node — there is no relay to drop. A
@@ -240,16 +379,35 @@ script:
     parameters:
       dose_ml: float
     then:
+      - script.execute: update_daily_total
       - lambda: |-
           std::string reason;   // empty = pass
-          if (!id(kalk_enabled).state) {
+          if (id(awc_locked)) {
+            reason = "node_locked";
+          } else if (!id(node_ready) || id(kalk_driver).is_failed()) {
+            reason = "driver_unavailable";
+          } else if (id(run_stepper).is_running()) {
+            reason = "busy";
+          } else if (!id(kalk_enabled).state) {
             reason = "disabled";
+          } else if (api::global_api_server == nullptr || !api::global_api_server->is_connected() ||
+                     (uint32_t)(millis() - id(kalk_enable_heartbeat)) >= 180000UL) {
+            reason = "ha_lease_expired";
+          } else if (!id(reef_time).now().is_valid() ||
+                     id(dose_day) != id(reef_time).now().year * 10000 + id(reef_time).now().month * 100 + id(reef_time).now().day_of_month) {
+            reason = "clock_untrusted";
           } else if (id(kalk_ha_suspend).state) {
             reason = "ha_suspend";
           } else if (id(kalk_reservoir_low).state) {
             reason = "reservoir_low";
-          } else if (id(steps_per_ml) <= 0.0f) {
+          } else if (!std::isfinite(id(steps_per_ml)) || id(steps_per_ml) <= 0.0f) {
             reason = "not_calibrated";
+          } else if (!std::isfinite(dose_ml) || dose_ml < 0.1f || dose_ml > 10.0f ||
+                     !std::isfinite(id(kalk_max_daily_ml).state) || !std::isfinite(id(dosed_today_ml)) ||
+                     id(kalk_max_daily_ml).state < 0.0f || id(dosed_today_ml) < 0.0f ||
+                     !std::isfinite(id(kalk_speed).state) || id(kalk_speed).state < 50.0f || id(kalk_speed).state > 2000.0f ||
+                     dose_ml * id(steps_per_ml) < 1.0f || dose_ml * id(steps_per_ml) > 2000000.0f) {
+            reason = "invalid_dose";
           } else {
             const int ws = (int) id(kalk_window_start_min).state;
             const int we = (int) id(kalk_window_end_min).state;
@@ -270,7 +428,7 @@ script:
                 if (api::global_api_server == nullptr ||
                     !api::global_api_server->is_connected()) {
                   ph_ok = false;
-                } else if (std::isnan(id(tank_ph).state)) {
+                } else if (!std::isfinite(id(tank_ph).state) || id(tank_ph).state <= 0.0f || id(tank_ph).state >= 14.0f) {
                   ph_ok = false;
                 } else if ((millis() - id(ph_last_update)) > 1800000UL) {
                   ph_ok = false;
@@ -306,19 +464,30 @@ script:
     parameters:
       dose_ml: float
     then:
-      - stepper.set_speed:
-          id: kalk_driver
-          speed: !lambda 'return id(kalk_speed).state;'
-      - stepper.report_position:
-          id: kalk_driver
-          position: 0
-      - stepper.set_target:
-          id: kalk_driver
-          target: !lambda 'return (int)(dose_ml * id(steps_per_ml));'
-      - globals.set:
-          id: dosed_today_ml
-          value: !lambda 'return id(dosed_today_ml) + dose_ml;'
+      # Reserve the commanded dose immediately against the cap. These are
+      # commanded volumes, not a flow measurement. Persist BEFORE motion; a
+      # reboot or interruption during motion retains the debit and trips.
       - lambda: |-
+          id(dosed_today_ml) += dose_ml;
+          id(kalk_in_progress) = true;
+          dosed_today_ml->update();
+          kalk_in_progress->update();
+          if (!global_preferences->sync()) {
+            id(trip_lock).execute();
+            return;
+          }
+          id(run_stepper).execute((int)(dose_ml * id(steps_per_ml)));
+      - script.wait: run_stepper
+      - lambda: |-
+          if (id(awc_locked)) return;
+          id(completed_today_ml) += dose_ml;
+          completed_today_ml->update();
+          id(kalk_in_progress) = false;
+          kalk_in_progress->update();
+          if (!global_preferences->sync()) {
+            id(trip_lock).execute();
+            return;
+          }
           auto now = id(reef_time).now();
           char buf[16];
           if (now.is_valid()) {
@@ -364,10 +533,28 @@ script:
       - logger.log:
           level: WARN
           format: "Kalk HA-suspend auto-expired after 4 h (HA never cleared it)."
-  - id: reset_daily_total
+  - id: update_daily_total
     then:
-      - globals.set: { id: dosed_today_ml, value: '0' }
-      - globals.set: { id: lf_dosed_today_ml, value: '0' }
+      - lambda: |-
+          auto now = id(reef_time).now();
+          if (!now.is_valid()) return;
+          const int today = now.year * 10000 + now.month * 100 + now.day_of_month;
+          // A backwards clock never grants another allowance. A restart that
+          // misses midnight catches up on the first trusted date instead.
+          if (today <= id(dose_day) || id(kalk_in_progress) || id(lf_in_progress)) return;
+          if (id(dose_day) != 0) {
+            id(dosed_today_ml) = 0.0f;
+            id(lf_dosed_today_ml) = 0.0f;
+            id(completed_today_ml) = 0.0f;
+            id(lf_completed_today_ml) = 0.0f;
+          }
+          id(dose_day) = today;
+          dosed_today_ml->update();
+          lf_dosed_today_ml->update();
+          completed_today_ml->update();
+          lf_completed_today_ml->update();
+          dose_day->update();
+          if (!global_preferences->sync()) id(trip_lock).execute();
 
   # --- Live-food channel scripts (brushed: time-based motion) ----------------
   # Same guard-chain order as kalk MINUS the pH step (no probe hardware on a
@@ -377,16 +564,31 @@ script:
     parameters:
       dose_ml: float
     then:
+      - script.execute: update_daily_total
       - lambda: |-
           std::string reason;   // empty = pass
-          if (!id(livefood_enabled).state) {
+          if (id(awc_locked)) {
+            reason = "node_locked";
+          } else if (id(lf_run_dose).is_running() || id(lf_service_run).is_running() || id(livefood_pump).state) {
+            reason = "busy";
+          } else if (!id(livefood_enabled).state) {
             reason = "disabled";
+          } else if (api::global_api_server == nullptr || !api::global_api_server->is_connected() ||
+                     (uint32_t)(millis() - id(lf_enable_heartbeat)) >= 180000UL) {
+            reason = "ha_lease_expired";
+          } else if (!id(reef_time).now().is_valid() ||
+                     id(dose_day) != id(reef_time).now().year * 10000 + id(reef_time).now().month * 100 + id(reef_time).now().day_of_month) {
+            reason = "clock_untrusted";
           } else if (id(livefood_ha_suspend).state) {
             reason = "ha_suspend";
           } else if (id(livefood_reservoir_low).state) {
             reason = "reservoir_low";
-          } else if (id(livefood_flow_ml_s).state <= 0.0f) {
+          } else if (!std::isfinite(id(livefood_flow_ml_s).state) || id(livefood_flow_ml_s).state <= 0.0f) {
             reason = "not_calibrated";
+          } else if (!std::isfinite(dose_ml) || dose_ml < 0.1f || dose_ml > 10.0f ||
+                     !std::isfinite(id(livefood_max_daily_ml).state) || !std::isfinite(id(lf_dosed_today_ml)) ||
+                     id(livefood_max_daily_ml).state < 0.0f || id(lf_dosed_today_ml) < 0.0f) {
+            reason = "invalid_dose";
           } else {
             const int ws = (int) id(livefood_window_start_min).state;
             const int we = (int) id(livefood_window_end_min).state;
@@ -406,6 +608,11 @@ script:
               reason = "daily_cap";
             }
           }
+          if (reason.empty()) {
+            float seconds = (dose_ml - id(livefood_spin_up_ml).state) / id(livefood_flow_ml_s).state;
+            if (!std::isfinite(seconds) || seconds <= 0.0f || seconds >= 60.0f)
+              reason = "runtime_limit";
+          }
           id(lf_guard_pass) = reason.empty();
           if (!reason.empty()) {
             id(livefood_last_skip).publish_state(reason);
@@ -416,6 +623,12 @@ script:
     parameters:
       dose_ml: float
     then:
+      - lambda: |-
+          id(lf_dosed_today_ml) += dose_ml;
+          id(lf_in_progress) = true;
+          lf_dosed_today_ml->update();
+          lf_in_progress->update();
+          if (!global_preferences->sync()) id(trip_lock).execute();
       # Time-based motion: runtime = (dose − spin-up) / flow, clamped ≥ 0. The
       # pump's own watchdog still backstops the delay.
       - switch.turn_on: livefood_pump
@@ -424,11 +637,19 @@ script:
           float net = dose_ml - id(livefood_spin_up_ml).state;
           if (flow <= 0.0f || net <= 0.0f) return (uint32_t) 0;
           return (uint32_t) (net / flow * 1000.0f);
+      - lambda: 'id(lf_stopping_normally) = true;'
       - switch.turn_off: livefood_pump
-      - globals.set:
-          id: lf_dosed_today_ml
-          value: !lambda 'return id(lf_dosed_today_ml) + dose_ml;'
       - lambda: |-
+          id(lf_stopping_normally) = false;
+          if (id(awc_locked)) return;
+          id(lf_completed_today_ml) += dose_ml;
+          lf_completed_today_ml->update();
+          id(lf_in_progress) = false;
+          lf_in_progress->update();
+          if (!global_preferences->sync()) {
+            id(trip_lock).execute();
+            return;
+          }
           auto now = id(reef_time).now();
           char buf[16];
           if (now.is_valid()) {
@@ -437,24 +658,12 @@ script:
             snprintf(buf, sizeof(buf), "ok");
           }
           id(livefood_last_skip).publish_state(buf);
-      # Fresh chaser: rinse the food line with fresh saltwater AFTER the dose.
-      # Skips (and says so) when the AWC currently owns the fresh pump — the
-      # water change wins; OpenReef reads the flag and skips the ledger debit.
-      - if:
-          condition:
-            lambda: 'return id(livefood_chaser_s).state > 0.0f;'
-          then:
-            - if:
-                condition:
-                  switch.is_on: fresh_pump
-                then:
-                  - lambda: 'id(livefood_chaser_skipped).publish_state(true);'
-                  - logger.log: "Live-food chaser skipped — AWC owns the fresh pump."
-                else:
-                  - lambda: 'id(livefood_chaser_skipped).publish_state(false);'
-                  - switch.turn_on: fresh_pump
-                  - delay: !lambda 'return (uint32_t)(id(livefood_chaser_s).state * 1000.0f);'
-                  - switch.turn_off: fresh_pump
+      # Retain the frozen entities, but do not borrow AWC's fill output. A GPIO
+      # state check cannot arbitrate two controllers or prove how much ran.
+      - lambda: |-
+          id(livefood_chaser_skipped).publish_state(true);
+          if (id(livefood_chaser_s).state > 0.0f)
+            ESP_LOGW("livefood", "Chaser disabled: shared AWC pump ownership is not available.");
   - id: lf_do_one_dose
     mode: single
     then:
@@ -483,6 +692,18 @@ script:
             - script.execute:
                 id: lf_run_dose
                 dose_ml: !lambda 'return id(livefood_manual_dose_ml).state;'
+  - id: lf_service_run
+    mode: single
+    parameters:
+      seconds: int
+    then:
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && !id(awc_locked) && !id(livefood_ha_suspend).state && !id(lf_run_dose).is_running() && !id(livefood_pump).state && seconds > 0 && seconds <= 30;'
+          then:
+            - switch.turn_on: livefood_pump
+            - delay: !lambda 'return seconds * 1000;'
+            - switch.turn_off: livefood_pump
   - id: lf_ha_suspend_expiry
     mode: restart
     then:
@@ -494,65 +715,105 @@ script:
 
 # --- Switches: pumps + latch clear (no master relay on this node) -------------
 switch:
+  # Raw pins are private. Template switches below check the latch BEFORE
+  # touching a GPIO: a rejected command must never produce a motor pulse.
   - platform: gpio
-    id: drain_pump
-    name: "AWC Drain Pump"
-    pin: GPIO1                           # D4184 TRIG
+    id: drain_motor
+    internal: true
+    pin: GPIO1
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      - if:
-          condition:
-            # No waste-full float on this node — the software ledger guards it.
-            lambda: "return id(awc_locked);"
-          then:
-            - switch.turn_off: drain_pump
-            - logger.log: "Drain blocked (node latched)."
-          else:
-            - script.execute: drain_watchdog
+      - script.execute: drain_watchdog
     on_turn_off:
       - script.stop: drain_watchdog
 
   - platform: gpio
-    id: fresh_pump
-    name: "AWC Fill Pump"                # keep the classic name so existing
-    pin: GPIO2                           # panel bindings carry over (D4184 TRIG)
+    id: fresh_motor
+    internal: true
+    pin: GPIO2
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      - if:
-          condition:
-            # No fresh-empty float / display-high sensor on this node — the
-            # software ledger and (future sensor-node) HA guards cover those.
-            lambda: "return id(awc_locked);"
-          then:
-            - switch.turn_off: fresh_pump
-            - logger.log: "Fill blocked (node latched)."
-          else:
-            - script.execute: fill_watchdog
+      - script.execute: fill_watchdog
     on_turn_off:
       - script.stop: fill_watchdog
 
   - platform: gpio
-    id: livefood_pump
-    name: "Live Food Pump"               # driven by the lf_* scripts; exposed
-    pin: GPIO4                           # for diagnostics — do not automate it (D4184 TRIG)
+    id: livefood_motor
+    internal: true
+    pin: GPIO4
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      - if:
-          condition:
-            lambda: "return id(awc_locked);"
-          then:
-            - switch.turn_off: livefood_pump
-            - logger.log: "Live-food pump blocked (node latched)."
-          else:
-            - script.execute: livefood_watchdog
+      - script.execute: livefood_watchdog
     on_turn_off:
       - script.stop: livefood_watchdog
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && id(lf_in_progress) && !id(lf_stopping_normally) && !id(awc_locked);'
+          then:
+            - script.execute: trip_lock
+
+  - platform: template
+    id: drain_pump
+    name: "AWC Drain Pump"
+    restore_mode: ALWAYS_OFF
+    lambda: 'return id(drain_motor).state;'
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && !id(awc_locked);'
+          then:
+            - switch.turn_on: drain_motor
+          else:
+            - switch.turn_off: drain_motor
+    turn_off_action:
+      - switch.turn_off: drain_motor
+
+  - platform: template
+    id: fresh_pump
+    name: "AWC Fill Pump"
+    restore_mode: ALWAYS_OFF
+    lambda: 'return id(fresh_motor).state;'
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && !id(awc_locked);'
+          then:
+            - switch.turn_on: fresh_motor
+          else:
+            - switch.turn_off: fresh_motor
+    turn_off_action:
+      - switch.turn_off: fresh_motor
+
+  - platform: template
+    id: livefood_pump
+    name: "Live Food Pump"
+    internal: true
+    restore_mode: ALWAYS_OFF
+    lambda: 'return id(livefood_motor).state;'
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(node_ready) && !id(awc_locked);'
+          then:
+            - switch.turn_on: livefood_motor
+          else:
+            - switch.turn_off: livefood_motor
+    turn_off_action:
+      - switch.turn_off: livefood_motor
 
   - platform: template
     name: "Clear Lock"                   # displays as "OpenReef Dosing Clear Lock"
     optimistic: true
     turn_on_action:
+      - script.execute: kill_all_pumps
       - globals.set: { id: awc_locked, value: "false" }
+      - globals.set: { id: kalk_in_progress, value: "false" }
+      - globals.set: { id: lf_in_progress, value: "false" }
+      - lambda: |-
+          awc_locked->update();
+          kalk_in_progress->update();
+          lf_in_progress->update();
+          if (!global_preferences->sync()) id(trip_lock).execute();
       - logger.log: "Dosing node lock cleared."
 
   # Kalk channel switches (frozen names — contract rev 2)
@@ -560,13 +821,20 @@ switch:
     name: "Kalk Dosing Enabled"
     id: kalk_enabled
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      # Template turn_on_action runs for repeated ON commands as well as edges.
+      # OpenReef renews this only AFTER the current settings have been verified.
+      - lambda: 'id(kalk_enable_heartbeat) = millis();'
+    on_turn_off:
+      - script.execute: stop_stepper
   - platform: template
     name: "Kalk HA Suspend"
     id: kalk_ha_suspend
     optimistic: true
     restore_mode: ALWAYS_OFF
     on_turn_on:
+      - script.execute: stop_stepper
       - script.execute: ha_suspend_expiry
     on_turn_off:
       - script.stop: ha_suspend_expiry
@@ -577,20 +845,24 @@ switch:
     restore_mode: RESTORE_DEFAULT_OFF
 
   # Live-food channel switches (frozen names — Stage D contract). The enable
-  # switch is ALSO the freshness posture: OpenReef turns it OFF the moment the
-  # culture goes stale and re-asserts every sync (the firmware cannot see
-  # freshness — HA owns that signal; this switch holds the posture).
+  # switch is ALSO the freshness lease. Stale food is disabled by OpenReef;
+  # missing HA syncs expire the lease locally rather than trusting an old ON.
   - platform: template
     name: "Live Food Dosing Enabled"
     id: livefood_enabled
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: 'id(lf_enable_heartbeat) = millis();'
+    on_turn_off:
+      - script.execute: stop_livefood
   - platform: template
     name: "Live Food HA Suspend"
     id: livefood_ha_suspend
     optimistic: true
     restore_mode: ALWAYS_OFF
     on_turn_on:
+      - script.execute: stop_livefood
       - script.execute: lf_ha_suspend_expiry
     on_turn_off:
       - script.stop: lf_ha_suspend_expiry
@@ -933,7 +1205,7 @@ sensor:
     entity_id: sensor.openreef_kalk_ph_mirror   # FIXED id — never a raw probe
     on_value:
       - lambda: |-
-          if (!std::isnan(x)) {
+          if (std::isfinite(x) && x > 0.0f && x < 14.0f) {
             id(ph_last_update) = millis();
             if (x >= id(kalk_ph_stop).state) {
               id(ph_latched_high) = true;
@@ -946,14 +1218,14 @@ sensor:
     id: kalk_dosed_today
     unit_of_measurement: "ml"
     accuracy_decimals: 2
-    lambda: 'return id(dosed_today_ml);'
+    lambda: 'return id(completed_today_ml);'
     update_interval: 30s
   - platform: template
     name: "Live Food Dosed Today (ml)"
     id: livefood_dosed_today
     unit_of_measurement: "ml"
     accuracy_decimals: 2
-    lambda: 'return id(lf_dosed_today_ml);'
+    lambda: 'return id(lf_completed_today_ml);'
     update_interval: 30s
 
 binary_sensor:
@@ -963,7 +1235,7 @@ binary_sensor:
   # The two reservoir-low floats are STUBBED CLEAR, names untouched, so the
   # frozen auto-bind contract still counts 25/25 + 22/22 and the guard chains
   # keep their reservoir_low step. Accepted trade (MULTINODE_PIVOT_BRIEF §4):
-  # the software reservoir ledger in OpenReef is the empty-guard on this node.
+  # OpenReef estimates remaining stock; these are NOT physical empty guards.
   - platform: template
     name: "Kalk Reservoir Low"
     id: kalk_reservoir_low
@@ -975,8 +1247,7 @@ binary_sensor:
   - platform: template
     name: "Live Food Chaser Skipped"
     id: livefood_chaser_skipped
-    # Holds the LAST dose's chaser outcome: true = skipped (AWC owned the fresh
-    # pump), false = chaser ran. OpenReef reads this when it debits the rinse.
+    lambda: 'return true;'    # Chaser is disabled; no rinse volume is implied.
 
 text_sensor:
   # NB: ESPHome text_sensor entities register in HA under `sensor.` — the
@@ -993,7 +1264,7 @@ text_sensor:
 
 # --- Kalk stepper ------------------------------------------------------------
 stepper:
-  - platform: tmc2209
+  - platform: openreef_tmc2209
     id: kalk_driver
     max_speed: 400 steps/s
     acceleration: 1000 steps/s^2
@@ -1003,16 +1274,6 @@ stepper:
     address: 0x00
     enn_pin: GPIO5     # Node 1 map (reefnode used GPIO13)
     index_pin: GPIO6   # Node 1 map (reefnode used GPIO14)
-    on_boot:
-      - tmc2209.configure:
-          microsteps: 16
-          interpolation: true
-      - tmc2209.currents:
-          standstill_mode: freewheeling
-          run_current: 0.6A
-          ihold: 0
-          iholddelay: 0
-          tpowerdown: 0
 
 # --- Buttons -----------------------------------------------------------------
 button:
@@ -1021,15 +1282,9 @@ button:
     name: "Kalk Prime / Test (run 5s)"
     id: kalk_prime_button
     on_press:
-      - stepper.set_speed:
-          id: kalk_driver
-          speed: !lambda 'return id(kalk_speed).state;'
-      - stepper.report_position:
-          id: kalk_driver
-          position: 0
-      - stepper.set_target:
-          id: kalk_driver
-          target: !lambda 'return (int)(id(kalk_speed).state * 5);'
+      - script.execute:
+          id: run_stepper
+          steps: !lambda 'return (int)(id(kalk_speed).state * 5);'
   - platform: template
     name: "Kalk Dose Now (one dose)"
     id: kalk_dose_now_button
@@ -1044,25 +1299,18 @@ button:
     name: "Kalk Calibrate 100 rev"
     id: kalk_calibrate_button
     on_press:
-      - stepper.set_speed:
-          id: kalk_driver
-          speed: !lambda 'return id(kalk_speed).state;'
-      - stepper.report_position:
-          id: kalk_driver
-          position: 0
-      - stepper.set_target:
-          id: kalk_driver
-          target: 320000
+      - script.execute:
+          id: run_stepper
+          steps: 320000
 
   # Live-food channel (frozen names)
   - platform: template
     name: "Live Food Prime / Test (run 5s)"
     id: livefood_prime_button
     on_press:
-      # Guard-free but hard-bounded: 5 s raw run for first-fill/direction checks.
-      - switch.turn_on: livefood_pump
-      - delay: 5s
-      - switch.turn_off: livefood_pump
+      - script.execute:
+          id: lf_service_run
+          seconds: 5
   - platform: template
     name: "Live Food Dose Now (one dose)"
     id: livefood_dose_now_button
@@ -1077,17 +1325,50 @@ button:
     name: "Live Food Calibrate 30s"
     id: livefood_calibrate_button
     on_press:
-      # Fixed 30 s burst into a measuring jug; the panel derives ml/s and writes
-      # Live Food Flow (ml/s). Guard-free by design: calibration must work on an
-      # uncalibrated (flow == 0) channel.
-      - switch.turn_on: livefood_pump
-      - delay: 30s
-      - switch.turn_off: livefood_pump
+      - script.execute:
+          id: lf_service_run
+          seconds: 30
 
 # --- Scheduled-dose executors -------------------------------------------------
 interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(run_stepper).is_running()) {
+            if (id(kalk_driver).current_position != id(stepper_last_position)) {
+              id(stepper_last_position) = id(kalk_driver).current_position;
+              id(stepper_progress_at) = millis();
+            }
+            if ((uint32_t)(millis() - id(stepper_progress_at)) >= 2000UL || id(kalk_driver).is_failed()) {
+              id(kalk_last_skip).publish_state("driver_feedback_lost");
+              id(trip_lock).execute();
+            }
+          }
+          const bool connected = api::global_api_server != nullptr && api::global_api_server->is_connected();
+          // Priming/calibration intentionally work with dosing disabled. They
+          // still must stop if their controlling API connection disappears.
+          if (!connected && (id(run_stepper).is_running() || id(lf_service_run).is_running())) {
+            id(trip_lock).execute();
+          }
+          if (id(kalk_enabled).state && (!connected ||
+              (uint32_t)(millis() - id(kalk_enable_heartbeat)) >= 180000UL)) {
+            id(kalk_last_skip).publish_state("ha_lease_expired");
+            id(kalk_enabled).turn_off();
+          }
+          if (id(livefood_enabled).state && (!connected ||
+              (uint32_t)(millis() - id(lf_enable_heartbeat)) >= 180000UL)) {
+            id(livefood_last_skip).publish_state("ha_lease_expired");
+            id(livefood_enabled).turn_off();
+          }
+          if (id(run_stepper).is_running() && id(kalk_in_progress) && id(kalk_ph_guard).state &&
+              (!std::isfinite(id(tank_ph).state) || id(tank_ph).state <= 0.0f || id(tank_ph).state >= 14.0f || id(ph_latched_high) ||
+               (uint32_t)(millis() - id(ph_last_update)) > 1800000UL)) {
+            id(kalk_last_skip).publish_state("ph_guard");
+            id(trip_lock).execute();
+          }
   - interval: 60s
     then:
+      - script.execute: update_daily_total
       - lambda: |-
           // Kalk: re-seed the calibration global from the restored number.
           id(steps_per_ml) = id(kalk_steps_per_ml).state;

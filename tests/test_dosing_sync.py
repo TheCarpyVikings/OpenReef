@@ -54,6 +54,7 @@ integration.dt_util = _FixedDt()
 
 ENTITIES = {
     "doseVolumeNumber": "number.kalk_dose_volume",
+    "minGapNumber": "number.kalk_min_gap",
     "doseIntervalNumber": "number.kalk_dose_interval",
     "nightIntervalNumber": "number.kalk_night_interval",
     "maxDailyNumber": "number.kalk_max_daily",
@@ -222,13 +223,14 @@ def test_sync_writes_verify_and_mark_synced():
     # Numbers were written (the fake mirrors them into state)...
     assert hass.states.get("number.kalk_dose_volume").state == "2.08"
     assert hass.states.get("number.kalk_steps_per_ml").state == "11851.0"
-    # ...enable switch goes on (calibrated + pH bound), pH guard switch follows the binding.
-    assert hass.states.get("switch.kalk_enabled").state == "on"
+    # Enable remains OFF until every setting has read back; guard is configured first.
+    assert hass.states.get("switch.kalk_enabled").state == "off"
     assert hass.states.get("switch.kalk_ph_guard").state == "on"
     # The verify timer is armed; firing it lands the terminal synced state.
     assert scheduler.pending()
     run(scheduler.fire_all())
     saved = _saved_channel(entry)
+    assert hass.states.get("switch.kalk_enabled").state == "on"
     assert saved["sync"]["state"] == "synced"
     assert saved["sync"]["lastSyncedAt"]
     assert saved["calibration"]["syncedToDevice"] is True
@@ -298,10 +300,9 @@ def test_tick_rollover_at_noon_is_anomalous_no_log_no_alarm():
     assert not saved["state"].get("missedSince"), "baseline must anchor at now"
 
 
-def test_tick_rollover_near_midnight_logs_and_reconciles_blind_window():
-    # Near-midnight reset: rollup appended, and the pre-midnight blind window
-    # (doses between the last sample and the reset) reconciled into the ledgers
-    # (R34) — deliveredMl covers prev + the plan-bounded gap.
+def test_tick_rollover_near_midnight_logs_observed_delivery_only():
+    # A schedule is not proof of delivery: never invent water input that could
+    # create a matched-drain obligation after a sensor reset.
     class _MidnightDt(_FixedDt):
         def now(self):
             return datetime(2026, 1, 2, 0, 30, 0)
@@ -317,8 +318,7 @@ def test_tick_rollover_near_midnight_logs_and_reconciles_blind_window():
         saved = _saved_channel(entry)
         assert saved["dailyLog"], "near-midnight rollover must append the rollup"
         entry_row = saved["dailyLog"][0]
-        assert entry_row["deliveredMl"] >= 280.0
-        assert entry_row["deliveredMl"] <= 375.0  # never past the auto daily cap
+        assert entry_row["deliveredMl"] == 280.0
         assert saved["state"]["rolloverAnomaly"] is False
         # The blind-window gap is debited from the reservoir along with the delta.
         assert saved["reservoir"]["remainingMl"] < 5000.0 - (entry_row["deliveredMl"] - 280.0)
@@ -524,7 +524,10 @@ def test_dosing_save_grafts_only_dosing_keys():
     stale = integration._config_from_entry(entry)
     fresh = integration._config_from_entry(entry)
     fresh.setdefault("automaticWaterChange", {})["todayLitres"] = 7.5
-    run(integration._async_save_config(hass, entry, fresh))          # concurrent writer lands
+    async def water_writer():
+        async with integration._awc_lock(hass):
+            await integration._async_save_config(hass, entry, fresh)
+    run(water_writer())  # the authorised concurrent water writer lands
     stale["dosing"]["channels"]["kalk"]["wear"]["runSeconds"] = 123.0
     run(integration._async_dosing_save(hass, entry, stale))          # dosing flush with stale blob
     cfg = entry.options[CONF_SETTINGS]
@@ -686,7 +689,7 @@ def test_ws_summary_reports_channels_and_bindings():
 
 
 def test_ws_delete_channel():
-    entry = _entry()
+    entry = _entry(channels={"kalk": _channel(enabled=False)})
     hass = _hass(entry)
     conn = FakeConnection()
     run(integration.websocket_dosing_delete_channel(hass, conn, {"id": 1, "channel_id": "kalk"}))
@@ -709,7 +712,7 @@ def test_ws_prime_is_bounded_and_stamps_primed_at():
     conn = FakeConnection()
     run(integration.websocket_dosing_prime(hass, conn, {"id": 1, "channel_id": "kalk", "seconds": 9999}))
     presses = _calls(hass, "button", "press")
-    assert len(presses) == 6, "30 s cap ⇒ at most 6 five-second presses"
+    assert len(presses) == 1, "One explicit bounded prime; never queue repeated bypass runs"
     assert _saved_channel(entry)["reservoir"]["primedAt"]
 
 
@@ -763,14 +766,15 @@ def test_mark_refreshed_restarts_clock_and_reenables():
     assert integration._dosing_desired_switches(saved)["enabledSwitch"] is True
 
 
-def test_chaser_debits_awc_fresh_reservoir_unless_skipped():
-    # A landed dose on a brushed channel with a 5 s chaser at 2 ml/s debits 10 ml
-    # from the AWC fresh reservoir and counts it into the fill ledger; the
-    # firmware's chaser-skipped flag suppresses the debit.
+def test_disabled_autonomous_chaser_never_invents_fill_or_drain():
+    # Shared-fill ownership is not acknowledged, so autonomous chaser is disabled.
+    # A stale saved 5-second preference must never invent water input or a drain.
     ch = _livefood(chaserSeconds=5, reservoir={"shelfLifeDays": 0})  # no expiry
     entry = _entry(channels={"phyto": ch})
     cfg = entry.options[CONF_SETTINGS]
     cfg.setdefault("automaticWaterChange", {})["enabled"] = True
+    cfg["automaticWaterChange"].setdefault("pumps", {})["fill"] = {
+        "mlPerS": 6, "exchangeFactor": 2, "spinUpMl": -1}
     cfg["automaticWaterChange"].setdefault("reservoirs", {})["fresh"] = {
         "capacityLitres": 25, "remainingMl": 25000}
     entry.options[CONF_SETTINGS] = integration._normalise_core_config(cfg)
@@ -779,13 +783,13 @@ def test_chaser_debits_awc_fresh_reservoir_unless_skipped():
     hass.states.set("sensor.kalk_dosed_today", "4.0")  # one 4 ml dose landed
     run(integration._async_dosing_tick(hass, entry))
     awc = entry.options[CONF_SETTINGS]["automaticWaterChange"]
-    assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 24990) < 0.6
-    assert abs(awc["ledger"]["cumulativeFilledL"] - 0.01) < 1e-6
+    assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 25000) < 0.6
+    assert abs(awc["ledger"]["cumulativeFilledL"] - 0.0) < 1e-6
     hass.states.set("binary_sensor.phyto_chaser_skipped", "on")
     hass.states.set("sensor.kalk_dosed_today", "8.0")
     run(integration._async_dosing_tick(hass, entry))
     awc = entry.options[CONF_SETTINGS]["automaticWaterChange"]
-    assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 24990) < 0.6  # unchanged
+    assert abs(awc["reservoirs"]["fresh"]["remainingMl"] - 25000) < 0.6  # unchanged
 
 
 def test_manual_dose_blocked_on_stale_food():

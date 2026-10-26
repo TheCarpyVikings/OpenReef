@@ -480,7 +480,11 @@ def test_matched_drain_full_cycle():
         state = _fx_state(entry)
         assert state["drainTargetMl"] == 500.0
         assert state["drainStartedAt"]
-        # Fire the stop timer: books settle, pump stops.
+        # A checkpoint before the deadline keeps monitoring; finish at the
+        # persisted deadline, after confirming the pump remained on.
+        assert await scheduler.fire_all() == 1
+        assert hass.states.get("switch.drain").state == "on"
+        _fx_state(entry)["drainEndsAt"] = (datetime.now(timezone.utc) - timedelta(milliseconds=10)).isoformat()
         assert await scheduler.fire_all() == 1
         assert hass.states.get("switch.drain").state == "off"
         state = _fx_state(entry)
@@ -516,7 +520,7 @@ def test_matched_drain_waits_below_minimum_and_when_busy():
     assert hass2.states.get("switch.drain").state == "off"
 
 
-def test_orphaned_drain_recovery_credits_elapsed_partial():
+def test_orphaned_drain_recovery_latches_unknown_volume_without_replaying():
     entry = _fx_entry(owed=500.0)
     started_at = datetime.now(timezone.utc) - timedelta(seconds=30)
     _fx_state(entry).update({
@@ -528,12 +532,16 @@ def test_orphaned_drain_recovery_credits_elapsed_partial():
     run(integration._async_nps_recover_orphaned_drain(hass, entry))
     assert hass.states.get("switch.drain").state == "off"
     state = _fx_state(entry)
-    # ~30 s at 10 ml/s ≈ 300 ml credited; the rest stays owed.
-    assert abs(state["lastDrainMl"] - 300.0) < 5.0
-    assert abs(state["owedMl"] - 200.0) < 5.0
+    # HA downtime cannot distinguish an early power cut from a running pump.
+    # Cancel pending drainage without inventing a measured volume.
+    assert state["lastDrainMl"] == 0
+    assert state["owedMl"] == 0
+    assert state["droppedMl"] == 500
     assert state["drainStartedAt"] == ""
     waste = entry.options[CONF_SETTINGS]["automaticWaterChange"]["reservoirs"]["waste"]
-    assert abs(waste["filledMl"] - 300.0) < 5.0
+    assert waste["filledMl"] == 0
+    assert entry.options[CONF_SETTINGS]["automaticWaterChange"]["state"]["status"] == "fault"
+    assert not entry.options[CONF_SETTINGS]["nps"]["feedExchange"]["enabled"]
 
 
 def test_awc_start_blocked_while_matched_drain_runs():
@@ -783,7 +791,7 @@ def test_ha_executor_refuses_kalk_and_stale_food():
     run(scenario2())
 
 
-def test_ha_recover_orphan_credits_honest_overrun():
+def test_ha_recover_orphan_stops_and_requires_manual_reconciliation():
     entry = _ha_entry(_ha_channel(state={
         "haRunStartedAt": _iso(datetime.now(timezone.utc) - timedelta(seconds=60)),
         "haRunEndsAt": _iso(datetime.now(timezone.utc) - timedelta(seconds=55)),
@@ -795,8 +803,9 @@ def test_ha_recover_orphan_credits_honest_overrun():
     run(integration._async_dosing_ha_recover(hass, entry))
     assert hass.states.get("switch.pump").state == "off"
     saved = _saved_channel(entry)
-    # pump really ran ~60 s at 1 ml/s → ~60 ml credited, NOT the 5 ml target
-    assert abs(saved["state"]["haDosedTodayMl"] - 60.0) < 3.0
+    # Downtime is not evidence the output stayed ON. Do not invent delivery.
+    assert saved["state"]["haDosedTodayMl"] == 0
+    assert saved["enabled"] is False
     assert saved["state"]["haRunEndsAt"] == ""
     assert any(e.get("kind") == "warn" for e in saved.get("events", []))
 

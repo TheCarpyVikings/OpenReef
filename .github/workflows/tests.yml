@@ -1,9 +1,9 @@
 name: tests
 
-# Fast, dependency-free checks for the OpenReef custom integration. The Python
+# Fast checks for the OpenReef custom integration. The Python
 # tests stub Home Assistant + voluptuous (see tests/_ha_stubs.py) and the panel
-# tests stub the browser (see tests/_panel_harness.mjs), so nothing needs to be
-# installed — no HA, no jsdom, no test runner.
+# tests stub the browser (see tests/_panel_harness.mjs): no HA or jsdom needed.
+# Firmware fault tests parse the real YAML with PyYAML and compile host C++.
 #
 # Suites are DISCOVERED, never listed: enumerating them one step at a time is how
 # five suites (icp, mode timers, salinity, trust moat and one since deleted) sat out
@@ -14,11 +14,15 @@ on:
     paths:
       - "custom_components/openreef/**"
       - "tests/**"
+      - "docs/manual/dosingnode-s3zero-reference.yaml"
+      - "docs/manual/esphome_components/**"
       - ".github/workflows/tests.yml"
   pull_request:
     paths:
       - "custom_components/openreef/**"
       - "tests/**"
+      - "docs/manual/dosingnode-s3zero-reference.yaml"
+      - "docs/manual/esphome_components/**"
       - ".github/workflows/tests.yml"
 
 jobs:
@@ -39,6 +43,9 @@ jobs:
 
       - name: Backend compiles
         run: python3 -m py_compile custom_components/openreef/*.py
+
+      - name: Firmware test dependencies
+        run: python3 -m pip install PyYAML==6.0.3
 
       - name: Panel JS syntax
         run: node --check custom_components/openreef/frontend/openreef-panel.js

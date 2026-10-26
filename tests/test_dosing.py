@@ -632,14 +632,12 @@ def test_reservoir_clock_reads_the_shelf_for_a_refrigerated_bottle_only():
     assert dosing.reservoir_clock(res, {"shelfLifeDaysOpened": 90}) == res
 
 
-def test_guard_jar_past_its_day_is_a_nag_not_a_stop():
-    """The drip's jar past its day warns (load today's phyto); a stale brine
-    culture on an ordinary live-food channel still blocks."""
+def test_guard_jar_past_its_day_blocks_until_refreshed():
+    """Expired phyto and brine both fail closed until the keeper refreshes."""
     stale_at = (NOW_UTC - timedelta(days=2)).isoformat()
     jar = _standing_channel(reservoir={"mixedAt": stale_at})
     reasons = dosing.guard_reasons(jar, _live(), 720, now=NOW_UTC)
-    assert [r["code"] for r in reasons if r["severity"] == "warn"] == ["jar_stale"]
-    assert "stale_food" not in _codes(reasons)
+    assert "stale_food" in _codes(reasons)
     brine = _channel("livefood", reservoir={"mixedAt": stale_at, "shelfLifeDays": 1})
     assert "stale_food" in _codes(dosing.guard_reasons(brine, _live(), 720, now=NOW_UTC))
 

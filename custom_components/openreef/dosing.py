@@ -399,7 +399,7 @@ def guard_reasons(
         block("awc_active", "Suspended — an automatic water change is active.")
 
     suspended_until = _parse_iso(state.get("suspendedUntil"))
-    now_dt = live.get("now")
+    now_dt = live.get("now") or now
     if suspended_until is not None and isinstance(now_dt, datetime) and now_dt < suspended_until:
         block("suspended", f"Dosing lockout active until {suspended_until.strftime('%H:%M')}.")
 
@@ -426,12 +426,6 @@ def guard_reasons(
         what = "live-food culture" if channel.get("chemical") == "livefood" else "food reservoir"
         if fresh["status"] == "soaking":
             block("food_soaking", "The brine enrichment soak is running; finish and rinse before dosing.")
-        elif fresh["status"] == "stale" and is_standing(channel) and channel.get("chemical") == "food":
-            # The drip's jar past its day: load today's phyto. A nag, not a
-            # stop — a few hours of tired phyto is not the danger a rotting
-            # brine culture is, and a stopped drip starves the carnation.
-            warn("jar_stale",
-                 "The jar is past its day — load today's phyto and tap 'Loaded'.")
         elif fresh["status"] == "stale":
             block("stale_food",
                   f"The {what} is past its shelf life — refresh the "

@@ -2952,4 +2952,48 @@ test("hatchery layout keeps heat and stale stock visible while background detail
   assert(html.includes('data-feeding-details="hatchery-rig">'), "rig starts closed");
 });
 
+test("live-food settings select the saved chemical instead of defaulting to kalk", async () => {
+  const panel = await makePanel(baseConfig());
+  const html = panel._doserChannelSettingsCard("brine");
+  assert(/<option value="livefood" selected>Live food<\/option>/.test(html), "livefood must have a selected option");
+});
+
+test("auto-bind finds every role for each reference pump family without crossing them", async () => {
+  const panel = await makePanel(baseConfig());
+  panel._config.dosing.channels.phyto = {chemical: "food", driver: {type: "openreef_esphome_stepper", entities: {}}};
+  const states = {};
+  for (const table of [panel.constructor.DOSER_BINDING_SUFFIXES, panel.constructor.DOSER_BRUSHED_BINDING_SUFFIXES]) {
+    for (const pattern of Object.values(table)) {
+      const [domain, suffix] = pattern.split(".");
+      states[`${domain}.openreef_dosing${suffix}`] = {state: "0"};
+    }
+  }
+  panel._hass = {states};
+  panel._render = () => {};
+  panel._setDirty = () => {};
+  panel._doserAutoBind("brine");
+  panel._doserAutoBind("phyto");
+  const brine = panel._config.dosing.channels.brine.driver.entities;
+  const phyto = panel._config.dosing.channels.phyto.driver.entities;
+  assert(Object.keys(brine).length === 22 && Object.values(brine).every(e => e.includes("_live_food_")), "all 22 brushed roles");
+  assert(Object.keys(phyto).length === 25 && Object.values(phyto).every(e => e.includes("_kalk_")), "all 25 stepper roles, even when used for food");
+});
+
+test("auto-bind leaves ambiguous pumps for explicit selection", async () => {
+  const panel = await makePanel(baseConfig());
+  const entities = panel._config.dosing.channels.brine.driver.entities;
+  entities.enabledSwitch = "switch.keeper_chosen";
+  panel._hass = {states: {
+    "switch.node_a_live_food_dosing_enabled": {state: "off"},
+    "switch.node_b_live_food_dosing_enabled": {state: "off"},
+    "button.node_a_live_food_calibrate_30s": {state: "unknown"},
+  }};
+  panel._render = () => {};
+  panel._setDirty = () => {};
+  panel._doserAutoBind("brine");
+  assert(entities.enabledSwitch === "switch.keeper_chosen", "never replace a chosen pump with an arbitrary one");
+  assert(entities.calibrateButton === "button.node_a_live_food_calibrate_30s", "unique roles still bind");
+  assert(panel._doserMessage.includes("multiple matching devices"), "explain manual selection");
+});
+
 runTests();

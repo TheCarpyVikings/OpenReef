@@ -4,6 +4,12 @@
 >
 > Written 2026-07-12 at software version **v0.5.1**.
 
+> **2026-10-25 commissioning update:** use
+> [the checked S3 Zero dosing-node instructions](manual/dosingnode-s3zero-design.md#5-checked-build-and-commissioning--2026-10-25)
+> and its reference YAML. The historical first-compile notes, 24-entity counts
+> and single-reefnode recommendation below are superseded for Node 1. The NPS
+> build uses the stepper for phyto (Food), keeping its Kalk entity names.
+
 ## 1. What OpenReef is, in one paragraph
 
 OpenReef is a Home Assistant custom integration ("the intelligence layer for reefing") positioned to beat Neptune Apex Fusion and raw HA on usability. Backend: `custom_components/openreef/` (one large orchestration module + pure-math engines `awc.py`/`dosing.py`). Frontend: a single ~19k-line vanilla web-component panel. Hardware side: ESP32 nodes running ESPHome. **Design law: guards live in firmware.** HA edits schedules and verifies every write by read-back; the device executes autonomously and must keep working (or keep refusing to work) when Wi-Fi/HA is down.
