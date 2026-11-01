@@ -1997,6 +1997,7 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
         ][-CONSUMABLE_HISTORY_MAX:]
         products[pid] = {
             "name": _awc_str(raw.get("name"), 120) or "Product",
+            **({"feedingUse": feeding_use} if (feeding_use := feeding_engine.shelf_feeding_use(raw)) else {}),
             **({"liveFood": raw["liveFood"]} if isinstance(raw.get("liveFood"), bool) else {}),
             "brand": _awc_str(raw.get("brand"), 120),
             "category": raw.get("category")
@@ -9325,6 +9326,10 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
             src = stored_products.get(pid)
             if not isinstance(src, dict) or not isinstance(dst, dict):
                 continue
+            # A label edit or an older Settings page must not turn a known
+            # culture supply into a tank quick-feed. Dual use has its own flag.
+            if feeding_use := feeding_engine.shelf_feeding_use(src):
+                dst["feedingUse"] = feeding_use
             src_stamp = _latest(src)
             if src_stamp is not None:
                 dst_stamp = _latest(dst)
@@ -18758,7 +18763,7 @@ def _feeding_normalise(raw: Any) -> dict[str, Any]:
     raw = raw if isinstance(raw, dict) else {}
     rows = []
     strings = ("id", "at", "name", "source", "sourceId", "sourceLabel", "foodId", "unit",
-               "from", "via", "productId", "slot", "note", "undoneAt", "updatedAt", "how")
+               "from", "via", "productId", "slot", "note", "undoneAt", "updatedAt", "how", "to")
     flags = ("live", "liveKnown", "undone", "extra", "drip", "running")
     for item in raw.get("rows", []) if isinstance(raw.get("rows"), list) else []:
         if not isinstance(item, dict) or not item.get("id") or feeding_engine._stamp(item.get("at")) is None:
@@ -18778,8 +18783,9 @@ def _feeding_normalise(raw: Any) -> dict[str, Any]:
         portion = feeding_engine._number(pref.get("portion"))
         if portion and portion <= 50000:
             value["portion"] = portion
-        if isinstance(pref.get("live"), bool):
-            value["live"] = pref["live"]
+        for key in ("live", "tankFeed"):
+            if isinstance(pref.get(key), bool):
+                value[key] = pref[key]
         preferences[str(fid)] = value
     return {"version": 1, "foods": feeding_engine.normalise_foods(raw.get("foods")),
             "preferences": preferences, "rows": rows,
@@ -18793,6 +18799,7 @@ def _feeding_catalog(config: dict[str, Any], now: datetime) -> list[dict[str, An
     cultures = _nps_cultures_cfg(config)
     block = config.get("feeding") or {}
     foods = feeding_engine.build_catalog(products, cultures, block.get("foods"))
+    use_rules = feeding_engine.tank_feed_rules(products, cultures, _nps_hatchery_v2(config))
     hatchery = _nps_feed_hatchery(config)
     brine = nps_engine.brine_feed_sources(hatchery, now)
     for food in foods:
@@ -18807,6 +18814,10 @@ def _feeding_catalog(config: dict[str, Any], now: datetime) -> list[dict[str, An
             food.update(live=pref["live"], liveKnown=True)
         for source in food["sources"]:
             kind = source["kind"]
+            rule = use_rules.get(source.get("productId"), {}) if kind == "shelf" else {}
+            source["tankFeedLocked"] = rule.get("tankFeedLocked", False)
+            source["tankFeed"] = (pref["tankFeed"] if isinstance(pref.get("tankFeed"), bool)
+                                  and not source["tankFeedLocked"] else rule.get("tankFeed", True))
             source["loggable"] = kind in ("manual", "shelf", "brine", "bottle")
             reason = ""
             if kind == "shelf":
@@ -18815,9 +18826,6 @@ def _feeding_catalog(config: dict[str, Any], now: datetime) -> list[dict[str, An
                 # less than the usual portion remains. Logging validates the
                 # requested amount against stock again.
                 reason = nps_engine.food_stock_pause_reason(product, .01, now)
-                if product.get("category") == nps_engine.ENRICHMENT_CATEGORY:
-                    source["loggable"] = False
-                    reason = "Log enrichment from its existing food-shelf controls."
             elif kind == "brine":
                 reason = brine[source["from"]].get("pauseReason") or ""
             elif kind == "bottle":
@@ -18827,8 +18835,14 @@ def _feeding_catalog(config: dict[str, Any], now: datetime) -> list[dict[str, An
                     reason = "The rotifer bottle is empty or past its storage window."
             elif kind == "culture":
                 reason = "Record a harvest in Cultures; the tank share will appear here."
+            if not source["tankFeed"]:
+                source["loggable"] = False
+                reason = rule.get("tankFeedReason") or "Not used for tank feeding."
             source["reason"] = reason
             source["available"] = source["loggable"] and not reason
+        food["tankFeed"] = any(s["tankFeed"] for s in food["sources"])
+        food["tankFeedLocked"] = all(s["tankFeedLocked"] for s in food["sources"])
+        food["tankFeedReason"] = " ".join(dict.fromkeys(s["reason"] for s in food["sources"] if not s["tankFeed"]))
         food["loggable"] = any(s["loggable"] for s in food["sources"])
     return foods
 
@@ -18941,6 +18955,7 @@ def _feeding_summary(hass: HomeAssistant, config: dict[str, Any], days: int) -> 
         tank_litres=_awc_effective_tank_l(config), history_started_at=block["historyStartedAt"],
         unrecorded=native.get("unrecorded"))
     source_food = {s["id"]: f for f in catalog for s in f["sources"]}
+    sources = {s["id"]: s for f in catalog for s in f["sources"]}
     planned = []
     timeline = _feeding_timeline(config, now_local)
     for event in timeline["events"]:
@@ -18950,7 +18965,7 @@ def _feeding_summary(hass: HomeAssistant, config: dict[str, Any], days: int) -> 
         if source == "brine":
             source = "brine:container"
         food = source_food.get(source)
-        if not food or not food.get("loggable"):
+        if not food or not sources.get(source, {}).get("loggable"):
             continue
         minute = event.get("at")
         planned.append({"id": event["id"], "foodId": food["id"], "name": food["name"],
@@ -18990,6 +19005,7 @@ async def websocket_feeding_summary(hass: HomeAssistant, connection: websocket_a
     vol.Required("type"): "openreef/feeding_food_save", vol.Optional("food_id"): cv.string,
     vol.Required("name"): cv.string, vol.Required("unit"): vol.In(feeding_engine.UNITS),
     vol.Required("portion"): vol.Any(int, float), vol.Optional("live"): cv.boolean,
+    vol.Optional("tank_feed"): cv.boolean,
 })
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -19014,6 +19030,9 @@ async def websocket_feeding_food_save(hass: HomeAssistant, connection: websocket
     if fid and existing is None:
         connection.send_error(msg["id"], "unknown_food", "That food no longer exists.")
         return
+    if existing and msg.get("tank_feed") is True and existing.get("tankFeedLocked"):
+        connection.send_error(msg["id"], "not_tank_food", existing["tankFeedReason"])
+        return
     if existing and existing["unit"] != unit and any(r.get("foodId") == fid for r in block["rows"]):
         connection.send_error(msg["id"], "unit_in_use", "This food has recorded portions. Add another food to use a different unit.")
         return
@@ -19021,7 +19040,8 @@ async def websocket_feeding_food_save(hass: HomeAssistant, connection: websocket
         if unit != existing["unit"]:
             connection.send_error(msg["id"], "fixed_unit", "The linked food keeps its existing unit.")
             return
-        block["preferences"][fid] = {"portion": portion, **({"live": msg["live"]} if "live" in msg else {})}
+        block["preferences"].setdefault(fid, {}).update(
+            portion=portion, **({"live": msg["live"]} if "live" in msg else {}))
     else:
         key = fid[7:] if fid.startswith("manual:") else uuid.uuid4().hex[:16]
         if key not in block["foods"] and len(block["foods"]) >= 128:
@@ -19029,7 +19049,10 @@ async def websocket_feeding_food_save(hass: HomeAssistant, connection: websocket
             return
         fid = "manual:" + key
         block["foods"][key] = {"name": name, "unit": unit, "portion": portion,
-                               "live": msg.get("live") is True, "enabled": True}
+                               "live": msg.get("live", existing.get("live", False) if existing else False) is True,
+                               "enabled": True}
+    if "tank_feed" in msg:
+        block["preferences"].setdefault(fid, {})["tankFeed"] = msg["tank_feed"] is True
     # Explicit food-type corrections also classify retained rows. No inference
     # from a product's name or the amount of liquid it contains.
     if "live" in msg:
@@ -19065,7 +19088,12 @@ async def websocket_feeding_log(hass: HomeAssistant, connection: websocket_api.A
     now = datetime.now(timezone.utc)
     block = _feeding_capture(entry.options.get(CONF_SETTINGS), config, now)
     food = next((f for f in _feeding_catalog(config, now) if f["id"] == msg["food_id"] and f.get("enabled", True)), None)
-    source = next((s for s in food["sources"] if s["id"] == msg["source_id"] and s["loggable"]), None) if food else None
+    source = next((s for s in food["sources"] if s["id"] == msg["source_id"]), None) if food else None
+    if source is not None and not source.get("tankFeed", True):
+        connection.send_error(msg["id"], "not_tank_food", source["reason"])
+        return
+    if source is not None and not source["loggable"]:
+        source = None
     amount = feeding_engine._number(msg.get("amount"))
     if source is None or amount is None or not .001 <= amount <= 50000:
         connection.send_error(msg["id"], "invalid_feed", "Choose a food source and a finite positive amount up to 50,000.")
@@ -19169,7 +19197,7 @@ async def websocket_feeding_log(hass: HomeAssistant, connection: websocket_api.A
     row = {"id": row_id, "at": at.isoformat(), "name": food["name"], "foodId": food["id"],
            "source": raw_source, "sourceId": source["id"], "sourceLabel": source["label"],
            "amount": amount, "unit": food["unit"], "live": food["live"], "liveKnown": food.get("liveKnown", True),
-           "how": "hand", "slot": slot, "extra": extra, "undone": False, "updatedAt": now.isoformat(),
+           "how": "hand", "to": "tank", "slot": slot, "extra": extra, "undone": False, "updatedAt": now.isoformat(),
            "plannedAmount": plan["amount"] if plan else None}
     if source.get("from"):
         row["from"] = source["from"]

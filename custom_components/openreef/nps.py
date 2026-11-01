@@ -64,11 +64,13 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
      "doseGuide": {"light": 27, "medium": 18, "heavy": 9}, "doseEveryDays": 1,
      "doseNote": "Into the flow at dusk, skimmer and UV off for an hour."},
     {"name": "Rotifer Feed Concentrate", "brand": "Reefphyto", "category": "phyto",
+     "feedingUse": "culture_feed",
      "bottleMl": 50, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 1, "particleUmMax": 12,
      "notes": "The rotifer cone's food: Nannochloropsis oculata + Tetraselmis suecica only. Dose to "
               "a leafy green, little and often; top up when the water clears. Not a copepod feed."},
     {"name": "Copepod Feed", "brand": "Reefphyto", "category": "phyto",
+     "feedingUse": "culture_feed",
      "bottleMl": 50, "shelfLifeDaysOpened": 90, "refrigerated": True, "stirDaily": True,
      "particleUmMin": 1, "particleUmMax": 20,
      "notes": "The Tigriopus tub's food — feed to a Granny Smith apple-skin green, half rate in "
@@ -174,6 +176,7 @@ PRODUCT_LIBRARY: tuple[dict[str, Any], ...] = (
     # the nutrient the split debits by the FRESH litres. Not a food — never a
     # tank dose; the Cultures tab's seed/split ceremonies are its only taps.
     {"name": "Phytoplankton Nutrient (Guillard's f/2)", "brand": "Reefphyto", "category": "other",
+     "feedingUse": "culture_nutrient",
      "bottleMl": 250, "shelfLifeDaysOpened": 365, "refrigerated": True, "stirDaily": False,
      "particleUmMin": 0, "particleUmMax": 0,
      "notes": "Guillard's f/2 for the home phyto vessel: 1.5 ml per litre of NEW water at a seed, "

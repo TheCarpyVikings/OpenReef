@@ -210,6 +210,57 @@ def test_food_configuration_is_bounded_and_no_sample_brands_are_seeded():
     assert {f["name"] for f in feeding.build_catalog({})} == {"Live brine", "Live rotifers"}
 
 
+def test_culture_presets_and_nutrients_are_not_tank_quick_feeds():
+    from openreef.nps import PRODUCT_LIBRARY
+    products = {p["name"]: deepcopy(p) for p in PRODUCT_LIBRARY}
+    rules = feeding.tank_feed_rules(products)
+    for name in ("Rotifer Feed Concentrate", "Copepod Feed"):
+        assert rules[name]["tankFeed"] is False
+        assert rules[name]["tankFeedLocked"] is False
+    for name in ("Phytoplankton Nutrient (Guillard's f/2)", "Selcon", "Rotifer & Artemia Enrichment"):
+        assert rules[name]["tankFeed"] is False
+        assert rules[name]["tankFeedLocked"] is True
+    for name in ("Reef Juice (live phyto blend)", "Phyto-Feast", "Oyster-Feast"):
+        assert rules[name]["tankFeed"] is True
+
+
+def test_culture_links_restrict_unknown_supplies_without_hiding_home_phyto():
+    products = {pid: {"name": pid, "category": "phyto"}
+                for pid in ("custom_nutrient", "animal_food", "my_phyto_bottle", "soak", "tank_food")}
+    cultures = {"jars": {
+        "a": {"species": "nanno", "nutrient": {"productId": "custom_nutrient"}, "bottleProductId": "my_phyto_bottle"},
+        "r": {"species": "rotifer_L", "feed": {"productId": "my_phyto_bottle"}},
+        "p": {"species": "tigriopus", "feed": {"productId": "animal_food"}},
+    }}
+    before = deepcopy(products)
+    rules = feeding.tank_feed_rules(products, cultures, {"enrichment": {"productId": "soak"}})
+    assert rules["custom_nutrient"]["tankFeedLocked"] is True
+    assert rules["soak"]["tankFeedLocked"] is True
+    assert rules["animal_food"]["tankFeed"] is False
+    assert rules["my_phyto_bottle"]["tankFeed"] is True
+    assert rules["tank_food"]["tankFeed"] is True
+    assert products == before
+
+
+def test_f2_name_fallback_works_before_a_nutrient_link_is_configured():
+    rules = feeding.tank_feed_rules({
+        "unlinked": {"name": "Guillard’s F / 2 fertiliser", "brand": "Custom", "category": "other"},
+        "food": {"name": "Reef food", "category": "other"},
+    })
+    assert rules["unlinked"]["tankFeed"] is False and rules["unlinked"]["tankFeedLocked"] is True
+    assert rules["food"]["tankFeed"] is True
+
+
+def test_stored_supply_roles_survive_a_name_change():
+    rules = feeding.tank_feed_rules({
+        "nutrient": {"name": "Culture bottle A", "feedingUse": "culture_nutrient"},
+        "culture_food": {"name": "Culture bottle B", "feedingUse": "culture_feed"},
+    })
+    assert rules["nutrient"]["tankFeedLocked"] is True
+    assert rules["culture_food"]["tankFeed"] is False
+    assert feeding.shelf_feeding_use({"name": "Fish food", "feedingUse": "unknown"}) == ""
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

@@ -77,6 +77,15 @@ class FeedingIntegration(unittest.TestCase):
     def active(self, result, food):
         return [row for row in result["rows"] if row["foodId"] == food and not row["undone"]]
 
+    def catalog_food(self, food):
+        return next(item for item in self.summary()["foods"] if item["id"] == food)
+
+    def add_shelf_product(self, product_id, **fields):
+        product = deepcopy(self.saved()["consumables"]["products"]["phyto"])
+        product.update({"name": product_id, "category": "other", "history": [], **fields})
+        self.saved()["consumables"]["products"][product_id] = product
+        return product
+
     def test_manual_food_two_same_time_feeds_keep_distinct_uuids_and_portions(self):
         food = self.create_food()
         at = (self.now - timedelta(days=2)).replace(second=0, microsecond=0).isoformat()
@@ -419,6 +428,233 @@ class FeedingIntegration(unittest.TestCase):
         self.log("product:phyto", "shelf:phyto", 1, extra=True)
         self.assertEqual(self.saved()["consumables"]["products"]["phyto"]["remainingMl"], 0)
         self.assertEqual(self.total(self.summary(), "product:phyto")["amount"], 1)
+
+    def test_nutrients_and_enrichment_cannot_be_enabled_or_logged_as_tank_food(self):
+        cases = {
+            "named_f2": {"name": "Guillard’s F / 2 fertiliser"},
+            "linked_nutrient": {},
+            "enrichment_category": {"category": "enrichment"},
+            "hatchery_soak": {},
+            "culture_soak": {},
+        }
+        for pid, fields in cases.items():
+            self.add_shelf_product(pid, **fields)
+        self.saved()["nps"]["cultures"]["jars"] = {
+            "algae": {"species": "nanno", "nutrient": {"productId": "linked_nutrient"}},
+        }
+        self.saved()["nps"]["hatchery"]["enrichment"]["productId"] = "hatchery_soak"
+        self.saved()["nps"]["cultures"]["enrichment"]["productId"] = "culture_soak"
+
+        for pid in cases:
+            with self.subTest(product=pid):
+                fid = "product:" + pid
+                # A stale stored preference must not defeat a newly linked
+                # nutrient or enrichment restriction.
+                self.saved()["feeding"]["preferences"][fid] = {"tankFeed": True}
+                food = self.catalog_food(fid)
+                self.assertFalse(food["tankFeed"])
+                self.assertTrue(food["tankFeedLocked"])
+                self.assertTrue(food["tankFeedReason"])
+                source = next(s for s in food["sources"] if s["id"] == "shelf:" + pid)
+                self.assertFalse(source["loggable"])
+                self.assertFalse(source["available"])
+                before = deepcopy(self.saved())
+                self.call("feeding_food_save", food_id=fid, name=food["name"],
+                          unit="ml", portion=1, tank_feed=True, error="not_tank_food")
+                self.call("feeding_log", food_id=fid, source_id=source["id"],
+                          amount=1, extra=True, error="not_tank_food")
+                self.assertEqual(self.saved(), before)
+
+    def test_culture_feed_presets_and_linked_supply_require_explicit_dual_use(self):
+        for pid, name in (("rotifer_food", "Rotifer Feed Concentrate"),
+                          ("pod_food", "Copepod Feed")):
+            preset = next(p for p in t.nps.PRODUCT_LIBRARY if p["name"] == name)
+            self.add_shelf_product(pid, name=name, brand=preset["brand"])
+        self.add_shelf_product("custom_jar_food")
+        self.saved()["nps"]["cultures"]["jars"] = {
+            "animals": {"species": "rotifer_L", "feed": {"productId": "custom_jar_food"}},
+        }
+        for pid in ("rotifer_food", "pod_food", "custom_jar_food"):
+            with self.subTest(product=pid):
+                fid, source_id = "product:" + pid, "shelf:" + pid
+                food = self.catalog_food(fid)
+                self.assertFalse(food["tankFeed"])
+                self.assertFalse(food["tankFeedLocked"])
+                self.assertTrue(food["tankFeedReason"])
+                self.assertFalse(food["sources"][0]["available"])
+                before = deepcopy(self.saved())
+                self.call("feeding_log", food_id=fid, source_id=source_id,
+                          amount=5, extra=True, error="not_tank_food")
+                self.assertEqual(self.saved(), before)
+                self.call("feeding_food_save", food_id=fid, name=food["name"],
+                          unit="ml", portion=5, tank_feed=True)
+                enabled = self.catalog_food(fid)
+                self.assertTrue(enabled["tankFeed"])
+                self.assertTrue(enabled["sources"][0]["available"])
+                self.assertTrue(self.saved()["feeding"]["preferences"][fid]["tankFeed"])
+                self.log(fid, source_id, 5, extra=True)
+                self.assertEqual(self.total(self.summary(), fid)["amount"], 5)
+                self.assertEqual(self.saved()["consumables"]["products"][pid]["remainingMl"], 995)
+
+    def test_home_phyto_bottle_remains_tank_food_when_also_used_for_cultures(self):
+        self.add_shelf_product("my_home_bottle", category="phyto")
+        self.saved()["nps"]["cultures"]["jars"] = {
+            "algae": {"species": "nanno", "bottleProductId": "my_home_bottle"},
+            "animals": {"species": "rotifer_L", "feed": {"productId": "my_home_bottle"}},
+        }
+        food = self.catalog_food("phyto:nanno")
+        source = next(s for s in food["sources"] if s["id"] == "shelf:my_home_bottle")
+        self.assertTrue(food["tankFeed"])
+        self.assertFalse(food["tankFeedLocked"])
+        self.assertTrue(source["available"])
+        self.log(food["id"], source["id"], 20, extra=True)
+        self.assertEqual(self.total(self.summary(), food["id"])["amount"], 20)
+        self.assertEqual(self.saved()["consumables"]["products"]["my_home_bottle"]["remainingMl"], 980)
+
+    def test_excluding_supply_keeps_actual_tank_history_and_undo_but_not_culture_uses(self):
+        self.add_shelf_product("shared_supply")
+        fid = "product:shared_supply"
+        self.log(fid, "shelf:shared_supply", 25, extra=True)
+        recorded = self.active(self.summary(), fid)[0]
+        product = self.saved()["consumables"]["products"]["shared_supply"]
+        product["history"].extend([
+            {"at": (self.now - timedelta(minutes=2)).isoformat(), "ml": 3,
+             "kind": "dose", "to": "jar", "jarId": "algae"},
+            {"at": (self.now - timedelta(minutes=1)).isoformat(), "ml": 7,
+             "kind": "dose", "to": "soak"},
+        ])
+        product["remainingMl"] -= 10
+        self.saved()["nps"]["cultures"]["jars"] = {
+            "algae": {"species": "nanno", "nutrient": {"productId": "shared_supply"}},
+        }
+        result = self.summary()
+        self.assertFalse(next(f for f in result["foods"] if f["id"] == fid)["tankFeed"])
+        rows = self.active(result, fid)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], recorded["id"])
+        self.assertTrue(rows[0]["undoable"])
+        self.assertEqual(self.total(result, fid)["amount"], 25)
+        self.call("feeding_undo", entry_id=recorded["id"])
+        self.assertFalse(self.active(self.summary(), fid))
+        product = self.saved()["consumables"]["products"]["shared_supply"]
+        self.assertEqual(product["remainingMl"], 990)
+        self.assertEqual(len([r for r in product["history"] if r.get("to") in ("jar", "soak")]), 2)
+
+    def test_manual_food_tank_use_opt_out_and_back_in_retains_prior_history(self):
+        fid = self.create_food()
+        self.log(fid, amount=1)
+        first = self.active(self.summary(), fid)[0]
+        self.call("feeding_food_save", food_id=fid, name="Vitalis flake", unit="pinch",
+                  portion=1, tank_feed=False)
+        food = self.catalog_food(fid)
+        self.assertFalse(food["tankFeed"])
+        self.assertFalse(food["tankFeedLocked"])
+        self.assertFalse(food["sources"][0]["loggable"])
+        before = deepcopy(self.saved())
+        self.call("feeding_log", food_id=fid, source_id=fid, amount=1, error="not_tank_food")
+        self.assertEqual(self.saved(), before)
+        self.assertEqual(self.total(self.summary(), fid)["amount"], 1)
+        self.assertTrue(self.active(self.summary(), fid)[0]["undoable"])
+        self.call("feeding_food_save", food_id=fid, name="Vitalis flake", unit="pinch",
+                  portion=1, tank_feed=True)
+        self.assertTrue(self.catalog_food(fid)["sources"][0]["available"])
+        self.log(fid, amount=2)
+        self.assertEqual(self.total(self.summary(), fid)["amount"], 3)
+        self.call("feeding_undo", entry_id=first["id"])
+        self.assertEqual(self.total(self.summary(), fid)["amount"], 2)
+
+    def test_tank_use_preferences_survive_normalisation_and_stale_settings_saves(self):
+        self.add_shelf_product("custom_jar_food")
+        self.saved()["nps"]["cultures"]["jars"] = {
+            "animals": {"species": "rotifer_L", "feed": {"productId": "custom_jar_food"}},
+        }
+        manual = self.create_food()
+        stale_settings = deepcopy(self.saved())
+        stale_background = deepcopy(self.saved())
+        self.call("feeding_food_save", food_id="product:custom_jar_food", name="Custom jar food",
+                  unit="ml", portion=5, tank_feed=True)
+        self.call("feeding_food_save", food_id=manual, name="Vitalis flake", unit="pinch",
+                  portion=1, tank_feed=False)
+        expected = deepcopy(self.saved()["feeding"]["preferences"])
+        self.call("save_config", config=stale_settings)
+        run(integration._async_save_config(self.hass, self.entry, stale_background))
+        self.assertEqual(self.saved()["feeding"]["preferences"], expected)
+        self.assertTrue(self.catalog_food("product:custom_jar_food")["tankFeed"])
+        self.assertFalse(self.catalog_food(manual)["tankFeed"])
+
+    def test_preset_use_migrates_and_survives_stale_settings_without_metadata(self):
+        expected = {}
+        for index, name in enumerate(("Phytoplankton Nutrient (Guillard's f/2)",
+                                      "Rotifer Feed Concentrate", "Copepod Feed")):
+            preset = next(p for p in t.nps.PRODUCT_LIBRARY if p["name"] == name)
+            for variant in ("omitted", "renamed"):
+                pid = f"old_preset_{index}_{variant}"
+                product = self.add_shelf_product(pid, name=name, brand=preset["brand"])
+                self.assertNotIn("feedingUse", product)
+                expected[pid] = preset["feedingUse"]
+
+        stale = deepcopy(self.saved())
+        normalised = integration._normalise_core_config(deepcopy(self.saved()))
+        for pid, role in expected.items():
+            self.assertEqual(normalised["consumables"]["products"][pid]["feedingUse"], role)
+            if pid.endswith("renamed"):
+                stale["consumables"]["products"][pid].update(name="My renamed supply", brand="My label")
+
+        # The stored and incoming snapshots both predate feedingUse. Keeping
+        # a known role must also work during the first save after upgrading.
+        self.call("save_config", config=stale)
+        for pid, role in expected.items():
+            with self.subTest(product=pid):
+                product = self.saved()["consumables"]["products"][pid]
+                self.assertEqual(product["feedingUse"], role)
+                if pid.endswith("renamed"):
+                    self.assertEqual(product["name"], "My renamed supply")
+                    self.assertEqual(product["brand"], "My label")
+                food = self.catalog_food("product:" + pid)
+                self.assertFalse(food["tankFeed"])
+                self.assertEqual(food["tankFeedLocked"], role == "culture_nutrient")
+                self.assertFalse(food["sources"][0]["available"])
+
+        # Repeating the old Settings save cannot remove the now-persisted role.
+        self.call("save_config", config=stale)
+        for pid, role in expected.items():
+            self.assertEqual(self.saved()["consumables"]["products"][pid]["feedingUse"], role)
+            self.assertFalse(self.catalog_food("product:" + pid)["tankFeed"])
+
+    def test_portion_and_tank_use_edits_without_live_preserve_classification_and_history(self):
+        manual = self.create_food("My live culture", "ml", 10, True)
+        native = "product:phyto"
+        self.assertFalse(self.catalog_food(native)["liveKnown"])
+        self.log(manual, amount=10)
+        self.log(native, "shelf:phyto", 7, extra=True)
+        before = {r["id"]: deepcopy(r) for r in self.saved()["feeding"]["rows"]
+                  if r["foodId"] in (manual, native)}
+        self.assertEqual(len(before), 2)
+        manual_row = next(r for r in before.values() if r["foodId"] == manual)
+        native_row = next(r for r in before.values() if r["foodId"] == native)
+        self.assertTrue(manual_row["live"])
+        self.assertTrue(manual_row["liveKnown"])
+        self.assertFalse(native_row["liveKnown"])
+
+        for fid in (manual, native):
+            for tank_feed, portion in ((False, 20), (True, 30)):
+                with self.subTest(food=fid, tank_feed=tank_feed):
+                    food = self.catalog_food(fid)
+                    self.call("feeding_food_save", food_id=fid, name=food["name"],
+                              unit="ml", portion=portion, tank_feed=tank_feed)
+                    after = {r["id"]: r for r in self.saved()["feeding"]["rows"]
+                             if r["foodId"] in (manual, native)}
+                    # Exact retained rows also verify updatedAt is untouched;
+                    # changing availability or a usual portion is not a
+                    # retrospective correction of live-food classification.
+                    self.assertEqual(after, before)
+                    updated = self.catalog_food(fid)
+                    self.assertEqual(updated["tankFeed"], tank_feed)
+                    self.assertEqual(updated["portion"], portion)
+                    self.assertTrue(self.saved()["feeding"]["foods"][manual[7:]]["live"])
+                    self.assertTrue(self.catalog_food(manual)["live"])
+                    self.assertFalse(self.catalog_food(native)["liveKnown"])
+        self.assertNotIn("live", self.saved()["feeding"]["preferences"][native])
 
 
 if __name__ == "__main__":

@@ -139,6 +139,74 @@ test("source capability and availability prevent shortcutting harvest or invento
   assert(writes === 0, "empty/unavailable food is not blindly logged");
 });
 
+test("culture supplies stay out of usual portions and the new tank-feed chooser", async () => {
+  const data = summary();
+  data.foods.unshift({ id: "product:f2", name: "Guillard's f/2", unit: "ml", portion: 1,
+    tankFeed: false, tankFeedLocked: true, tankFeedReason: "Culture fertiliser: record it in Cultures.", loggable: false,
+    sources: [{ id: "shelf:f2", label: "Culture fertiliser", loggable: false, available: false }] });
+  data.foods.push({ id: "product:rotifer_feed", name: "Rotifer feed", unit: "ml", portion: 1,
+    tankFeed: false, tankFeedReason: "Used for live cultures.",
+    sources: [{ id: "shelf:rotifer_feed", loggable: true, available: true }] });
+  const p = await panel(data); let writes = 0;
+  p._feedingCommand = () => { writes++; };
+  const html = p._feedingOverview();
+  for (const id of ["product:f2", "product:rotifer_feed"]) {
+    assert(!html.includes(`data-action="feeding-overview-quick" data-id="${id}"`), "non-tank supply has no quick button");
+    p._feedingQuick(id);
+  }
+  assert(writes === 0, "stale quick taps cannot log excluded supplies even if a source looks available");
+  p._feedingOpenEditor();
+  const editor = p._feedingEditor();
+  assert(p._feedingState().draft.foodId === "brine", "new feed defaults to eligible tank food");
+  assert(!editor.includes('value="product:f2"') && !editor.includes('value="product:rotifer_feed"'), "supplies are absent from the new-feed choices");
+  assert(editor.includes('value="manual:flake"'), "ordinary tank foods remain available");
+  p._feedingState().manage = true;
+  const managed = p._feedingOverview();
+  assert(managed.includes("Culture fertiliser: record it in Cultures.") && managed.includes("Review use"), "excluded supplies retain an explained management route");
+});
+
+test("excluding a supply does not prevent correcting or undoing its historical tank entry", async () => {
+  const data = summary();
+  data.foods.push({ id: "product:f2", name: "Guillard's f/2", unit: "ml", portion: 1,
+    tankFeed: false, tankFeedLocked: true, loggable: false,
+    sources: [{ id: "shelf:f2", label: "Culture fertiliser", loggable: false, available: false }] });
+  data.rows.push({ id: "old-f2", foodId: "product:f2", name: "Guillard's f/2", unit: "ml", amount: 1,
+    sourceId: "shelf:f2", sourceLabel: "Culture fertiliser", at: "2026-11-01T11:25:00Z", date: data.date,
+    time: "11:25", editable: true, undoable: true });
+  const p = await panel(data); let sent;
+  p._feedingCommand = (message) => { sent = message; };
+  const before = JSON.stringify(data.rows);
+  p._feedingOpenEditor("", "old-f2");
+  assert(p._feedingEditor().includes('value="product:f2" selected'), "historical editor retains the excluded food");
+  p._feedingDraftChanged("amount", "0.5", "input"); p._feedingSaveDraft();
+  assertEqual(sent, { type: "openreef/feeding_edit", entry_id: "old-f2", amount: .5, at: "2026-11-01T11:25:00.000Z" });
+  assert(p._feedingOverviewLog().includes('data-action="feeding-overview-undo" data-id="old-f2"'), "old entry still offers undo");
+  p._feedingOverviewAction("undo", { id: "old-f2" });
+  assertEqual(sent, { type: "openreef/feeding_undo", entry_id: "old-f2" });
+  assert(JSON.stringify(data.rows) === before, "eligibility changes never rewrite historical records locally");
+});
+
+test("tank-use preference is explicit while culture fertiliser stays locked", async () => {
+  const data = summary();
+  data.foods.push({ id: "product:shared", name: "Shared phyto", unit: "ml", portion: 10,
+    tankFeed: false, tankFeedReason: "Used for live cultures.", sources: [] });
+  data.foods.push({ id: "product:f2", name: "Guillard's f/2", unit: "ml", portion: 1,
+    tankFeed: false, tankFeedLocked: true, tankFeedReason: "Culture fertiliser: record it in Cultures.", sources: [] });
+  const p = await panel(data); let sent;
+  p._feedingCommand = (message) => { sent = message; };
+  p._feedingNewFood("product:shared");
+  assert(p._feedingEditor().includes("Used for tank feeding"), "purpose is separate from live-food type");
+  p._feedingDraftChanged("tankFeed", true); p._feedingSaveDraft();
+  assert(sent.food_id === "product:shared" && sent.tank_feed === true, "an intentional shared food may be enabled for tank use");
+  assert(!Object.hasOwn(sent, "live"), "changing tank use does not reclassify historical live food");
+  p._feedingNewFood("product:f2");
+  assert(/data-feeding-draft="tankFeed"[^>]*disabled/.test(p._feedingEditor()), "fertiliser cannot be enabled from the tank-food editor");
+  p._feedingDraftChanged("tankFeed", true); p._feedingSaveDraft();
+  assert(sent.tank_feed === false, "locked purpose cannot be overwritten by a stale change event");
+  p._feedingNewFood();
+  assert(p._feedingState().draft.tankFeed === true, "new custom foods default to tank feeding");
+});
+
 test("save errors preserve draft and repeat taps are blocked while saving", async () => {
   const p = await panel(); let reject, calls = 0;
   p._feedingOpenEditor("manual:flake");
@@ -211,11 +279,29 @@ test("food preferences save custom portions and explicitly classify native live 
   p._feedingCommand = (message) => { sent = message; };
   p._feedingNewFood("manual:flake");
   p._feedingDraftChanged("portion", "0.5", "input"); p._feedingSaveDraft();
-  assertEqual(sent, { type: "openreef/feeding_food_save", food_id: "manual:flake", name: "Vitalis flake", unit: "pinch", portion: .5, live: false });
+  assertEqual(sent, { type: "openreef/feeding_food_save", food_id: "manual:flake", name: "Vitalis flake", unit: "pinch", portion: .5, tank_feed: true });
   p._feedingNewFood("brine");
   assert(p._feedingState().draft.native, "native identity is not renamed by preference editor");
   p._feedingDraftChanged("live", true); p._feedingSaveDraft();
   assert(sent.food_id === "brine" && sent.live === true, "native classification is an explicit saved preference");
+  p._feedingNewFood(); p._feedingDraftChanged("name", "New flake"); p._feedingSaveDraft();
+  assert(sent.live === false, "new foods still send an initial classification");
+});
+
+test("renamed shelf presets retain validated culture use before their first save", async () => {
+  const p = await panel();
+  p._nps.summary.library = [
+    { name: "Guillard's f/2", category: "other", feedingUse: "culture_nutrient" },
+    { name: "Rotifer feed", category: "phyto", feedingUse: "culture_feed" },
+    { name: "Unknown role", feedingUse: "anything_else" },
+  ];
+  p._npsSyncDoseReminder = p._setDirty = p._recordActivity = () => {};
+  for (const key of ["0", "1", "2"]) p._npsAddProduct(key);
+  const products = Object.values(p._config.consumables.products);
+  products[0].name = "Culture fertiliser bottle A";
+  assert(products[0].feedingUse === "culture_nutrient", "renaming cannot lose nutrient purpose");
+  assert(products[1].feedingUse === "culture_feed", "culture feed purpose reaches the settings save");
+  assert(!Object.hasOwn(products[2], "feedingUse"), "unrecognised preset roles are not copied");
 });
 
 test("demo never writes real feeding records", async () => {

@@ -10925,6 +10925,11 @@ class OpenReefPanel extends HTMLElement {
 
   _feedingFood(id) { return this._feedingFoods().find((food) => food.id === id); }
 
+  _feedingLogFoods() {
+    return this._feedingFoods().filter((food) => food.enabled !== false && food.tankFeed !== false && food.loggable !== false
+      && this._feedingSources(food).some((source) => source.loggable !== false));
+  }
+
   _feedingSources(food) {
     const sources = Array.isArray(food?.sources) ? food.sources : [];
     return sources.map((source) => typeof source === "string" ? { id: source, label: source, loggable: true } : source);
@@ -10980,9 +10985,15 @@ class OpenReefPanel extends HTMLElement {
     const st = this._feedingState();
     const row = entryId ? (st.data?.rows || []).find((item) => item.id === entryId) : null;
     const planned = plannedId ? (st.data?.planned || []).find((item) => item.id === plannedId) : null;
-    const food = this._feedingFood(row?.foodId || planned?.foodId || foodId) || this._feedingFoods()[0];
+    const choices = this._feedingLogFoods();
+    const food = this._feedingFood(row?.foodId || planned?.foodId || foodId)
+      || choices.find((item) => this._feedingSources(item).some((source) => source.available !== false)) || choices[0];
     if (!food) { this._feedingNewFood(); return; }
     if (row && !row.editable) return;
+    if (!row && !choices.some((item) => item.id === food.id)) {
+      st.error = food.tankFeedReason || "This supply is not used for tank feeding. Check its culture or food-shelf controls.";
+      this._render(); return;
+    }
     const source = this._feedingSources(food).find((s) => s.id === (row?.sourceId || row?.source || planned?.source))
       || this._feedingSources(food).find((s) => s.loggable !== false && s.available !== false);
     const when = row?.at ? new Date(row.at) : new Date();
@@ -11000,7 +11011,8 @@ class OpenReefPanel extends HTMLElement {
   _feedingNewFood(foodId = "") {
     const st = this._feedingState();
     const food = this._feedingFood(foodId);
-    st.draft = { kind: "food", foodId: food?.id || "", native: !!food && !food.custom, name: food?.name || "", unit: food?.unit || "pinch", portion: food?.portion ?? 1, live: food?.live === true };
+    st.draft = { kind: "food", foodId: food?.id || "", native: !!food && !food.custom, name: food?.name || "", unit: food?.unit || "pinch", portion: food?.portion ?? 1, live: food?.live === true, liveEdited: false,
+      tankFeed: food?.tankFeed !== false, tankFeedLocked: food?.tankFeedLocked === true, tankFeedReason: food?.tankFeedReason || "" };
     st.error = "";
     this._render();
   }
@@ -11010,8 +11022,10 @@ class OpenReefPanel extends HTMLElement {
     if (field === "chartFood") { st.chartFood = String(value); if (eventType === "change") this._render(); return; }
     const draft = st.draft;
     if (!draft || st.busy) return;
-    if (!["foodId", "sourceId", "at", "amount", "slot", "name", "unit", "portion", "live"].includes(field)) return;
+    if (!["foodId", "sourceId", "at", "amount", "slot", "name", "unit", "portion", "live", "tankFeed"].includes(field)) return;
+    if (field === "tankFeed" && draft.tankFeedLocked) return;
     draft[field] = value;
+    if (draft.kind === "food" && field === "live") draft.liveEdited = true;
     if (draft.kind === "feed" && field === "foodId") {
       const food = this._feedingFood(value);
       draft.amount = food?.portion ?? 1;
@@ -11051,6 +11065,10 @@ class OpenReefPanel extends HTMLElement {
     const st = this._feedingState();
     const food = this._feedingFood(foodId);
     if (!food || st.busy || !(Number(food.portion) > 0)) return;
+    if (food.tankFeed === false || food.loggable === false) {
+      st.error = food.tankFeedReason || "This supply is not used for tank feeding. Check its culture or food-shelf controls.";
+      this._render(); return;
+    }
     const sources = this._feedingSources(food).filter((source) => source.loggable !== false && source.available !== false);
     if (!sources.length) { st.error = "No available source for this food. Check its shelf or culture card."; this._render(); return; }
     const nearest = this._feedingNearestSlot(this._feedingAvailableSlots(food.id, "", sources[0].id));
@@ -11070,7 +11088,9 @@ class OpenReefPanel extends HTMLElement {
         st.error = "Give the food a name and a positive usual portion."; this._render(); return;
       }
       return this._feedingCommand({ type: "openreef/feeding_food_save", ...(draft.foodId ? { food_id: draft.foodId } : {}),
-        name: String(draft.name).trim(), unit: draft.unit, portion: Number(draft.portion), live: draft.unit === "ml" && draft.live === true }, "Usual portion saved.");
+        name: String(draft.name).trim(), unit: draft.unit, portion: Number(draft.portion),
+        ...(!draft.foodId || draft.liveEdited ? { live: draft.unit === "ml" && draft.live === true } : {}),
+        tank_feed: draft.tankFeedLocked ? false : draft.tankFeed !== false }, "Usual portion saved.");
     }
     const food = this._feedingFood(draft.foodId), amount = Number(draft.amount), at = new Date(draft.at);
     if (!food || !Number.isFinite(amount) || amount <= 0 || !draft.at || !Number.isFinite(at.getTime()) || at.getTime() > Date.now()) {
@@ -11078,6 +11098,9 @@ class OpenReefPanel extends HTMLElement {
     }
     if (draft.entryId) return this._feedingCommand({ type: "openreef/feeding_edit", entry_id: draft.entryId, amount, at: at.toISOString() },
       "Feeding record updated. Totals use the corrected amount and time.", { noticeUndo: "Remove entry" });
+    if (food.tankFeed === false || food.loggable === false) {
+      st.error = food.tankFeedReason || "This supply is not used for tank feeding."; this._render(); return;
+    }
     if (!this._feedingSources(food).some((source) => source.id === draft.sourceId && source.loggable !== false && source.available !== false)) {
       st.error = "Choose an available source."; this._render(); return;
     }
@@ -11119,15 +11142,18 @@ class OpenReefPanel extends HTMLElement {
       <label>Food name<input ${field("name")} maxlength="100" value="${esc(d.name)}" placeholder="e.g. Vitalis flake" ${d.native ? "disabled" : ""}></label>
       <label>Unit<select ${field("unit")} ${d.foodId ? "disabled" : ""}>${["ml", "pinch", "scoop", "g", "cube", "drop"].map((unit) => `<option value="${unit}" ${unit === d.unit ? "selected" : ""}>${unit}</option>`).join("")}</select></label>
       <label>Usual portion<input type="number" min="0.001" step="any" inputmode="decimal" ${field("portion")} value="${esc(d.portion)}"></label></div>
+      <label class="check-row"><input type="checkbox" ${field("tankFeed")} ${d.tankFeed ? "checked" : ""} ${d.tankFeedLocked ? "disabled" : ""}>Used for tank feeding</label>
+      ${d.tankFeedReason ? `<small>${esc(d.tankFeedReason)}</small>` : ""}
       ${d.unit === "ml" ? `<label class="check-row"><input type="checkbox" ${field("live")} ${d.live ? "checked" : ""}>Live food (liquid volume includes carrier water)</label>` : ""}
       <small>Saved portions are for spontaneous feeding. They do not create a schedule.</small>${controls}</article>`;
     const food = this._feedingFood(d.foodId);
     const sources = this._feedingSources(food);
     const plans = d.entryId ? [] : this._feedingAvailableSlots(d.foodId, d.at, d.sourceId);
     const selected = plans.find((item) => (item.at || "anytime") === d.slot);
+    const choices = d.entryId ? this._feedingFoods().filter((item) => item.id === d.foodId) : this._feedingLogFoods();
     return `<article class="panel stack feed-overview-editor" data-feeding-editor><h3>${d.entryId ? "Edit recorded feed" : "Log a feed"}</h3>
       <div class="feed-overview-fields">
-        <label>Food<select ${field("foodId")} ${d.entryId ? "disabled" : ""}>${this._feedingFoods().map((f) => `<option value="${esc(f.id)}" ${f.id === d.foodId ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select></label>
+        <label>Food<select ${field("foodId")} ${d.entryId ? "disabled" : ""}>${choices.map((f) => `<option value="${esc(f.id)}" ${f.id === d.foodId ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select></label>
         <label>Amount · ${esc(food?.unit || "ml")}<input type="number" min="0.001" step="any" inputmode="decimal" ${field("amount")} value="${esc(d.amount)}"></label>
         <label>Fed at · device time<input type="datetime-local" ${field("at")} max="${esc(this._nowLocalInputValue())}" value="${esc(d.at)}"></label>
         <label>Source<select ${field("sourceId")} ${d.entryId ? "disabled" : ""}>${sources.map((s) => `<option value="${esc(s.id)}" ${s.id === d.sourceId ? "selected" : ""} ${(s.loggable === false || s.available === false) && !d.entryId ? "disabled" : ""}>${esc(s.label || s.id)}${s.loggable === false || s.available === false ? ` · ${esc(s.reason || "unavailable")}` : ""}</option>`).join("")}</select></label>
@@ -11222,8 +11248,8 @@ class OpenReefPanel extends HTMLElement {
     const live = `<article class="feed-overview-live"><div><span>Live-feed liquid added ${st.days === 1 ? "today" : `over ${st.days} days`}</span><strong>${esc(this._feedingQuantity(data.liveLiquidMl ?? 0, "ml"))}${data.liveVolumePct != null ? ` · ${esc(this._feedingPercent(data.liveVolumePct))} of tank volume` : ""}</strong></div><small>${data.tankLitres > 0 ? `Based on ${esc(this._feedingNumber(data.tankLitres))} L configured water volume. ` : "Set your tank water volume to see an estimated percentage. "}Logged live-food liquid, including carrier water; cumulative additions, not the amount currently in the tank.${data.unknownLiveFeeds ? ` ${Number(data.unknownLiveFeeds)} live feeds have no recorded volume.` : ""}${data.unclassifiedLiquidMl > 0 ? ` ${esc(this._feedingQuantity(data.unclassifiedLiquidMl, "ml"))} of unclassified liquid is excluded; review its food type under Manage portions.` : ""}</small></article>`;
     const coverage = data.coverage || {};
     const coverageText = typeof coverage === "string" ? coverage : coverage.note || coverage.text || (coverage.notes || []).join(" ") || "Totals use available records. Gaps do not mean no feeding.";
-    const favourites = foods.filter((food) => food.enabled !== false && Number(food.portion) > 0 && this._feedingSources(food).some((source) => source.loggable !== false && source.available !== false));
-    const quick = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Your usual portions</h3>${button("manage", "", "Manage portions")}</div><div class="feed-overview-portions">${favourites.map((food) => `<button class="secondary feed-overview-portion" data-action="feeding-overview-quick" data-id="${esc(food.id)}" ${st.busy ? "disabled" : ""}><span>${esc(food.name)}</span><strong>+ ${esc(this._feedingQuantity(food.portion, food.unit))}</strong></button>`).join("")}</div>${!favourites.length ? `<p class="hint">Add your usual flake, pellets or other foods to start one-tap logging.</p>` : ""}${st.manage ? `<div class="feed-overview-manage">${foods.map((food) => `<div><span>${esc(food.name)} · ${esc(this._feedingQuantity(food.portion, food.unit))}</span>${button("food", food.id, "Edit portion / food type")}</div>`).join("")}</div>` : ""}</article>` : "";
+    const favourites = this._feedingLogFoods().filter((food) => Number(food.portion) > 0 && this._feedingSources(food).some((source) => source.loggable !== false && source.available !== false));
+    const quick = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Your usual portions</h3>${button("manage", "", "Manage portions")}</div><div class="feed-overview-portions">${favourites.map((food) => `<button class="secondary feed-overview-portion" data-action="feeding-overview-quick" data-id="${esc(food.id)}" ${st.busy ? "disabled" : ""}><span>${esc(food.name)}</span><strong>+ ${esc(this._feedingQuantity(food.portion, food.unit))}</strong></button>`).join("")}</div>${!favourites.length ? `<p class="hint">Add your usual flake, pellets or other foods to start one-tap logging.</p>` : ""}${st.manage ? `<div class="feed-overview-manage">${foods.map((food) => `<div><span>${esc(food.name)}${food.tankFeed === false ? `<br><small>${esc(food.tankFeedReason || "Not used for tank feeding.")}</small>` : ` · ${esc(this._feedingQuantity(food.portion, food.unit))}`}</span>${button("food", food.id, food.tankFeed === false ? "Review use" : "Edit portion / food type")}</div>`).join("")}</div>` : ""}</article>` : "";
     const plans = (data.planned || []).filter((plan) => !["done", "skipped"].includes(plan.status));
     const due = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Still planned today</h3><small>${plans.length} open feeds</small></div><div class="feed-overview-planned">${plans.map((plan) => `<div class="feed-overview-plan"><small>${esc(plan.at || "Any time")}${["late", "missed", "due"].includes(plan.status) ? " · Unconfirmed" : plan.status === "blocked" ? " · Source unavailable" : " · Upcoming"}</small><strong>${esc(plan.name)}</strong><small>${esc(this._feedingQuantity(plan.amount, plan.unit))} planned</small>${plan.status !== "blocked" ? button("plan", plan.id, "Log this feed", ["late", "missed", "due"].includes(plan.status)) : ""}</div>`).join("") || `<p class="hint">No open planned feeds. Your usual portions are here for extras.</p>`}</div></article>` : "";
     return `<section class="stack feed-overview ${st.simple ? "is-simple" : ""}">${head}${notice}<article class="panel stack"><h3>${st.days === 1 ? "Fed today" : `Recorded over ${st.days} days`}</h3><div class="feed-overview-totals">${cards || `<p class="hint">No food amounts recorded in this period.</p>`}</div>${detail}<small>${esc(coverageText)}</small>${live}</article>${quick}${this._feedingEditor()}${due}${st.days > 1 ? this._feedingHistoryChart() : !st.simple ? this._feedingOverviewTimeline() : ""}${this._feedingNutrientCard()}${!st.simple ? this._feedingOverviewLog() : ""}</section>`;
@@ -11535,6 +11561,7 @@ class OpenReefPanel extends HTMLElement {
       name,
       brand: (preset && preset.brand) || "",
       category: (preset && preset.category) || "other",
+      ...(["culture_feed", "culture_nutrient"].includes(preset?.feedingUse) ? { feedingUse: preset.feedingUse } : {}),
       bottleMl: (preset && preset.bottleMl) || 0,
       remainingMl: (preset && preset.bottleMl) || 0,
       lowThresholdMl: 0,

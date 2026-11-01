@@ -24,6 +24,17 @@ timeline remains available below the log.
   quick portions, planned feeds and the Manual Tests link available.
 - **Manage portions** adjusts usual amounts and whether a food is live.
   Changing its live classification also updates that food's retained records.
+- **Used for tank feeding** controls which foods appear in quick portions and
+  the new-feed picker (0.7.232). Culture-linked feeds and culture-feed presets
+  start excluded; enable this option if you also feed that product to the tank.
+  Shared home phyto bottles remain available. Culture nutrients such as f/2
+  and enrichment supplies use their existing specialist controls and cannot
+  be enabled here. Custom foods can also be excluded from tank feeding.
+
+Changing tank use affects new feeds, not historical destinations or totals.
+Existing entries remain editable and undoable within their usual limits. If a
+test tap was logged as a tank feed by mistake, use **Undo**; this removes it
+from totals and restores stock when it still belongs to the current batch.
 
 Logging records a feed already performed. It does not run a pump. Existing
 source inventory and expiry checks still apply. Custom foods are records only;

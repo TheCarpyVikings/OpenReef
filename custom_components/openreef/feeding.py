@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import math
+import re
 from typing import Any
 
 from .cultures import species_ids, species_preset
+from .nps import ENRICHMENT_CATEGORY, HOME_PHYTO_PREFIX, PRODUCT_LIBRARY
 
 UNITS = ("ml", "pinch", "scoop", "g", "cube", "drop", "piece")
 MAX_DAYS = 365
@@ -68,6 +70,56 @@ def normalise_foods(raw: Any) -> dict[str, dict[str, Any]]:
             "enabled": item.get("enabled") is not False,
         }
     return foods
+
+
+def shelf_feeding_use(product: Any) -> str:
+    """Preserve a known supply role even when its display name is changed."""
+    if not isinstance(product, dict):
+        return ""
+    role = product.get("feedingUse")
+    if role in ("culture_feed", "culture_nutrient"):
+        return role
+    name = str(product.get("name") or "")
+    if re.search(r"\bf\s*/\s*2\b", name, re.I):
+        return "culture_nutrient"
+    key = (name.casefold(), str(product.get("brand") or "").casefold())
+    return next((p["feedingUse"] for p in PRODUCT_LIBRARY if p.get("feedingUse")
+                 and (p["name"].casefold(), p["brand"].casefold()) == key), "")
+
+
+def tank_feed_rules(products: Any, cultures: Any = None, hatchery: Any = None) -> dict[str, dict[str, Any]]:
+    """Current shelf use controls new tank feeds, never historical destinations.
+
+    Culture-feed links default to culture use; a keeper may opt into dual use.
+    Nutrient and enrichment supplies use their existing specialist controls.
+    Home phyto bottles remain tank foods when shared with an animal culture.
+    """
+    cultures = cultures if isinstance(cultures, dict) else {}
+    hatchery = hatchery if isinstance(hatchery, dict) else {}
+    jars = _items(cultures.get("jars"))
+    def linked(value: Any) -> str:
+        return str(value.get("productId") or "") if isinstance(value, dict) else ""
+    nutrients = {linked(jar.get("nutrient")) for jar in jars.values()} - {""}
+    culture_feeds = {linked(jar.get("feed")) for jar in jars.values()} - {""}
+    enrichment = {linked(cultures.get("enrichment")), linked(hatchery.get("enrichment"))} - {""}
+    home_bottles = {str(jar.get("bottleProductId") or HOME_PHYTO_PREFIX + jid)
+                    for jid, jar in jars.items() if jar.get("species") in species_ids()
+                    and species_preset(jar["species"]).get("kind") == "phyto"}
+    rules = {}
+    for pid, product in _items(products).items():
+        role = shelf_feeding_use(product)
+        nutrient = pid in nutrients or role == "culture_nutrient"
+        if nutrient:
+            allowed, locked, reason = False, True, "Culture nutrient — record its use in Cultures."
+        elif product.get("category") == ENRICHMENT_CATEGORY or pid in enrichment:
+            allowed, locked, reason = False, True, "Enrichment supply — use the hatchery or culture enrichment controls."
+        elif (pid in culture_feeds or role == "culture_feed") and not (
+                pid in home_bottles or pid.startswith(HOME_PHYTO_PREFIX)):
+            allowed, locked, reason = False, False, "Culture feed — enable tank feeding only if you also feed this product to the tank."
+        else:
+            allowed, locked, reason = True, False, ""
+        rules[pid] = {"tankFeed": allowed, "tankFeedLocked": locked, "tankFeedReason": reason}
+    return rules
 
 
 def build_catalog(products: Any, cultures: Any = None, foods: Any = None) -> list[dict[str, Any]]:
