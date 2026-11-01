@@ -41,6 +41,24 @@ source inventory and expiry checks still apply. Custom foods are records only;
 they do not manage a physical bottle's stock. Culture harvests continue through
 the Cultures controls and contribute their recorded tank share to the overview.
 
+## Optional Vitalis rotation
+
+The rotation follows [Vitalis's feeding guide](https://www.vitalisaquatic.uk/feeding-guides):
+28 days using the selected Marine foods, followed by 14 days using the selected
+Platinum Marine foods, repeating every 42 days.
+
+Choose the foods you use for each phase, the starting phase, and the date that
+phase begins. The overview shows the current phase and next change date;
+badges identify the foods selected for that phase. Keep logging the food and
+amount actually fed using its usual portion. Other foods remain available.
+
+The calendar advances by local date, including days with no feeding recorded.
+It does not create feed entries or change totals. You can optionally enable a
+Home Assistant persistent notification when the phase changes; this appears
+in Home Assistant's notifications. Setup and date adjustments start quietly;
+missed switch-day reminders are not queued. Turn off the rotation or its
+notification option at any time without changing your feeding history.
+
 ## Estimated percentage of tank water volume
 
 For each live liquid food and the combined live liquid total:

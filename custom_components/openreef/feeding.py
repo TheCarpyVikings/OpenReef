@@ -7,7 +7,7 @@ are not a biomass estimate, water-change percentage, or a feeding target.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import math
 import re
 from typing import Any
@@ -17,6 +17,8 @@ from .nps import ENRICHMENT_CATEGORY, HOME_PHYTO_PREFIX, PRODUCT_LIBRARY
 
 UNITS = ("ml", "pinch", "scoop", "g", "cube", "drop", "piece")
 MAX_DAYS = 365
+ROTATION_PHASES = ("marine", "platinum")
+ROTATION_DAYS = {"marine": 28, "platinum": 14}
 _UNIT_ALIASES = {"pinches": "pinch", "scoops": "scoop", "grams": "g",
                  "cubes": "cube", "drops": "drop", "pieces": "piece", "mL": "ml"}
 
@@ -70,6 +72,108 @@ def normalise_foods(raw: Any) -> dict[str, dict[str, Any]]:
             "enabled": item.get("enabled") is not False,
         }
     return foods
+
+
+def _calendar_date(value: Any) -> date | None:
+    """Only a local calendar date, never a timestamp or an elapsed duration."""
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def normalise_rotation(raw: Any) -> dict[str, Any]:
+    """Bound the optional shared calendar; a missing/invalid anchor stays off."""
+    raw = raw if isinstance(raw, dict) else {}
+    start = _calendar_date(raw.get("startDate"))
+    groups = {}
+    for key in ("marineFoodIds", "platinumFoodIds"):
+        values = raw.get(key) if isinstance(raw.get(key), list) else []
+        groups[key] = list(dict.fromkeys(v for v in values if isinstance(v, str) and 0 < len(v) <= 140))[:128]
+    marker = _calendar_date(raw.get("observedPhaseStartDate"))
+    return {"enabled": raw.get("enabled") is True and start is not None,
+            "startDate": start.isoformat() if start else "",
+            "startPhase": raw.get("startPhase") if raw.get("startPhase") in ROTATION_PHASES else "marine",
+            **groups, "notify": raw.get("notify") is True,
+            "observedPhaseStartDate": marker.isoformat() if marker else ""}
+
+
+def rotation_food_ids(catalog: Any) -> set[str]:
+    """Eligible linked foods; empty stock affects logging, not the calendar."""
+    return {fid for fid, food in _items(catalog).items()
+            if food.get("enabled", True) and food.get("tankFeed", True) and food.get("loggable", True)
+            and any(isinstance(source, dict) and source.get("loggable", True)
+                    and source.get("tankFeed", True) for source in food.get("sources", []))}
+
+
+def validate_rotation(raw: dict[str, Any], catalog: Any) -> dict[str, Any]:
+    """Validate explicit choices, without guessing Vitalis products by name."""
+    # Turning guidance off must never require repairing a deleted food or an
+    # old malformed anchor first. Bounded selections remain available to edit.
+    if raw.get("enabled") is False:
+        return normalise_rotation(raw)
+    if raw.get("startPhase") not in ROTATION_PHASES:
+        raise ValueError("Choose Marine or Platinum as the starting phase.")
+    if (raw.get("enabled") or raw.get("startDate")) and _calendar_date(raw.get("startDate")) is None:
+        raise ValueError("Choose a valid phase start date (YYYY-MM-DD).")
+    for key in ("marineFoodIds", "platinumFoodIds"):
+        values = raw.get(key)
+        if (not isinstance(values, list) or len(values) > 128
+                or any(not isinstance(v, str) or not 0 < len(v) <= 140 for v in values)):
+            raise ValueError("Choose foods from your current tank-feeding catalogue.")
+    rotation = normalise_rotation(raw)
+    marine, platinum = set(rotation["marineFoodIds"]), set(rotation["platinumFoodIds"])
+    if marine & platinum:
+        raise ValueError("A food can belong to only one rotation phase.")
+    if (marine | platinum) - rotation_food_ids(catalog):
+        raise ValueError("Choose existing tank foods; culture supplies and harvest-only sources cannot join this rotation.")
+    if rotation["enabled"] and (not marine or not platinum):
+        raise ValueError("Choose at least one Marine food and one Platinum food before enabling the rotation.")
+    return rotation
+
+
+def rotation_summary(now_local: datetime, raw: Any, catalog: Any) -> dict[str, Any]:
+    """Marine 28 calendar days then Platinum 14, in the caller's local zone.
+
+    startDate is day one of startPhase, so choosing a past date resumes an
+    existing routine. This is guidance only and never consumes feeding rows.
+    """
+    rotation = normalise_rotation(raw)
+    summary = {k: v for k, v in rotation.items() if k != "observedPhaseStartDate"}
+    summary.update(status="disabled", phase=None, phaseLabel="", cycleDay=None, cycleWeek=None,
+                   phaseDay=None, phaseStartDate=None, nextPhase=None, nextSwitchDate=None,
+                   daysUntilSwitch=None, suggestedFoodIds=[], invalidFoodIds=[])
+    if not rotation["enabled"]:
+        return summary
+    start, today = _calendar_date(rotation["startDate"]), now_local.date()
+    eligible = rotation_food_ids(catalog)
+    groups = rotation["marineFoodIds"] + rotation["platinumFoodIds"]
+    invalid = sorted(set(groups) - eligible)
+    overlap = set(rotation["marineFoodIds"]) & set(rotation["platinumFoodIds"])
+    summary["invalidFoodIds"] = sorted(set(invalid) | overlap)
+    missing = bool(invalid or overlap or not rotation["marineFoodIds"] or not rotation["platinumFoodIds"])
+    if today < start:
+        summary.update(status="needs_foods" if missing else "upcoming", nextPhase=rotation["startPhase"],
+                       phaseStartDate=rotation["startDate"], nextSwitchDate=rotation["startDate"],
+                       daysUntilSwitch=(start - today).days)
+        return summary
+    cycle_day = ((today - start).days + (28 if rotation["startPhase"] == "platinum" else 0)) % 42
+    phase = "marine" if cycle_day < 28 else "platinum"
+    phase_day = cycle_day + 1 if phase == "marine" else cycle_day - 27
+    remaining = ROTATION_DAYS[phase] - phase_day + 1
+    phase_start = today - timedelta(days=phase_day - 1)
+    try:
+        next_switch = (today + timedelta(days=remaining)).isoformat()
+    except OverflowError:
+        next_switch = None
+    summary.update(status="needs_foods" if missing else "active", phase=phase, phaseLabel=phase.title(),
+                   cycleDay=cycle_day + 1, cycleWeek=cycle_day // 7 + 1, phaseDay=phase_day,
+                   phaseStartDate=phase_start.isoformat(), nextPhase="platinum" if phase == "marine" else "marine",
+                   nextSwitchDate=next_switch, daysUntilSwitch=remaining,
+                   suggestedFoodIds=[fid for fid in rotation[phase + "FoodIds"] if fid in eligible and fid not in overlap])
+    return summary
 
 
 def shelf_feeding_use(product: Any) -> str:

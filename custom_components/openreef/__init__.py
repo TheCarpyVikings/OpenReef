@@ -7108,9 +7108,11 @@ def _persist_alert_bookkeeping(
 async def _async_save_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], *,
     feeding_changed: bool = False,
+    feeding_rotation_changed: bool = False,
 ) -> dict[str, Any]:
     _preserve_unowned_automation(hass, entry, config)
-    _feeding_capture(entry.options.get(CONF_SETTINGS), config, preserve_foods=not feeding_changed)
+    _feeding_capture(entry.options.get(CONF_SETTINGS), config, preserve_foods=not feeding_changed,
+                     rotation_changed=feeding_rotation_changed)
     # Re-arming the AWC schedule (enable / slot-time / day edits) stamps the state so
     # the scheduler tick treats already-passed slots as not-backlog (R24): enabling a
     # schedule at 15:00 with a 02:00 slot must wait for tomorrow's 02:00, not start a
@@ -14238,14 +14240,20 @@ async def _async_schedule_dosing_tick(
         return
     config = config or _config_from_entry(entry)
     dosing_cfg = config.get("dosing") if isinstance(config.get("dosing"), dict) else {}
-    if not _dosing_channels(config):
+    rotation = feeding_engine.normalise_rotation((config.get("feeding") or {}).get("rotation"))
+    if not _dosing_channels(config) and not (rotation["enabled"] and rotation["notify"]):
         return
 
     async def _handle(now: datetime) -> None:
         latest_entry = _first_entry(hass)
         if latest_entry is None or latest_entry.entry_id != entry.entry_id:
             return
-        await _async_dosing_tick(hass, latest_entry)
+        if _dosing_channels(_config_from_entry(latest_entry)):
+            await _async_dosing_tick(hass, latest_entry)
+        else:
+            # Arming an advisory reminder must not activate the dosing tick's
+            # skimmer, UV, truce or other hardware routines on a manual tank.
+            await _async_feeding_rotation_tick(hass, latest_entry, now)
 
     hass.data.setdefault(DOMAIN, {})[DOSING_TICK_UNSUB] = async_track_time_interval(
         hass, _handle, timedelta(seconds=DOSING_TICK_SECONDS)
@@ -15553,6 +15561,9 @@ async def _async_dosing_tick(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     granularity lives in the recorder history of the firmware's Dosed Today sensor)."""
     if hass.data.setdefault(DOMAIN, {}).get("unloading"):
         return
+    # Calendar-only guidance also uses this watcher when no dosing hardware
+    # exists. It never changes a dose, a feeding record or inventory.
+    await _async_feeding_rotation_tick(hass, entry)
     # Feed-truce restore backstop (Stage C): stamp-driven, fetch-fresh — runs
     # before the snapshot below so a restore can never be clobbered by it.
     await _async_nps_truce_tick(hass, entry)
@@ -18789,6 +18800,7 @@ def _feeding_normalise(raw: Any) -> dict[str, Any]:
         preferences[str(fid)] = value
     return {"version": 1, "foods": feeding_engine.normalise_foods(raw.get("foods")),
             "preferences": preferences, "rows": rows,
+            "rotation": feeding_engine.normalise_rotation(raw.get("rotation")),
             "historyStartedAt": str(raw.get("historyStartedAt") or "")[:40],
             "retainedSince": str(raw.get("retainedSince") or "")[:40],
             "retentionDays": FEEDING_RETENTION_DAYS}
@@ -18849,7 +18861,7 @@ def _feeding_catalog(config: dict[str, Any], now: datetime) -> list[dict[str, An
 
 def _feeding_capture(stored: Any, incoming: dict[str, Any], now: datetime | None = None,
                      live_dosed: dict[str, Any] | None = None, *,
-                     preserve_foods: bool = False) -> dict[str, Any]:
+                     preserve_foods: bool = False, rotation_changed: bool = False) -> dict[str, Any]:
     """Upsert native projections before the stock ledgers evict older rows.
 
     Both snapshots matter: an incoming 51st dose may already have evicted the
@@ -18863,6 +18875,10 @@ def _feeding_capture(stored: Any, incoming: dict[str, Any], now: datetime | None
     stored = deepcopy(stored) if isinstance(stored, dict) else stored
     before = _feeding_normalise((stored or {}).get("feeding") if isinstance(stored, dict) else {})
     block = _feeding_normalise(incoming.get("feeding"))
+    # The dedicated command owns this calendar and its notification marker.
+    # Neither a stale Settings page nor another feeding action can rewind it.
+    if not rotation_changed:
+        block["rotation"] = deepcopy(before["rotation"])
     if preserve_foods:
         block["foods"] = deepcopy(before["foods"])
         block["preferences"] = deepcopy(before["preferences"])
@@ -18980,7 +18996,8 @@ def _feeding_summary(hass: HomeAssistant, config: dict[str, Any], days: int) -> 
         row["editable"] = row["undoable"] = can_change
     summary.update(planned=planned, nowLocal=now_local.isoformat(),
                    timeZone=str(getattr(hass.config, "time_zone", "") or now_local.tzinfo),
-                   retentionDays=FEEDING_RETENTION_DAYS)
+                   retentionDays=FEEDING_RETENTION_DAYS,
+                   rotation=feeding_engine.rotation_summary(now_local, block["rotation"], catalog))
     if block.get("retainedSince"):
         summary["coverage"]["notes"].append("Older detail reached the archive limit; records before " + block["retainedSince"][:10] + " may be incomplete.")
     return summary
@@ -18999,6 +19016,96 @@ async def websocket_feeding_summary(hass: HomeAssistant, connection: websocket_a
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     connection.send_result(msg["id"], _feeding_summary(hass, _config_from_entry(entry), msg.get("days", 1)))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/feeding_rotation_save",
+    vol.Required("enabled"): cv.boolean, vol.Required("start_date"): cv.string,
+    vol.Required("start_phase"): vol.In(feeding_engine.ROTATION_PHASES),
+    vol.Required("marine_food_ids"): [cv.string], vol.Required("platinum_food_ids"): [cv.string],
+    vol.Optional("notify", default=False): cv.boolean,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_feeding_rotation_save(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                          msg: dict[str, Any]) -> None:
+    """Save an optional calendar; no feeding event or equipment action."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    block = _feeding_capture(entry.options.get(CONF_SETTINGS), config, now)
+    catalog = _feeding_catalog(config, now)
+    try:
+        rotation = feeding_engine.validate_rotation({
+            "enabled": msg.get("enabled"), "startDate": msg.get("start_date"),
+            "startPhase": msg.get("start_phase"), "marineFoodIds": msg.get("marine_food_ids"),
+            "platinumFoodIds": msg.get("platinum_food_ids"), "notify": msg.get("notify", False),
+        }, catalog)
+    except ValueError as error:
+        connection.send_error(msg["id"], "invalid_rotation", str(error))
+        return
+    state = feeding_engine.rotation_summary(dt_util.as_local(now), rotation, catalog)
+    # Setup, enabling notifications, or adjusting the date starts quietly.
+    # Future starts seed the first phase too: only a subsequent switch alerts.
+    rotation["observedPhaseStartDate"] = state["phaseStartDate"] or ""
+    block["rotation"] = rotation
+    config = await _async_save_config(hass, entry, config, feeding_rotation_changed=True)
+    connection.send_result(msg["id"], {"rotation": feeding_engine.rotation_summary(
+        dt_util.as_local(now), config["feeding"]["rotation"], _feeding_catalog(config, now))})
+
+
+@_automation_stock_transaction
+async def _async_feeding_rotation_tick(hass: HomeAssistant, entry: OpenReefConfigEntry,
+                                      now: datetime | None = None) -> bool:
+    """One persistent reminder on a switch day; never replay missed phases.
+
+    The shared lock serializes ticks. After notification delivery, patch only
+    the marker into latest settings so unrelated saves cannot be overwritten.
+    """
+    if hass.data.setdefault(DOMAIN, {}).get("unloading"):
+        return False
+    now = now or datetime.now(timezone.utc)
+    config = _config_from_entry(entry)
+    rotation = config["feeding"]["rotation"]
+    if not rotation["enabled"] or not rotation["notify"]:
+        return False
+    today = dt_util.as_local(now)
+    catalog = _feeding_catalog(config, now)
+    state = feeding_engine.rotation_summary(today, rotation, catalog)
+    if state["phase"] is None:
+        return False
+    phase_start = state["phaseStartDate"]
+    observed = rotation["observedPhaseStartDate"]
+    # ISO dates compare chronologically. Never revisit a phase after a clock
+    # correction; an intentional date edit resets this marker in the command.
+    if observed and phase_start <= observed:
+        return False
+    notify = bool(observed and phase_start == today.date().isoformat() and state["status"] == "active")
+    if notify:
+        try:
+            await hass.services.async_call("persistent_notification", "create", {
+                "notification_id": "openreef_feeding_rotation",
+                "title": f"OpenReef: {state['phaseLabel']} feeding phase",
+                "message": (f"Your Vitalis rotation moves to {state['phaseLabel']} today. "
+                            "Your linked foods are highlighted in Feeding. "
+                            "Keep using your usual portions; this reminder does not log or dispense a feed."),
+            }, blocking=False)
+        except Exception as error:  # noqa: BLE001 - retry on this switch day, never stop the watcher
+            _LOGGER.warning("Feeding rotation reminder could not be sent: %s", error)
+            return False
+    # No await between fresh read and the narrow update. A simultaneous user
+    # edit/disable wins; the notification cannot restore its old calendar.
+    latest = deepcopy(entry.options.get(CONF_SETTINGS) or {})
+    current = feeding_engine.normalise_rotation((latest.get("feeding") or {}).get("rotation"))
+    if current == rotation:
+        current["observedPhaseStartDate"] = phase_start
+        latest.setdefault("feeding", {})["rotation"] = current
+        hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_SETTINGS: latest})
+    return notify
 
 
 @websocket_api.websocket_command({
@@ -28430,6 +28537,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_feeding_edit)
     websocket_api.async_register_command(hass, websocket_feeding_undo)
     websocket_api.async_register_command(hass, websocket_feeding_food_save)
+    websocket_api.async_register_command(hass, websocket_feeding_rotation_save)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
     websocket_api.async_register_command(hass, websocket_nps_hatch_clock)

@@ -262,6 +262,7 @@ class OpenReefPanel extends HTMLElement {
       this._modeCountdownTimer = window.setInterval(() => {
         this._refreshAfterAutoReturnIfDue();
         this._updateModeCountdownElements();
+        this._feedingRefreshRotationIfDue();
       }, 1000);
     }
     if (!this._pulseKeyHandler) {
@@ -1214,6 +1215,11 @@ class OpenReefPanel extends HTMLElement {
       if (event.key !== "Enter" || !event.target?.matches?.("[data-field='live-mark-label']")) return;
       event.preventDefault();
       this._liveMarkSave();
+    });
+    this.shadowRoot.addEventListener("submit", (event) => {
+      if (!event.target?.matches?.("[data-feeding-rotation-form]")) return;
+      event.preventDefault();
+      this._feedingSaveDraft();
     });
 
     this.shadowRoot.addEventListener("click", (event) => {
@@ -10917,6 +10923,16 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
+  _feedingRefreshRotationIfDue() {
+    // Reuse the mounted panel's clock so a quiet tank still changes its phase
+    // badge after midnight. The loader owns throttling, errors and rendering.
+    const st = this._feedingUi;
+    if (!this._hass || !["feeding", "nps"].includes(this._activeTab) || document.visibilityState === "hidden"
+      || this._nps?.demo || !st?.data?.rotation?.enabled || st.draft || st.busy || st.loading
+      || Date.now() - (st.at || 0) < 60000 || this._setupOpen || (this.shadowRoot && this._isEditingFormControl())) return;
+    return this._feedingLoad();
+  }
+
   _feedingFoods() {
     const foods = this._feedingState().data?.foods;
     return (Array.isArray(foods) ? foods : Object.entries(foods || {}).map(([id, food]) => ({ id, ...food })))
@@ -11017,11 +11033,64 @@ class OpenReefPanel extends HTMLElement {
     this._render();
   }
 
+  _feedingRotationDate(value) {
+    const date = String(value || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date.startsWith("0000-")) return "";
+    const parsed = new Date(`${date}T12:00:00Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date ? date : "";
+  }
+
+  _feedingRotationToday() {
+    const data = this._feedingState().data;
+    return this._feedingRotationDate(data?.date || String(data?.nowLocal || "").slice(0, 10));
+  }
+
+  _feedingRotationFoods() {
+    return this._feedingLogFoods().filter((food) => this._feedingSources(food).some((source) => source.loggable !== false && source.tankFeed !== false));
+  }
+
+  _feedingOpenRotation() {
+    const st = this._feedingState();
+    if (st.busy) return;
+    const rotation = st.data?.rotation || {};
+    const ids = (value) => Array.isArray(value) ? [...new Set(value.filter((id) => typeof id === "string"))] : [];
+    const marineFoodIds = ids(rotation.marineFoodIds), platinumFoodIds = ids(rotation.platinumFoodIds);
+    const preselected = !rotation.startDate && !marineFoodIds.length && !platinumFoodIds.length;
+    if (preselected) {
+      for (const food of this._feedingRotationFoods()) {
+        if (!/\bvitalis\b/i.test(food.name) || !/\bmarine\b/i.test(food.name) || !/flakes?|pellets?/i.test(food.name)) continue;
+        (/\bplatinum\b/i.test(food.name) ? platinumFoodIds : marineFoodIds).push(food.id);
+      }
+    }
+    st.draft = { kind: "rotation", enabled: rotation.enabled === true, startPhase: rotation.startPhase === "platinum" ? "platinum" : "marine",
+      startDate: rotation.startDate || this._feedingRotationToday(), marineFoodIds, platinumFoodIds, notify: rotation.notify === true,
+      preselected: preselected && !!(marineFoodIds.length || platinumFoodIds.length) };
+    st.error = "";
+    this._render();
+    setTimeout(() => {
+      this.shadowRoot?.querySelector("[data-feeding-rotation-form]")?.scrollIntoView?.({ block: "nearest" });
+      this.shadowRoot?.querySelector('[data-feeding-draft="enabled"]')?.focus?.({ preventScroll: true });
+    }, 0);
+  }
+
   _feedingDraftChanged(field, value, eventType = "change") {
     const st = this._feedingState();
     if (field === "chartFood") { st.chartFood = String(value); if (eventType === "change") this._render(); return; }
     const draft = st.draft;
     if (!draft || st.busy) return;
+    if (draft.kind === "rotation") {
+      if (["enabled", "notify"].includes(field)) draft[field] = value === true;
+      else if (["startDate", "startPhase"].includes(field)) draft[field] = String(value);
+      else {
+        const phase = ["marine", "platinum"].find((name) => field.startsWith(`${name}Food:`));
+        if (!phase) return;
+        const id = field.slice(`${phase}Food:`.length), key = `${phase}FoodIds`;
+        // Keep invalid saved IDs visible and removable, but never select a new culture supply.
+        if (value === true && !this._feedingRotationFoods().some((food) => food.id === id)) return;
+        draft[key] = value === true ? [...new Set([...draft[key], id])] : draft[key].filter((item) => item !== id);
+      }
+      return; // Native controls retain keyboard focus; their values live in the draft.
+    }
     if (!["foodId", "sourceId", "at", "amount", "slot", "name", "unit", "portion", "live", "tankFeed"].includes(field)) return;
     if (field === "tankFeed" && draft.tankFeedLocked) return;
     draft[field] = value;
@@ -11083,6 +11152,19 @@ class OpenReefPanel extends HTMLElement {
   _feedingSaveDraft() {
     const st = this._feedingState(), draft = st.draft;
     if (!draft || st.busy) return;
+    if (draft.kind === "rotation") {
+      const marine = [...new Set(draft.marineFoodIds || [])], platinum = [...new Set(draft.platinumFoodIds || [])];
+      const eligible = new Set(this._feedingRotationFoods().map((food) => food.id));
+      let error = "";
+      if (draft.enabled && (!["marine", "platinum"].includes(draft.startPhase) || !this._feedingRotationDate(draft.startDate))) error = "Choose a phase and a valid date for its first day.";
+      else if (draft.enabled && marine.some((id) => platinum.includes(id))) error = "Choose different foods for Marine and Platinum Marine.";
+      else if (draft.enabled && (!marine.length || !platinum.length)) error = "Choose at least one food for each phase.";
+      else if (draft.enabled && [...marine, ...platinum].some((id) => !eligible.has(id))) error = "Remove unavailable or culture-only foods from the rotation and choose a tank food for each phase.";
+      if (error) { st.error = error; this._render(); this.shadowRoot?.querySelector('[data-feeding-rotation-form] [role="alert"]')?.focus?.(); return; }
+      return this._feedingCommand({ type: "openreef/feeding_rotation_save", enabled: draft.enabled === true,
+        start_date: draft.startDate, start_phase: draft.startPhase, marine_food_ids: marine, platinum_food_ids: platinum,
+        notify: draft.notify === true }, draft.enabled ? "Vitalis rotation saved." : "Vitalis rotation is off.");
+    }
     if (draft.kind === "food") {
       if (!String(draft.name || "").trim() || !Number.isFinite(Number(draft.portion)) || Number(draft.portion) <= 0) {
         st.error = "Give the food a name and a positive usual portion."; this._render(); return;
@@ -11113,6 +11195,7 @@ class OpenReefPanel extends HTMLElement {
 
   _feedingOverviewAction(action, data = {}) {
     const st = this._feedingState();
+    if (st.busy && ["days", "add", "plan", "edit", "food", "rotation", "rotation-today", "cancel"].includes(action)) return;
     if (action === "days") { st.days = [1, 7, 30].includes(Number(data.id)) ? Number(data.id) : 1; st.at = 0; st.selected = ""; st.shown = 8; st.draft = null; this._render(); this._feedingLoad(true); }
     else if (action === "simple") { st.simple = !st.simple; try { window.localStorage?.setItem("openreef:feeding-simple", st.simple ? "1" : "0"); } catch { /* optional preference */ } this._render(); }
     else if (action === "detail") { st.selected = st.selected === data.id ? "" : data.id; this._render(); }
@@ -11123,8 +11206,17 @@ class OpenReefPanel extends HTMLElement {
     else if (action === "edit") this._feedingOpenEditor("", data.id);
     else if (action === "undo") this._feedingCommand({ type: "openreef/feeding_undo", entry_id: data.id }, "Entry removed from totals. Its planned feed is open again where applicable.", { close: false });
     else if (action === "food") this._feedingNewFood(data.id);
+    else if (action === "rotation") this._feedingOpenRotation();
+    else if (action === "rotation-today" && st.draft?.kind === "rotation" && !st.busy) {
+      const today = this._feedingRotationToday();
+      if (today) { st.draft.startDate = today; this._render(); this.shadowRoot?.querySelector('[data-feeding-draft="startDate"]')?.focus?.(); }
+    }
     else if (action === "save") this._feedingSaveDraft();
-    else if (action === "cancel") { st.draft = null; st.error = ""; this._render(); }
+    else if (action === "cancel" && !st.busy) {
+      const rotation = st.draft?.kind === "rotation";
+      st.draft = null; st.error = ""; this._render();
+      if (rotation) this.shadowRoot?.querySelector('[data-action="feeding-overview-rotation"]')?.focus?.();
+    }
     else if (action === "more") { st.shown += 30; this._render(); }
     else if (action === "manage") { st.manage = !st.manage; this._render(); }
     else if (action === "dismiss") { st.message = ""; st.noticeEntry = ""; this._render(); }
@@ -11134,6 +11226,7 @@ class OpenReefPanel extends HTMLElement {
   _feedingEditor() {
     const st = this._feedingState(), d = st.draft;
     if (!d) return "";
+    if (d.kind === "rotation") return this._feedingRotationEditor();
     const esc = (value) => this._escape(String(value ?? ""));
     const field = (key) => `data-feeding-draft="${key}"`;
     const controls = `<div class="button-row"><button type="button" class="primary compact-button" data-action="feeding-overview-save" ${st.busy ? "disabled" : ""}>${st.busy ? "Saving…" : d.kind === "food" ? "Save usual portion" : d.entryId ? "Save changes" : "Log feed"}</button><button type="button" class="secondary compact-button" data-action="feeding-overview-cancel" ${st.busy ? "disabled" : ""}>Cancel</button></div>`;
@@ -11161,6 +11254,61 @@ class OpenReefPanel extends HTMLElement {
       ${plans.length ? `<fieldset class="feed-overview-slots"><legend>Count this as</legend>${plans.map((p) => `<label><input type="radio" name="feeding-slot" ${field("slot")} value="${esc(p.at || "anytime")}" ${d.slot === (p.at || "anytime") ? "checked" : ""}>${esc(p.at || "Any time")} feed · ${esc(this._feedingQuantity(p.amount, p.unit))} planned</label>`).join("")}<label><input type="radio" name="feeding-slot" ${field("slot")} value="extra" ${d.slot === "extra" ? "checked" : ""}>Extra feed</label></fieldset>` : !d.entryId ? `<small>Recorded as an extra feed.</small>` : `<small>${d.originalSlot ? `Keeps its ${esc(d.originalSlot === "anytime" ? "any-time" : d.originalSlot)} planned slot. ` : ""}Changes correct this entry without adding another feed.</small>`}
       ${selected ? `<small>This completes the ${esc(selected.at || "any-time")} feed, including if you fed less than the planned amount.</small>` : ""}
       <small>This records food already fed. It does not run a pump.</small>${controls}</article>`;
+  }
+
+  _feedingRotationCard() {
+    const st = this._feedingState(), rotation = st.data?.rotation || {};
+    const esc = (value) => this._escape(String(value ?? ""));
+    const label = (phase) => phase === "platinum" ? "Platinum Marine" : "Marine";
+    const date = (value) => {
+      const day = this._feedingRotationDate(value);
+      return day ? new Date(`${day}T12:00:00Z`).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }) : "date unavailable";
+    };
+    let title = "Optional Vitalis rotation", detail = "Marine for 4 weeks, then Platinum Marine for 2 weeks. One cycle for flakes and pellets.";
+    if (rotation.enabled && (rotation.status === "upcoming" || (!rotation.phase && this._feedingRotationDate(rotation.startDate)))) {
+      title = `Starts ${date(rotation.startDate)}`;
+      detail = `${label(rotation.startPhase)} comes first. Your usual foods stay available until then.`;
+    } else if (rotation.enabled && ["active", "needs_foods"].includes(rotation.status)) {
+      title = `${label(rotation.phase)} · week ${Number(rotation.cycleWeek) || "—"} of 6`;
+      detail = `Switch to ${label(rotation.nextPhase)} on ${date(rotation.nextSwitchDate)}.`;
+    }
+    const mapped = [...(rotation.marineFoodIds || []), ...(rotation.platinumFoodIds || [])];
+    const eligible = new Set(this._feedingRotationFoods().map((food) => food.id));
+    const invalid = rotation.enabled && (rotation.status === "needs_foods" || mapped.some((id) => !eligible.has(id)));
+    const unavailable = rotation.enabled && (rotation.suggestedFoodIds || []).some((id) => {
+      const food = this._feedingFood(id);
+      return food && !this._feedingSources(food).some((source) => source.loggable !== false && source.available !== false);
+    });
+    return `<article class="panel feed-overview-rotation" aria-labelledby="feeding-rotation-title"><div class="feed-overview-head"><div><p class="eyebrow">Vitalis rotation</p><h3 id="feeding-rotation-title">${esc(title)}</h3><small>${esc(detail)}</small></div>
+      <button type="button" class="secondary compact-button" data-action="feeding-overview-rotation" ${st.busy ? "disabled" : ""}>${rotation.startDate || mapped.length ? "Adjust rotation" : "Set up rotation"}</button></div>
+      ${invalid ? `<p class="hint">Some selected foods need review. Adjust the rotation to choose available tank foods.</p>` : unavailable ? `<p class="hint">A suggested food has no available source. Check its food shelf; the rotation dates stay the same.</p>` : ""}
+      <small><a href="https://www.vitalisaquatic.uk/feeding-guides" target="_blank" rel="noopener noreferrer">Vitalis feeding guide</a>${rotation.enabled && rotation.notify ? " · Home Assistant notification at each phase change" : ""}</small></article>`;
+  }
+
+  _feedingRotationEditor() {
+    const st = this._feedingState(), d = st.draft;
+    if (d?.kind !== "rotation") return "";
+    const esc = (value) => this._escape(String(value ?? ""));
+    const foods = this._feedingRotationFoods(), eligible = new Set(foods.map((food) => food.id));
+    const groups = [["marine", "Marine foods · weeks 1–4"], ["platinum", "Platinum Marine foods · weeks 5–6"]].map(([phase, title]) => {
+      const selected = d[`${phase}FoodIds`];
+      const missing = selected.filter((id) => !eligible.has(id)).map((id) => ({ id, name: this._feedingFood(id)?.name || id, missing: true }));
+      return `<fieldset class="feed-rotation-foods"><legend>${title}</legend>${[...foods, ...missing].map((food) => `<label class="check-row"><input type="checkbox" data-feeding-draft="${phase}Food:${esc(food.id)}" ${selected.includes(food.id) ? "checked" : ""}><span>${esc(food.name)}${food.missing ? `<small>Unavailable for tank feeding · untick to remove</small>` : ""}</span></label>`).join("") || `<p class="hint">Add a tank food first, then return here to select it.</p>`}</fieldset>`;
+    }).join("");
+    return `<form class="panel stack feed-overview-editor feed-rotation-editor" data-feeding-editor data-feeding-rotation-form aria-labelledby="feeding-rotation-editor-title" aria-busy="${st.busy}" novalidate>
+      <h3 id="feeding-rotation-editor-title">Set your Vitalis rotation</h3>
+      ${st.error ? `<p class="notice warning-notice" role="alert" tabindex="-1">${esc(st.error)}</p>` : ""}
+      <fieldset class="feed-rotation-controls stack" ${st.busy ? "disabled" : ""}><legend class="feed-overview-chart-a11y">Rotation settings</legend>
+      <label class="check-row"><input type="checkbox" data-feeding-draft="enabled" ${d.enabled ? "checked" : ""}>Enable rotation guidance</label>
+      <div class="feed-overview-fields"><label>Phase to start from<select data-feeding-draft="startPhase"><option value="marine" ${d.startPhase === "marine" ? "selected" : ""}>Marine · 4 weeks</option><option value="platinum" ${d.startPhase === "platinum" ? "selected" : ""}>Platinum Marine · 2 weeks</option></select></label>
+      <label>First day of that phase<input type="date" data-feeding-draft="startDate" value="${esc(d.startDate)}" aria-describedby="feeding-rotation-date-help"></label></div>
+      <div class="button-row"><button type="button" class="secondary compact-button" data-action="feeding-overview-rotation-today" ${this._feedingRotationToday() ? "" : "disabled"}>Start today</button><small id="feeding-rotation-date-help">This is day 1 of the selected phase, using your tank’s Home Assistant date.</small></div>
+      <small>${d.preselected ? "Matching food names are preselected. Review both groups before saving. " : ""}Choose at least one food per phase. Each food belongs to one group.</small>
+      <div class="feed-rotation-groups">${groups}</div>
+      <label class="check-row"><input type="checkbox" data-feeding-draft="notify" ${d.notify ? "checked" : ""}>Home Assistant notification when the phase changes</label>
+      <small>Guidance follows a repeating 6-week calendar. Log what you actually feed; your portions and planned feeds stay as they are.</small>
+      <div class="button-row"><button type="submit" class="primary compact-button">${st.busy ? "Saving…" : "Save rotation"}</button><button type="button" class="secondary compact-button" data-action="feeding-overview-cancel">Cancel</button></div>
+      </fieldset></form>`;
   }
 
   _feedingNutrientCard() {
@@ -11236,7 +11384,7 @@ class OpenReefPanel extends HTMLElement {
     const button = (action, id, text, primary = false) => `<button class="${primary ? "primary" : "secondary"} compact-button" data-action="feeding-overview-${action}"${id ? ` data-id="${esc(id)}"` : ""} ${st.busy ? "disabled" : ""}>${text}</button>`;
     const head = `<div class="feed-overview-head"><div><p class="eyebrow">Whole-tank feeding</p><h2>${st.days === 1 ? "Today, at a glance." : "Your feeding history"}</h2></div><button class="secondary compact-button" data-action="feeding-overview-simple" aria-pressed="${st.simple}">${st.simple ? "✓ " : ""}Keep it simple</button></div>
       <div class="feed-overview-head"><div class="button-row feed-overview-period">${[[1, "Today"], [7, "7 days"], [30, "30 days"]].map(([days, text]) => `<button class="${st.days === days ? "primary" : "secondary"} compact-button" data-action="feeding-overview-days" data-id="${days}" aria-pressed="${st.days === days}">${text}</button>`).join("")}</div><div class="button-row">${button("food", "", "Add food")}${button("add", "", "Log a feed", true)}</div></div>`;
-    const notice = `${st.error ? `<div class="notice warning-notice" role="alert">${esc(st.error)} ${button("refresh", "", "Retry")}</div>` : ""}${st.message ? `<div class="notice info-notice feed-overview-head" role="status"><span>${esc(st.message)}</span><div class="button-row">${st.noticeEntry ? button("undo", st.noticeEntry, esc(st.noticeUndo)) : ""}${button("dismiss", "", "Dismiss")}</div></div>` : ""}`;
+    const notice = `${st.error && st.draft?.kind !== "rotation" ? `<div class="notice warning-notice" role="alert">${esc(st.error)} ${button("refresh", "", "Retry")}</div>` : ""}${st.message ? `<div class="notice info-notice feed-overview-head" role="status"><span>${esc(st.message)}</span><div class="button-row">${st.noticeEntry ? button("undo", st.noticeEntry, esc(st.noticeUndo)) : ""}${button("dismiss", "", "Dismiss")}</div></div>` : ""}`;
     if (!data) return `<section class="stack feed-overview">${head}${notice}${this._feedingEditor()}<article class="panel"><p class="hint">${st.loading ? "Loading feeding records…" : "Feeding records will appear here."}</p></article></section>`;
     const foods = this._feedingFoods(), totals = data.totals || [];
     const cards = totals.map((total) => `<button class="feed-overview-total" data-action="feeding-overview-detail" data-id="${esc(total.foodId)}" aria-pressed="${st.selected === total.foodId}">
@@ -11249,10 +11397,11 @@ class OpenReefPanel extends HTMLElement {
     const coverage = data.coverage || {};
     const coverageText = typeof coverage === "string" ? coverage : coverage.note || coverage.text || (coverage.notes || []).join(" ") || "Totals use available records. Gaps do not mean no feeding.";
     const favourites = this._feedingLogFoods().filter((food) => Number(food.portion) > 0 && this._feedingSources(food).some((source) => source.loggable !== false && source.available !== false));
-    const quick = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Your usual portions</h3>${button("manage", "", "Manage portions")}</div><div class="feed-overview-portions">${favourites.map((food) => `<button class="secondary feed-overview-portion" data-action="feeding-overview-quick" data-id="${esc(food.id)}" ${st.busy ? "disabled" : ""}><span>${esc(food.name)}</span><strong>+ ${esc(this._feedingQuantity(food.portion, food.unit))}</strong></button>`).join("")}</div>${!favourites.length ? `<p class="hint">Add your usual flake, pellets or other foods to start one-tap logging.</p>` : ""}${st.manage ? `<div class="feed-overview-manage">${foods.map((food) => `<div><span>${esc(food.name)}${food.tankFeed === false ? `<br><small>${esc(food.tankFeedReason || "Not used for tank feeding.")}</small>` : ` · ${esc(this._feedingQuantity(food.portion, food.unit))}`}</span>${button("food", food.id, food.tankFeed === false ? "Review use" : "Edit portion / food type")}</div>`).join("")}</div>` : ""}</article>` : "";
+    const suggested = new Set(data.rotation?.enabled && ["active", "needs_foods"].includes(data.rotation.status) ? data.rotation.suggestedFoodIds || [] : []);
+    const quick = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Your usual portions</h3>${button("manage", "", "Manage portions")}</div><div class="feed-overview-portions">${favourites.map((food) => `<button class="secondary feed-overview-portion" data-action="feeding-overview-quick" data-id="${esc(food.id)}" ${st.busy ? "disabled" : ""}><span>${esc(food.name)}</span><strong>+ ${esc(this._feedingQuantity(food.portion, food.unit))}</strong>${suggested.has(food.id) ? `<small class="feed-rotation-suggested">Suggested today</small>` : ""}</button>`).join("")}</div>${!favourites.length ? `<p class="hint">Add your usual flake, pellets or other foods to start one-tap logging.</p>` : ""}${st.manage ? `<div class="feed-overview-manage">${foods.map((food) => `<div><span>${esc(food.name)}${food.tankFeed === false ? `<br><small>${esc(food.tankFeedReason || "Not used for tank feeding.")}</small>` : ` · ${esc(this._feedingQuantity(food.portion, food.unit))}`}</span>${button("food", food.id, food.tankFeed === false ? "Review use" : "Edit portion / food type")}</div>`).join("")}</div>` : ""}</article>` : "";
     const plans = (data.planned || []).filter((plan) => !["done", "skipped"].includes(plan.status));
     const due = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Still planned today</h3><small>${plans.length} open feeds</small></div><div class="feed-overview-planned">${plans.map((plan) => `<div class="feed-overview-plan"><small>${esc(plan.at || "Any time")}${["late", "missed", "due"].includes(plan.status) ? " · Unconfirmed" : plan.status === "blocked" ? " · Source unavailable" : " · Upcoming"}</small><strong>${esc(plan.name)}</strong><small>${esc(this._feedingQuantity(plan.amount, plan.unit))} planned</small>${plan.status !== "blocked" ? button("plan", plan.id, "Log this feed", ["late", "missed", "due"].includes(plan.status)) : ""}</div>`).join("") || `<p class="hint">No open planned feeds. Your usual portions are here for extras.</p>`}</div></article>` : "";
-    return `<section class="stack feed-overview ${st.simple ? "is-simple" : ""}">${head}${notice}<article class="panel stack"><h3>${st.days === 1 ? "Fed today" : `Recorded over ${st.days} days`}</h3><div class="feed-overview-totals">${cards || `<p class="hint">No food amounts recorded in this period.</p>`}</div>${detail}<small>${esc(coverageText)}</small>${live}</article>${quick}${this._feedingEditor()}${due}${st.days > 1 ? this._feedingHistoryChart() : !st.simple ? this._feedingOverviewTimeline() : ""}${this._feedingNutrientCard()}${!st.simple ? this._feedingOverviewLog() : ""}</section>`;
+    return `<section class="stack feed-overview ${st.simple ? "is-simple" : ""}">${head}${notice}<article class="panel stack"><h3>${st.days === 1 ? "Fed today" : `Recorded over ${st.days} days`}</h3><div class="feed-overview-totals">${cards || `<p class="hint">No food amounts recorded in this period.</p>`}</div>${detail}<small>${esc(coverageText)}</small>${live}</article>${this._feedingRotationCard()}${st.draft?.kind === "rotation" ? this._feedingEditor() : ""}${quick}${st.draft?.kind !== "rotation" ? this._feedingEditor() : ""}${due}${st.days > 1 ? this._feedingHistoryChart() : !st.simple ? this._feedingOverviewTimeline() : ""}${this._feedingNutrientCard()}${!st.simple ? this._feedingOverviewLog() : ""}</section>`;
   }
 
   async _npsLoadSummary(force = false) {
@@ -36959,6 +37108,20 @@ ${parts.buttons}
         .feed-overview-portion { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; text-align: left; padding: 14px; background: #143328; border-color: #315c48; min-width: 0; }
         .feed-overview-portion span { font-size: 12px; color: #b8c8bf; overflow-wrap: anywhere; }
         .feed-overview-portion strong { color: #4ade80; font-size: 16px; }
+        .feed-overview-rotation { display: grid; gap: 10px; }
+        .feed-overview-rotation h3 { margin: 4px 0 8px; }
+        .feed-overview-rotation .hint { margin: 0; }
+        .feed-overview-rotation a { color: var(--openreef-accent, #67e8f9); }
+        .feed-overview .feed-rotation-suggested { color: #d1fae5; border: 1px solid #315c48; border-radius: 5px; padding: 3px 6px; font-size: 11px; }
+        .feed-rotation-controls { border: 0; padding: 0; margin: 0; min-width: 0; }
+        .feed-rotation-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .feed-rotation-foods { min-width: 0; margin: 0; padding: 10px 14px; border: 1px solid #33495d; border-radius: 8px; }
+        .feed-rotation-foods legend { font-size: 13px; padding: 0 5px; }
+        .feed-rotation-editor .check-row { overflow-wrap: anywhere; }
+        .feed-rotation-editor .check-row input { flex: 0 0 auto; width: auto; }
+        .feed-rotation-editor .check-row span { min-width: 0; }
+        .feed-rotation-editor .check-row small { display: block; }
+        .feed-rotation-editor :is(button, input, select):focus-visible { outline: 2px solid var(--openreef-accent, #67e8f9); outline-offset: 3px; }
         .feed-overview-planned { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
         .feed-overview-plan { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; border: 1px solid #33495d; border-radius: 8px; padding: 14px; background: var(--openreef-card-alt, #172637); }
         .feed-overview-plan .compact-button { margin-top: auto; }
@@ -37007,6 +37170,7 @@ ${parts.buttons}
           .feed-overview-total strong { font-size: 20px; }
           .feed-overview .compact-button { min-height: 44px; }
           .feed-overview-fields { grid-template-columns: minmax(0, 1fr); }
+          .feed-rotation-groups { grid-template-columns: minmax(0, 1fr); }
           .feed-overview-fields input, .feed-overview-fields select { font-size: 16px; }
           .feed-overview-log-row { grid-template-columns: 62px minmax(0, 1fr); gap: 10px; }
           .feed-overview-log-row .button-row { grid-column: 2; }
