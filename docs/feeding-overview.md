@@ -1,8 +1,10 @@
 # Whole-tank Feeding overview
 
 Added in OpenReef 0.7.230. The Feeding hub and NPS page show what was recorded
-today, what is still planned, and food totals over 7 or 30 days. Existing NPS
-equipment and culture controls remain available below the overview.
+today, what is still planned, and food totals over 7 or 30 days. From 0.7.231,
+the NPS, Brine hatchery, Cultures and Spawning cards sit at the top of Feeding,
+above the overview, matching the Water and Watch hubs. The detailed feeding
+timeline remains available below the log.
 
 ## Everyday use
 
@@ -90,5 +92,5 @@ with a mocked API, including 320, 736 and 1024 px widths. These checks do not
 replace testing against a running Home Assistant installation.
 
 After installing the changed integration, restart Home Assistant and refresh
-the panel to load version 0.7.230. Confirm the displayed tank volume, add a
+the panel to load the updated version. Confirm the displayed tank volume, add a
 usual dry-food portion, and use real feeds to check totals and source stock.

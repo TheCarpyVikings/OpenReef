@@ -17421,7 +17421,8 @@ const rigSteps = [
             system: "The machinery — switches and every setting.",
           }[groupId] || "")}</p>
         </div>
-        ${groupId === "feeding" ? `${this._feedingOverview()}${this._feedingDetails("feeding-specialist-tools", "Hatchery, cultures & NPS controls", `${this._npsFeedingStrip()}<div class="summary-grid hub-grid">${cards}</div>`)}` : `<div class="summary-grid hub-grid">${cards}</div>`}
+        <div class="summary-grid hub-grid">${cards}</div>
+        ${groupId === "feeding" ? `${this._feedingOverview()}${this._feedingDetails("feeding-specialist-tools", "Detailed feeding timeline", this._npsFeedingStrip())}` : ""}
       </section>`;
   }
 
