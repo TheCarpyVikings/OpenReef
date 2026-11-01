@@ -235,6 +235,7 @@ from . import livestock as livestock_engine
 from . import report as report_engine
 from . import cooling as cooling_engine
 from . import nps as nps_engine
+from . import feeding as feeding_engine
 from . import spawning
 from . import vision
 from .const import (
@@ -1420,6 +1421,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             continue
         bottle_history.append({"event": str(item.get("event")), "at": _awc_str(item.get("at"), 40),
                                "ml": _awc_num(item.get("ml"), 0, 0, 20000),
+                               **({"recordedAt": _awc_str(item.get("recordedAt"), 40)} if item.get("recordedAt") else {}),
+                               **({"extra": True} if item.get("extra") is True else {}),
                                **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
                                **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {})})
     # The DHA step (Stage C): drops into a portion of the crop, a short soak,
@@ -1647,6 +1650,8 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         "handFeeds": [
             {"at": _awc_str(item.get("at"), 40), "ml": _awc_num(item.get("ml"), 0, 0, 5000),
              "from": "bottle" if item.get("from") == "bottle" else "container",
+             **({"recordedAt": _awc_str(item.get("recordedAt"), 40)} if item.get("recordedAt") else {}),
+             **({"extra": True} if item.get("extra") is True else {}),
              **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
              **({"undoneAt": _awc_str(item.get("undoneAt"), 40)} if _awc_str(item.get("undoneAt"), 40) else {})}
             for item in (raw.get("handFeeds") if isinstance(raw.get("handFeeds"), list) else [])[:nps_engine.HAND_FEED_LOG_MAX]
@@ -1974,6 +1979,8 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 "kind": item.get("kind")
                 if item.get("kind") in ("dose", "pump", "transfer", "refill") else "dose",
                 # The planned slot a hand dose satisfies (0.7.135), if it said.
+                **({"recordedAt": _awc_str(item.get("recordedAt"), 40)} if item.get("recordedAt") else {}),
+                **({"extra": True} if item.get("extra") is True else {}),
                 **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
                 # Taken back (0.7.136): kept as a tombstone so a stale save
                 # cannot bring it back; every reader skips it.
@@ -1990,6 +1997,7 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
         ][-CONSUMABLE_HISTORY_MAX:]
         products[pid] = {
             "name": _awc_str(raw.get("name"), 120) or "Product",
+            **({"liveFood": raw["liveFood"]} if isinstance(raw.get("liveFood"), bool) else {}),
             "brand": _awc_str(raw.get("brand"), 120),
             "category": raw.get("category")
             if raw.get("category") in CONSUMABLE_CATEGORIES else "other",
@@ -4150,6 +4158,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     _normalise_awc_config(config)
     _normalise_mixing_config(config)
     _dosing_apply_standing(config)
+    config["feeding"] = _feeding_normalise(config.get("feeding"))
 
     return config
 
@@ -5851,6 +5860,7 @@ def _persist_entry_config(
     hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
 ) -> dict[str, Any]:
     _preserve_unowned_automation(hass, entry, config)
+    _feeding_capture(entry.options.get(CONF_SETTINGS), config, preserve_foods=True)
     normalised = _normalise_core_config(config)
     # Keep old thermal bindings outside panel-owned settings until OFF is verified.
     _spawning_remember_temp_outputs(hass, entry, _spawning_execution_cfg(_config_from_entry(entry)))
@@ -7095,9 +7105,11 @@ def _persist_alert_bookkeeping(
 
 
 async def _async_save_config(
-    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any]
+    hass: HomeAssistant, entry: OpenReefConfigEntry, config: dict[str, Any], *,
+    feeding_changed: bool = False,
 ) -> dict[str, Any]:
     _preserve_unowned_automation(hass, entry, config)
+    _feeding_capture(entry.options.get(CONF_SETTINGS), config, preserve_foods=not feeding_changed)
     # Re-arming the AWC schedule (enable / slot-time / day edits) stamps the state so
     # the scheduler tick treats already-passed slots as not-backlog (R24): enabling a
     # schedule at 15:00 with a 02:00 slot must wait for tomorrow's 02:00, not start a
@@ -9174,6 +9186,9 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
     """
     if not isinstance(stored, dict) or not isinstance(incoming, dict):
         return
+    # Feeding records and favourite portions belong to their dedicated commands,
+    # never to an older Settings page's whole-config snapshot.
+    incoming["feeding"] = deepcopy(stored.get("feeding") or {})
     stored_nps = stored.get("nps")
     incoming_nps = incoming.get("nps")
     if isinstance(stored_nps, dict):
@@ -9301,6 +9316,7 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
             # An undo is a write too (0.7.136): its tombstone stamp is newer
             # than any row, so the stored ledger wins over a stale copy.
             stamps = ([_parse_datetime(item.get("at")) for item in rows]
+                      + [_parse_datetime(item.get("recordedAt")) for item in rows if item.get("recordedAt")]
                       + [_parse_datetime(item.get("undoneAt")) for item in rows if item.get("undoneAt")])
             stamps = [stamp for stamp in stamps if stamp is not None]
             return max(stamps) if stamps else None
@@ -16748,7 +16764,8 @@ async def websocket_consumable_undo_dose(
         remaining = max(0.0, float(product.get("remainingMl") or 0.0)) + ml
         product["remainingMl"] = round(min(remaining, bottle_ml) if bottle_ml > 0 else remaining, 2)
     previous = [str(item.get("at")) for item in history
-                if isinstance(item, dict) and item.get("kind") == "dose" and item.get("at") and not item.get("undoneAt")]
+                if isinstance(item, dict) and item.get("kind") == "dose" and item.get("at")
+                and not item.get("undoneAt") and not item.get("extra")]
     product["lastDosedAt"] = max(previous) if previous else ""
     _drop_completion(config, _nps_shelf_task_id(str(msg["product_id"])), stamp)
     name = str(product.get("name") or "Bottle")
@@ -18715,7 +18732,9 @@ def _nps_feed_scope(hatchery_cfg: dict[str, Any], cultures_cfg: dict[str, Any]) 
     return quiet, bottle_species
 
 
-def _nps_feed_log_for(config: dict[str, Any], now_local: datetime, days: int) -> dict[str, Any]:
+def _nps_feed_log_for(config: dict[str, Any], now_local: datetime, days: int, *,
+                      limit: int = nps_engine.FEED_LOG_MAX,
+                      live_dosed: dict[str, Any] | None = None) -> dict[str, Any]:
     """The feeding log for the last ``days`` local days, as the NPS summary
     builds it (same inputs, same engine) — the report's feed counts."""
     products = (config.get("consumables") or {}).get("products") or {}
@@ -18726,7 +18745,564 @@ def _nps_feed_log_for(config: dict[str, Any], now_local: datetime, days: int) ->
     return nps_engine.feed_log(
         now_local, products=products, channels=channels, cultures=cultures_cfg,
         hatchery=hatchery_cfg, brine_feeds=[dict(item) for item in hatchery_cfg["handFeeds"]],
-        days=days, quiet_product_ids=quiet, culture_bottle_species=bottle_species)
+        days=days, quiet_product_ids=quiet, culture_bottle_species=bottle_species,
+        limit=limit, live_dosed=live_dosed)
+
+
+FEEDING_RETENTION_DAYS = 365
+FEEDING_ARCHIVE_MAX = 50000
+
+
+def _feeding_normalise(raw: Any) -> dict[str, Any]:
+    """Server-owned feeding history, independent of the small stock ledgers."""
+    raw = raw if isinstance(raw, dict) else {}
+    rows = []
+    strings = ("id", "at", "name", "source", "sourceId", "sourceLabel", "foodId", "unit",
+               "from", "via", "productId", "slot", "note", "undoneAt", "updatedAt", "how")
+    flags = ("live", "liveKnown", "undone", "extra", "drip", "running")
+    for item in raw.get("rows", []) if isinstance(raw.get("rows"), list) else []:
+        if not isinstance(item, dict) or not item.get("id") or feeding_engine._stamp(item.get("at")) is None:
+            continue
+        row = {k: str(item[k])[:240] for k in strings if item.get(k) is not None}
+        row.update({k: item[k] is True for k in flags if k in item})
+        for key in ("amount", "ml", "plannedAmount"):
+            if key in item:
+                number = feeding_engine._number(item[key])
+                row[key] = round(number, 3) if number is not None else None
+        rows.append(row)
+    preferences = {}
+    for fid, pref in (raw.get("preferences") or {}).items() if isinstance(raw.get("preferences"), dict) else []:
+        if not isinstance(pref, dict) or len(str(fid)) > 140:
+            continue
+        value = {}
+        portion = feeding_engine._number(pref.get("portion"))
+        if portion and portion <= 50000:
+            value["portion"] = portion
+        if isinstance(pref.get("live"), bool):
+            value["live"] = pref["live"]
+        preferences[str(fid)] = value
+    return {"version": 1, "foods": feeding_engine.normalise_foods(raw.get("foods")),
+            "preferences": preferences, "rows": rows,
+            "historyStartedAt": str(raw.get("historyStartedAt") or "")[:40],
+            "retainedSince": str(raw.get("retainedSince") or "")[:40],
+            "retentionDays": FEEDING_RETENTION_DAYS}
+
+
+def _feeding_catalog(config: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
+    products = (config.get("consumables") or {}).get("products") or {}
+    cultures = _nps_cultures_cfg(config)
+    block = config.get("feeding") or {}
+    foods = feeding_engine.build_catalog(products, cultures, block.get("foods"))
+    hatchery = _nps_feed_hatchery(config)
+    brine = nps_engine.brine_feed_sources(hatchery, now)
+    for food in foods:
+        if food["id"] == "brine":
+            food["portion"] = _nps_hatchery_v2(config)["handFeed"]["defaultDoseMl"]
+        elif food["id"] == "rotifers":
+            food["portion"] = cultures["bottle"].get("doseMl") or food["portion"]
+        pref = (block.get("preferences") or {}).get(food["id"], {})
+        if pref.get("portion"):
+            food["portion"] = pref["portion"]
+        if isinstance(pref.get("live"), bool):
+            food.update(live=pref["live"], liveKnown=True)
+        for source in food["sources"]:
+            kind = source["kind"]
+            source["loggable"] = kind in ("manual", "shelf", "brine", "bottle")
+            reason = ""
+            if kind == "shelf":
+                product = products.get(source["productId"], {})
+                # Keep the source selectable for a smaller actual feed when
+                # less than the usual portion remains. Logging validates the
+                # requested amount against stock again.
+                reason = nps_engine.food_stock_pause_reason(product, .01, now)
+                if product.get("category") == nps_engine.ENRICHMENT_CATEGORY:
+                    source["loggable"] = False
+                    reason = "Log enrichment from its existing food-shelf controls."
+            elif kind == "brine":
+                reason = brine[source["from"]].get("pauseReason") or ""
+            elif kind == "bottle":
+                bottle = cultures["bottle"]
+                status = cultures_engine.bottle_state(bottle, cultures_engine.species_preset("rotifer_L")["bottleShelfDays"], now)
+                if status["status"] in ("empty", "stale"):
+                    reason = "The rotifer bottle is empty or past its storage window."
+            elif kind == "culture":
+                reason = "Record a harvest in Cultures; the tank share will appear here."
+            source["reason"] = reason
+            source["available"] = source["loggable"] and not reason
+        food["loggable"] = any(s["loggable"] for s in food["sources"])
+    return foods
+
+
+def _feeding_capture(stored: Any, incoming: dict[str, Any], now: datetime | None = None,
+                     live_dosed: dict[str, Any] | None = None, *,
+                     preserve_foods: bool = False) -> dict[str, Any]:
+    """Upsert native projections before the stock ledgers evict older rows.
+
+    Both snapshots matter: an incoming 51st dose may already have evicted the
+    stored 1st dose. Drips update a stable daily id; tombstones never resurrect.
+    Explicit edits carry updatedAt and win over re-imports from old snapshots.
+    """
+    now = now or datetime.now(timezone.utc)
+    now_local = dt_util.as_local(now)
+    # Migration helpers replace nested dictionaries. Never let a read of the
+    # old snapshot mutate ConfigEntry.options outside its persistence boundary.
+    stored = deepcopy(stored) if isinstance(stored, dict) else stored
+    before = _feeding_normalise((stored or {}).get("feeding") if isinstance(stored, dict) else {})
+    block = _feeding_normalise(incoming.get("feeding"))
+    if preserve_foods:
+        block["foods"] = deepcopy(before["foods"])
+        block["preferences"] = deepcopy(before["preferences"])
+        incoming["feeding"] = block
+    merged = {row["id"]: row for row in before["rows"]}
+    for row in block["rows"]:
+        old = merged.get(row["id"])
+        if old is None or str(row.get("updatedAt") or "") >= str(old.get("updatedAt") or ""):
+            merged[row["id"]] = row
+    for snapshot in (stored, incoming):
+        if not isinstance(snapshot, dict) or not snapshot.get("nps"):
+            continue
+        catalog = _feeding_catalog(snapshot, now)
+        native = _nps_feed_log_for(snapshot, now_local, nps_engine.FEED_LOG_DAYS_MAX,
+                                   limit=FEEDING_ARCHIVE_MAX + 1,
+                                   live_dosed=live_dosed if snapshot is incoming else None)
+        for row in feeding_engine.annotate_rows(native["rows"], catalog):
+            old = merged.get(row["id"])
+            if old:
+                row.update({k: old[k] for k in ("foodId", "unit", "live", "liveKnown", "sourceId", "sourceLabel", "name") if k in old})
+            if old and old.get("drip") and not old.get("undone"):
+                # A food classification/portion edit must not freeze a running
+                # drip's measured daily total. Preserve its explicit type only.
+                row.update({k: old[k] for k in ("live", "liveKnown", "name", "foodId") if k in old})
+                for key in ("amount", "ml"):
+                    if feeding_engine._number(old.get(key)) is not None:
+                        row[key] = max(old[key], feeding_engine._number(row.get(key)) or 0)
+            elif old and (old.get("updatedAt") or old.get("undoneAt") or old.get("undone")):
+                if row.get("undone") or row.get("undoneAt"):
+                    merged[row["id"]] = {**old, "undone": True, "undoneAt": row.get("undoneAt") or now.isoformat()}
+                continue
+            merged[row["id"]] = row
+    cutoff = now_local.date() - timedelta(days=FEEDING_RETENTION_DAYS - 1)
+    rows = [row for row in merged.values()
+            if (stamp := feeding_engine._stamp(row.get("at"))) is not None
+            and cutoff <= stamp.astimezone(now_local.tzinfo).date() <= now_local.date()]
+    rows.sort(key=lambda row: (row["at"], row["id"]), reverse=True)
+    retained = before.get("retainedSince") or block.get("retainedSince") or ""
+    if len(rows) > FEEDING_ARCHIVE_MAX:
+        retained = rows[FEEDING_ARCHIVE_MAX - 1]["at"]
+    block.update(rows=rows[:FEEDING_ARCHIVE_MAX],
+                 historyStartedAt=before.get("historyStartedAt") or block.get("historyStartedAt") or now.isoformat(),
+                 retainedSince=retained)
+    incoming["feeding"] = _feeding_normalise(block)
+    return incoming["feeding"]
+
+
+def _feeding_timeline(config: dict[str, Any], now_local: datetime) -> dict[str, Any]:
+    hatchery, cultures = _nps_hatchery_v2(config), _nps_cultures_cfg(config)
+    quiet, species = _nps_feed_scope(hatchery, cultures)
+    return nps_engine.feed_timeline(now_local,
+        products=(config.get("consumables") or {}).get("products") or {}, channels=_dosing_channels(config),
+        cultures=cultures, hatchery=_nps_feed_hatchery(config), brine_feeds=hatchery["handFeeds"],
+        quiet_product_ids=quiet, culture_bottle_species=species, tank_l=_awc_effective_tank_l(config))
+
+
+def _feeding_native_row(config: dict[str, Any], row: dict[str, Any]) -> tuple[Any, Any, str, float]:
+    """(source row, inventory, load timestamp, capacity), never a device command."""
+    source = str(row.get("sourceId") or row.get("source") or "")
+    stamp = str(row.get("at") or "")
+    history, vessel, load, capacity = [], None, "", 0.0
+    if source.startswith("shelf:"):
+        vessel = ((config.get("consumables") or {}).get("products") or {}).get(source[6:])
+        if vessel:
+            history, load, capacity = vessel.get("history", []), vessel.get("openedAt") or "", vessel.get("bottleMl") or 0
+    elif source.startswith("brine:") or source == "brine":
+        hatchery = _nps_hatchery_v2(config)
+        history = hatchery["handFeeds"]
+        vessel = hatchery["fridgeBottle"] if source == "brine:bottle" or row.get("from") == "bottle" else _nps_canonical_reservoir(config)
+        load, capacity = vessel.get("mixedAt") or "", vessel.get("volumeMl") or 0
+    elif source == "cultures-bottle":
+        vessel = _nps_cultures_cfg(config)["bottle"]
+        history, load, capacity = vessel["history"], vessel.get("filledAt") or "", vessel.get("volumeMl") or 0
+    target = next((r for r in history if str(r.get("at") or "") == stamp
+                   and r.get("kind", "dose") == "dose" and r.get("event", "fed_tank") == "fed_tank"
+                   and (not source.startswith("brine:") or r.get("from", "container") == source.split(":", 1)[1])), None)
+    return target, vessel, str(load), float(capacity)
+
+
+def _feeding_summary(hass: HomeAssistant, config: dict[str, Any], days: int) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    now_local = dt_util.as_local(now)
+    channels = _dosing_channels(config)
+    live_dosed = {cid: _dosing_live_state(hass, ch, config).get("dosedTodayMl")
+                  for cid, ch in channels.items() if isinstance(ch, dict) and dosing_engine.is_standing(ch)}
+    block = _feeding_capture(config, config, now, live_dosed)
+    catalog = _feeding_catalog(config, now)
+    native = _nps_feed_log_for(config, now_local, days, live_dosed=live_dosed)
+    summary = feeding_engine.summarize(now_local, block["rows"], catalog, days=days,
+        tank_litres=_awc_effective_tank_l(config), history_started_at=block["historyStartedAt"],
+        unrecorded=native.get("unrecorded"))
+    source_food = {s["id"]: f for f in catalog for s in f["sources"]}
+    planned = []
+    timeline = _feeding_timeline(config, now_local)
+    for event in timeline["events"]:
+        if event.get("kind") != "dose" or event.get("how") != "hand" or event.get("status") in ("done", "ghost", "skipped"):
+            continue
+        source = event.get("source") or ""
+        if source == "brine":
+            source = "brine:container"
+        food = source_food.get(source)
+        if not food or not food.get("loggable"):
+            continue
+        minute = event.get("at")
+        planned.append({"id": event["id"], "foodId": food["id"], "name": food["name"],
+                        "at": f"{minute // 60:02d}:{minute % 60:02d}" if minute is not None else None,
+                        "amount": event.get("ml"), "unit": food["unit"], "source": source,
+                        "status": event.get("status"), "note": event.get("note") or ""})
+    for row in summary["rows"]:
+        manual = str(row.get("sourceId") or "").startswith("manual:")
+        native_row = _feeding_native_row(config, row)[0] if not manual else None
+        can_change = not row["undone"] and row.get("how") != "pump" and (
+            manual or (native_row is not None and _undo_window_ok(_parse_datetime(row["at"]), now)))
+        row["editable"] = row["undoable"] = can_change
+    summary.update(planned=planned, nowLocal=now_local.isoformat(),
+                   timeZone=str(getattr(hass.config, "time_zone", "") or now_local.tzinfo),
+                   retentionDays=FEEDING_RETENTION_DAYS)
+    if block.get("retainedSince"):
+        summary["coverage"]["notes"].append("Older detail reached the archive limit; records before " + block["retainedSince"][:10] + " may be incomplete.")
+    return summary
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/feeding_summary",
+    vol.Optional("days"): vol.All(vol.Coerce(int), vol.In((1, 7, 30))),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_feeding_summary(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                    msg: dict[str, Any]) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    connection.send_result(msg["id"], _feeding_summary(hass, _config_from_entry(entry), msg.get("days", 1)))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/feeding_food_save", vol.Optional("food_id"): cv.string,
+    vol.Required("name"): cv.string, vol.Required("unit"): vol.In(feeding_engine.UNITS),
+    vol.Required("portion"): vol.Any(int, float), vol.Optional("live"): cv.boolean,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_feeding_food_save(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                      msg: dict[str, Any]) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    block = _feeding_capture(entry.options.get(CONF_SETTINGS), config, now)
+    name, unit = str(msg.get("name") or "").strip()[:120], msg.get("unit")
+    portion = feeding_engine._number(msg.get("portion"))
+    if not name or unit not in feeding_engine.UNITS or portion is None or not .001 <= portion <= 50000:
+        connection.send_error(msg["id"], "invalid_food", "Enter a food name, supported unit and a positive portion up to 50,000.")
+        return
+    fid = str(msg.get("food_id") or "")
+    catalog = _feeding_catalog(config, now)
+    existing = next((f for f in catalog if f["id"] == fid), None)
+    if fid and existing is None:
+        connection.send_error(msg["id"], "unknown_food", "That food no longer exists.")
+        return
+    if existing and existing["unit"] != unit and any(r.get("foodId") == fid for r in block["rows"]):
+        connection.send_error(msg["id"], "unit_in_use", "This food has recorded portions. Add another food to use a different unit.")
+        return
+    if existing and not fid.startswith("manual:"):
+        if unit != existing["unit"]:
+            connection.send_error(msg["id"], "fixed_unit", "The linked food keeps its existing unit.")
+            return
+        block["preferences"][fid] = {"portion": portion, **({"live": msg["live"]} if "live" in msg else {})}
+    else:
+        key = fid[7:] if fid.startswith("manual:") else uuid.uuid4().hex[:16]
+        if key not in block["foods"] and len(block["foods"]) >= 128:
+            connection.send_error(msg["id"], "food_limit", "The food catalogue holds up to 128 custom foods.")
+            return
+        fid = "manual:" + key
+        block["foods"][key] = {"name": name, "unit": unit, "portion": portion,
+                               "live": msg.get("live") is True, "enabled": True}
+    # Explicit food-type corrections also classify retained rows. No inference
+    # from a product's name or the amount of liquid it contains.
+    if "live" in msg:
+        for row in block["rows"]:
+            if row.get("foodId") == fid:
+                row.update(live=msg["live"] is True, liveKnown=True, updatedAt=now.isoformat())
+    config = await _async_save_config(hass, entry, config, feeding_changed=True)
+    _awc_send(connection, msg, hass, config)
+
+
+def _feeding_validate_stamp(msg: dict[str, Any], now: datetime, manual: bool) -> datetime:
+    at = feeding_engine._stamp(msg.get("at")) if msg.get("at") else now
+    if at is None or at > now or now - at > timedelta(days=FEEDING_RETENTION_DAYS if manual else 1):
+        raise ValueError("Choose an actual feeding time in the past; stock-linked feeds can be changed for 24 hours.")
+    return at
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/feeding_log", vol.Required("food_id"): cv.string,
+    vol.Required("source_id"): cv.string, vol.Required("amount"): vol.Any(int, float),
+    vol.Optional("at"): cv.string, vol.Optional("slot"): cv.string, vol.Optional("extra"): cv.boolean,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_feeding_log(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                msg: dict[str, Any]) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    block = _feeding_capture(entry.options.get(CONF_SETTINGS), config, now)
+    food = next((f for f in _feeding_catalog(config, now) if f["id"] == msg["food_id"] and f.get("enabled", True)), None)
+    source = next((s for s in food["sources"] if s["id"] == msg["source_id"] and s["loggable"]), None) if food else None
+    amount = feeding_engine._number(msg.get("amount"))
+    if source is None or amount is None or not .001 <= amount <= 50000:
+        connection.send_error(msg["id"], "invalid_feed", "Choose a food source and a finite positive amount up to 50,000.")
+        return
+    kind = source["kind"]
+    amount = round(amount, 1 if kind in ("brine", "bottle") else 2 if kind == "shelf" else 3)
+    if amount <= 0:
+        connection.send_error(msg["id"], "invalid_feed", "That amount is smaller than this source's recorded precision.")
+        return
+    try:
+        at = _feeding_validate_stamp(msg, now, kind == "manual")
+    except ValueError as error:
+        connection.send_error(msg["id"], "bad_stamp", str(error))
+        return
+    anytime = msg.get("slot") == "anytime"
+    slot = _normalise_schedule_time(msg.get("slot"))
+    if msg.get("slot") and not (slot or anytime):
+        connection.send_error(msg["id"], "invalid_slot", "Choose an open planned time or Extra feed.")
+        return
+    extra = msg.get("extra") is True or not (slot or anytime)
+    if (slot or anytime) and msg.get("extra"):
+        connection.send_error(msg["id"], "invalid_slot", "Choose a planned feed or an extra feed.")
+        return
+    plan = None
+    if slot or anytime:
+        summary = _feeding_summary(hass, config, 1)
+        plan = next((p for p in summary["planned"] if p["foodId"] == food["id"] and p["at"] == (None if anytime else slot)
+                     and (p["source"] == source["id"] or food["id"] == "brine")), None)
+        if plan is None or dt_util.as_local(at).date() != dt_util.as_local(now).date():
+            connection.send_error(msg["id"], "slot_unavailable", "That planned feed is no longer open today. Choose Extra feed or refresh.")
+            return
+        block = config["feeding"]
+    # Distinct backdated feed taps can share a displayed minute; their legacy
+    # ledger stamps must still be unique. Manual entries use immutable UUIDs.
+    used = {r.get("at") for r in block["rows"] if r.get("sourceId") == source["id"]
+            or (kind == "brine" and r.get("source") == "brine")}
+    while at.isoformat() in used:
+        at += timedelta(microseconds=1)
+    native_row = None
+    if kind == "shelf":
+        product = config["consumables"]["products"][source["productId"]]
+        loaded = _parse_datetime(product.get("openedAt"))
+        if loaded is not None and at < loaded:
+            connection.send_error(msg["id"], "batch_mismatch", "The feeding time is before this bottle was opened.")
+            return
+        reason = nps_engine.food_stock_pause_reason(product, amount, now)
+        if reason:
+            connection.send_error(msg["id"], "food_unavailable", reason)
+            return
+        _consumable_debit(product, amount, "dose", at, slot, to="tank")
+        native_row = next((r for r in product["history"]
+                           if r.get("at") == at.isoformat() and r.get("kind") == "dose"), None)
+        if native_row is None:
+            # A busy bottle may already have 50 newer actual-time entries.
+            # Retain this newly entered observation for its correction window;
+            # the archive captured the prior ledger before this debit.
+            native_row = {"at": at.isoformat(), "ml": amount, "kind": "dose", "to": "tank"}
+            product["history"].append(native_row)
+        if not extra:
+            previous = _parse_datetime(product.get("lastDosedAt"))
+            if previous is None or at > previous:
+                product["lastDosedAt"] = at.isoformat()
+            _nps_shelf_log_completion(config, source["productId"], at, "Recorded from Feeding")
+    elif kind == "brine":
+        hatchery = _nps_hatchery_v2(config)
+        vessel = hatchery["fridgeBottle"] if source["from"] == "bottle" else _nps_canonical_reservoir(config)
+        loaded = _parse_datetime(vessel.get("mixedAt"))
+        if loaded is not None and at < loaded:
+            connection.send_error(msg["id"], "batch_mismatch", "The feeding time is before this brine batch was loaded.")
+            return
+        available = nps_engine.brine_feed_sources(_nps_feed_hatchery(config), now)[source["from"]]
+        if not available["available"] or amount > float(vessel.get("remainingMl") or 0) or amount > 5000:
+            connection.send_error(msg["id"], "food_unavailable", available.get("pauseReason") or "The feed exceeds the brine stock available.")
+            return
+        vessel["remainingMl"] = round(float(vessel["remainingMl"]) - amount, 3)
+        native_row = {"at": at.isoformat(), "ml": amount, "from": source["from"]}
+        hatchery["handFeeds"].insert(0, native_row)
+        if not extra:
+            _nps_hand_feed_done(config, at, "Recorded from Feeding")
+    elif kind == "bottle":
+        bottle = _nps_cultures_cfg(config)["bottle"]
+        loaded = _parse_datetime(bottle.get("filledAt"))
+        if loaded is not None and at < loaded:
+            connection.send_error(msg["id"], "batch_mismatch", "The feeding time is before this rotifer bottle was filled.")
+            return
+        status = cultures_engine.bottle_state(bottle, cultures_engine.species_preset("rotifer_L")["bottleShelfDays"], now)
+        if status["status"] in ("empty", "stale") or amount > float(bottle.get("remainingMl") or 0) or amount > 5000:
+            connection.send_error(msg["id"], "food_unavailable", "The rotifer bottle is unavailable or the feed exceeds its remaining stock.")
+            return
+        bottle["remainingMl"] = round(float(bottle["remainingMl"]) - amount, 3)
+        native_row = {"at": at.isoformat(), "ml": amount, "event": "fed_tank"}
+        bottle["history"].insert(0, native_row)
+        if not extra:
+            _nps_hand_feed_done(config, at, "Recorded from Feeding")
+    if native_row is not None:
+        native_row.update(extra=extra, recordedAt=now.isoformat())
+        if slot:
+            native_row["slot"] = slot
+    raw_source = "brine" if kind == "brine" else source["id"]
+    row_id = "manual:" + uuid.uuid4().hex if kind == "manual" else raw_source + "@" + at.isoformat()
+    row = {"id": row_id, "at": at.isoformat(), "name": food["name"], "foodId": food["id"],
+           "source": raw_source, "sourceId": source["id"], "sourceLabel": source["label"],
+           "amount": amount, "unit": food["unit"], "live": food["live"], "liveKnown": food.get("liveKnown", True),
+           "how": "hand", "slot": slot, "extra": extra, "undone": False, "updatedAt": now.isoformat(),
+           "plannedAmount": plan["amount"] if plan else None}
+    if source.get("from"):
+        row["from"] = source["from"]
+    if food["unit"] == "ml":
+        row["ml"] = amount
+    block["rows"].append(row)
+    _append_activity(config, f"Fed {amount:g} {food['unit']} of {food['name']}", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, entry_id=row_id)
+
+
+async def _feeding_correct(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                           msg: dict[str, Any], *, undo: bool = False) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    now = datetime.now(timezone.utc)
+    block = _feeding_capture(entry.options.get(CONF_SETTINGS), config, now)
+    row = next((r for r in block["rows"] if r["id"] == msg["entry_id"]), None)
+    if row is None or row.get("undone") or row.get("undoneAt") or row.get("how") == "pump":
+        connection.send_error(msg["id"], "not_editable", "That feeding entry cannot be changed.")
+        return
+    manual = str(row.get("sourceId") or "").startswith("manual:")
+    native_row, vessel, load, capacity = _feeding_native_row(config, row) if not manual else (None, None, "", 0)
+    if not manual and (native_row is None or not _undo_window_ok(_parse_datetime(row["at"]), now)):
+        connection.send_error(msg["id"], "not_editable", "Stock-linked feeds can be corrected for 24 hours while their source record is available.")
+        return
+    old_at = row["at"]
+    amount = 0.0 if undo else feeding_engine._number(msg.get("amount"))
+    if amount is None or (not undo and not .001 <= amount <= 50000):
+        connection.send_error(msg["id"], "invalid_amount", "Enter a finite positive amount up to 50,000.")
+        return
+    if not undo:
+        amount = round(amount, 3 if manual else 2 if str(row.get("sourceId") or "").startswith("shelf:") else 1)
+        if amount <= 0:
+            connection.send_error(msg["id"], "invalid_amount", "That amount is smaller than this source's recorded precision.")
+            return
+    if not manual and not undo and not str(row.get("sourceId") or "").startswith("shelf:") and amount > 5000:
+        connection.send_error(msg["id"], "invalid_amount", "A brine or rotifer bottle feed can record up to 5,000 ml.")
+        return
+    try:
+        at = _feeding_validate_stamp({"at": msg.get("at") or old_at}, now, manual)
+    except ValueError as error:
+        connection.send_error(msg["id"], "bad_stamp", str(error))
+        return
+    previous_amount = feeding_engine._number(row.get("amount"))
+    if previous_amount is None:
+        connection.send_error(msg["id"], "unknown_amount", "This feed has no recorded amount to correct.")
+        return
+    if vessel is not None:
+        source = str(row.get("sourceId") or "")
+        same_load = _vessel_holds_that_load(load, _parse_datetime(old_at)) or (source.startswith("shelf:") and not load)
+        if same_load:
+            if not undo and load and _parse_datetime(load) > at:
+                connection.send_error(msg["id"], "batch_mismatch", "The new time is before this source was filled.")
+                return
+            remaining = float(vessel.get("remainingMl") or 0) + previous_amount - amount
+            if remaining < -0.0001:
+                connection.send_error(msg["id"], "insufficient_stock", "The corrected amount exceeds the source's recorded stock.")
+                return
+            vessel["remainingMl"] = round(min(remaining, capacity) if capacity else remaining, 3)
+        elif not undo and amount > previous_amount:
+            connection.send_error(msg["id"], "batch_changed", "This source has been refilled; an increased feed cannot debit the new batch.")
+            return
+    changed = {**row, "updatedAt": now.isoformat()}
+    if undo:
+        changed.update(undone=True, undoneAt=now.isoformat())
+        if native_row is not None:
+            native_row["undoneAt"] = now.isoformat()
+    else:
+        if not manual and at.isoformat() != old_at:
+            occupied = {r["at"] for r in block["rows"] if r["id"] != row["id"] and
+                        (r.get("sourceId") == row.get("sourceId") or (row.get("source") == "brine" and r.get("source") == "brine"))}
+            while at.isoformat() in occupied:
+                at += timedelta(microseconds=1)
+        changed.update(at=at.isoformat(), amount=amount)
+        if row.get("unit") == "ml":
+            changed["ml"] = amount
+        if dt_util.as_local(at).date() != dt_util.as_local(_parse_datetime(old_at)).date():
+            changed.update(slot="", plannedAmount=None, extra=True)
+        if native_row is not None:
+            native_row.update(at=changed["at"], ml=amount, extra=changed.get("extra", False))
+            if changed.get("slot"):
+                native_row["slot"] = changed["slot"]
+            else:
+                native_row.pop("slot", None)
+            if changed["at"] != old_at:
+                # Preserve the old import identity as a tombstone; an old source
+                # snapshot can never re-add the previous version of this feed.
+                row.update(undone=True, undoneAt=now.isoformat(), updatedAt=now.isoformat())
+                changed["id"] = str(row["source"]) + "@" + changed["at"]
+                block["rows"].append(changed)
+    if changed["id"] == row["id"]:
+        row.update(changed)
+    source = str(row.get("sourceId") or "")
+    task = _nps_shelf_task_id(source[6:]) if source.startswith("shelf:") else MAINTENANCE_HAND_FEED_TASK_ID
+    if native_row is not None:
+        native_row["recordedAt"] = now.isoformat()
+        _drop_completion(config, task, old_at)
+        if source.startswith("shelf:"):
+            active = [r["at"] for r in vessel.get("history", []) if r.get("kind") == "dose"
+                      and not r.get("undoneAt") and not r.get("extra")]
+            vessel["lastDosedAt"] = max(active) if active else ""
+            if not undo and not changed.get("extra"):
+                _nps_shelf_log_completion(config, source[6:], at, "Feeding entry corrected")
+        elif not undo and not changed.get("extra"):
+            _nps_hand_feed_done(config, at, "Feeding entry corrected")
+    _append_activity(config, f"{row.get('name') or 'Feeding'} entry {'undone' if undo else 'corrected'}", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config, **({"entry_id": changed["id"]} if not undo else {}))
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/feeding_edit", vol.Required("entry_id"): cv.string,
+    vol.Required("amount"): vol.Any(int, float), vol.Optional("at"): cv.string,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_feeding_edit(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                 msg: dict[str, Any]) -> None:
+    await _feeding_correct(hass, connection, msg)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/feeding_undo", vol.Required("entry_id"): cv.string})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_feeding_undo(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                 msg: dict[str, Any]) -> None:
+    await _feeding_correct(hass, connection, msg, undo=True)
 
 
 def _report_sensor_on(config: dict[str, Any], param: str) -> bool:
@@ -27821,6 +28397,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_mixing_filters_changed)
     websocket_api.async_register_command(hass, websocket_mixing_unit_replaced)
     websocket_api.async_register_command(hass, websocket_nps_summary)
+    websocket_api.async_register_command(hass, websocket_feeding_summary)
+    websocket_api.async_register_command(hass, websocket_feeding_log)
+    websocket_api.async_register_command(hass, websocket_feeding_edit)
+    websocket_api.async_register_command(hass, websocket_feeding_undo)
+    websocket_api.async_register_command(hass, websocket_feeding_food_save)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
     websocket_api.async_register_command(hass, websocket_nps_hatch_clock)

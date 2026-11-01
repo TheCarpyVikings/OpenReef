@@ -3,7 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from test_dosing_sync import integration, _entry, _hass, _channel, _saved_channel, _calls, CONF_SETTINGS
+from test_dosing_sync import integration, _entry, _hass, _channel, _saved_channel, _calls, _FixedDt, CONF_SETTINGS
 from _fake_ha import run, install_scheduler
 
 
@@ -107,7 +107,7 @@ class NpsSafetyAudit(unittest.TestCase):
         cfg["nps"]["feedExchange"].update(enabled=True, channelId="food")
         hass.states.set("sensor.kalk_dosed_today", "1")
         old = integration.dt_util
-        class Clock:
+        class Clock(_FixedDt):
             now = staticmethod(lambda: datetime(2026, 1, 2, 0, 1))
             utcnow = staticmethod(lambda: datetime(2026, 1, 2, 0, 1, tzinfo=timezone.utc))
         integration.dt_util = Clock()

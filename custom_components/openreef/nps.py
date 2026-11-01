@@ -2482,10 +2482,15 @@ def _match_done(planned: list[dict[str, Any]], done: list[dict[str, Any]],
     on that slot's card) takes that slot, whatever the clock said. Then,
     greedy: each remaining dose takes the nearest unmatched planned slot
     within tolerance (an any-time chip takes anything); the rest are extras.
+    An explicit ``extra`` feed never claims a slot, even when it is nearby.
     Mutates the planned events in place, returns the unplanned extras."""
     extras: list[dict[str, Any]] = []
     rest: list[dict[str, Any]] = []
     for item in sorted(done, key=lambda d: d["at"]):
+        if item.get("extra") is True:
+            extras.append(_event(at=item["at"], ml=item.get("ml"), actualMl=item.get("ml"),
+                                 status="done", doneAt=item["at"], doneStamp=item.get("stamp"), unplanned=True))
+            continue
         target = None
         if item.get("slot") is not None:
             target = next((ev for ev in planned if ev["at"] == item["slot"]
@@ -2695,7 +2700,7 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
             minute, _ = _local_minute(item.get("at"), today, tz)
             if minute is not None:
                 done.append({"at": minute, "ml": round(_f(item.get("ml")), 2), "slot": _hhmm_min(item.get("slot")),
-                             "stamp": str(item.get("at"))})
+                             "stamp": str(item.get("at")), "extra": item.get("extra") is True})
         if not cad["unit"] or plan["pauseReason"]:
             # Paused plans add no feeds, but actual logged doses stay visible.
             events.extend(ev(id=f"{source}:x{i}", at=d["at"], source=source, name=name, productId=pid,
@@ -2799,7 +2804,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
                     bottle_done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
-                                        "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at"))})
+                                        "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at")),
+                                        "extra": item.get("extra") is True})
         # The bottle's own plan (0.7.134): N feeds a day inside its window
         # while it holds rotifers; empty = nothing planned, done marks only.
         per_day = max(0, int(_f(bottle.get("feedsPerDay"))))
@@ -2845,7 +2851,8 @@ def feed_timeline(now_local: datetime, *, products: dict[str, Any], channels: di
                 minute, _ = _local_minute(item.get("at"), today, tz)
                 if minute is not None:
                     done.append({"at": minute, "ml": round(_f(item.get("ml")), 1) or None,
-                                 "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at"))})
+                                 "slot": _hhmm_min(item.get("slot")), "stamp": str(item.get("at")),
+                                 "extra": item.get("extra") is True})
         extras = _timed_plan(planned, done, now_min)
         planned = _stocked_feed_plan(planned, sources)
         for i, extra in enumerate(extras):
@@ -3175,7 +3182,8 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
             add(item.get("at"), how="pump" if pumped else "hand", source=source, name=name, productId=pid,
                 ml=round(_f(item.get("ml")), 2), via=bottle_channel.get(pid, "") if pumped else "",
                 slot=str(item.get("slot") or ""), undone=bool(item.get("undoneAt")),
-                undoneAt=item.get("undoneAt") or None, undoable=not pumped)
+                undoneAt=item.get("undoneAt") or None, undoable=not pumped,
+                **({"extra": True} if item.get("extra") is True else {}))
 
     # --- Hand-fed brine: the hatchery's own stamped feeds (0.7.131), from the
     # container or the fridge bottle — whether or not an exchange pump exists.
@@ -3185,7 +3193,8 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
         add(item.get("at"), how="hand", source="brine", name="Live brine", ml=round(_f(item.get("ml")), 1) or None,
             **{"from": "bottle" if item.get("from") == "bottle" else "container"},
             slot=str(item.get("slot") or ""), undone=bool(item.get("undoneAt")),
-            undoneAt=item.get("undoneAt") or None, undoable=True)
+            undoneAt=item.get("undoneAt") or None, undoable=True,
+            **({"extra": True} if item.get("extra") is True else {}))
 
     # --- Cultures: pods harvested straight into the display (Q6), and the
     # rotifer bottle's feeds. A rotifer harvest fills the bottle, not the tank.
@@ -3214,7 +3223,8 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
         if isinstance(item, dict) and item.get("event") == "fed_tank":
             add(item.get("at"), how="hand", source="cultures-bottle", name="Rotifers from the bottle",
                 ml=round(_f(item.get("ml")), 1) or None, slot=str(item.get("slot") or ""),
-                undone=bool(item.get("undoneAt")), undoneAt=item.get("undoneAt") or None, undoable=True)
+                undone=bool(item.get("undoneAt")), undoneAt=item.get("undoneAt") or None, undoable=True,
+                **({"extra": True} if item.get("extra") is True else {}))
 
     # --- Newest first, the cap, the days, the counts, the line.
     rows.sort(key=lambda pair: (pair[0], pair[1]["source"]), reverse=True)

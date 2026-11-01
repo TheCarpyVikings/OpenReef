@@ -451,6 +451,7 @@ class OpenReefPanel extends HTMLElement {
       // ...and the coral diary is where NPS animals are registered now (0.7.194):
       // a save from the Corals tab or the Reef layer dialog recompiles coverage.
       if (["nps", "hatchery", "corals", "diagram"].includes(this._activeTab) || this._coralDialogOpen || this._coralDiaryOpen) this._npsLoadSummary(true);
+      if (["feeding", "nps"].includes(this._activeTab) && this._feedingUi) this._feedingLoad(true);
       if (this._activeTab === "cultures") this._culturesLoadSummary(true);
     }, 250);
   }
@@ -1220,6 +1221,7 @@ class OpenReefPanel extends HTMLElement {
       if (!target) return;
       const action = target.dataset.action;
       if (action === "feeding-open") { this._feedingOpen(target.dataset.id); return; }
+      if (action.startsWith("feeding-overview-")) { this._feedingOverviewAction(action.slice(17), target.dataset); return; }
       const id = target.dataset.id;
       const field = target.dataset.field;
       // NPS notices land where the tap was (0.7.169): a refusal from the
@@ -2344,6 +2346,10 @@ class OpenReefPanel extends HTMLElement {
         const draft = this._coralFeedDraft || (this._coralFeedDraft = {});
         draft[target.dataset.feedField] = target.value;
         if (event.type === "change" && target.dataset.feedField === "productId") this._render();
+        return;
+      }
+      if (target.dataset.feedingDraft != null) {
+        this._feedingDraftChanged(target.dataset.feedingDraft, target.type === "checkbox" ? target.checked : target.value, event.type);
         return;
       }
       if (target.dataset.coralSetting != null) {
@@ -10879,6 +10885,350 @@ class OpenReefPanel extends HTMLElement {
   // ordinary dosing channels, and the water-exchange card edits the one
   // canonical AWC schedule through the same scope the Water Change settings use.
 
+  // Whole-tank feeding: the backend owns the durable ledger, food identity,
+  // stock guards and totals. These methods hold presentation/form state only.
+  _feedingState() {
+    if (!this._feedingUi) {
+      let simple = false;
+      try { simple = window.localStorage?.getItem("openreef:feeding-simple") === "1"; } catch { /* optional preference */ }
+      this._feedingUi = { data: null, days: 1, at: 0, loading: false, busy: false, error: "", message: "", simple,
+        selected: "", chartFood: "", shown: 8, draft: null, noticeEntry: "", noticeUndo: "Undo" };
+    }
+    return this._feedingUi;
+  }
+
+  async _feedingLoad(force = false) {
+    const st = this._feedingState();
+    if (this._nps?.demo || st.loading || (!force && st.at && Date.now() - st.at < 30000)) return;
+    const days = st.days;
+    st.loading = true;
+    try {
+      const data = await this._callWS({ type: "openreef/feeding_summary", days });
+      if (st.days === days) st.data = data;
+      if (st.error === st.loadError) st.error = "";
+      st.loadError = "";
+    } catch (err) {
+      st.error = st.loadError = err?.message || "Could not load feeding records.";
+    } finally {
+      st.loading = false;
+      st.at = st.days === days ? Date.now() : 0;
+      this._render();
+      if (st.days !== days) this._feedingLoad(true);
+    }
+  }
+
+  _feedingFoods() {
+    const foods = this._feedingState().data?.foods;
+    return (Array.isArray(foods) ? foods : Object.entries(foods || {}).map(([id, food]) => ({ id, ...food })))
+      .map((food) => ({ ...food, custom: food.custom === true || String(food.id).startsWith("manual:") }));
+  }
+
+  _feedingFood(id) { return this._feedingFoods().find((food) => food.id === id); }
+
+  _feedingSources(food) {
+    const sources = Array.isArray(food?.sources) ? food.sources : [];
+    return sources.map((source) => typeof source === "string" ? { id: source, label: source, loggable: true } : source);
+  }
+
+  _feedingNumber(value) {
+    return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }
+
+  _feedingQuantity(amount, unit) {
+    if (amount == null || !Number.isFinite(Number(amount))) return "Quantity unrecorded";
+    const n = Number(amount);
+    const word = ({ pinch: n === 1 ? "pinch" : "pinches", scoop: n === 1 ? "scoop" : "scoops", cube: n === 1 ? "cube" : "cubes", drop: n === 1 ? "drop" : "drops" })[unit] || unit || "ml";
+    return `${this._feedingNumber(n)} ${word}`;
+  }
+
+  _feedingPercent(value) {
+    if (value == null || !Number.isFinite(Number(value))) return "";
+    const n = Number(value);
+    return n > 0 && n < .01 ? "≈ <0.01%" : `≈ ${this._feedingNumber(n)}%`;
+  }
+
+  _feedingInputValue(value = new Date()) {
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "";
+  }
+
+  _feedingAvailableSlots(foodId, at = "", sourceId = "") {
+    const st = this._feedingState();
+    const stamp = at ? new Date(at) : new Date();
+    if (!Number.isFinite(stamp.getTime())) return [];
+    const zone = st.data?.timeZone || this._hass?.config?.time_zone;
+    let date;
+    try {
+      const parts = new Intl.DateTimeFormat("en", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(stamp);
+      const get = (key) => parts.find((part) => part.type === key)?.value;
+      date = `${get("year")}-${get("month")}-${get("day")}`;
+    } catch { date = this._feedingInputValue(stamp).slice(0, 10); }
+    if (st.data?.date && date !== st.data.date) return [];
+    return (st.data?.planned || []).filter((slot) => slot.foodId === foodId
+      && (!sourceId || !slot.source || slot.source === sourceId || (foodId === "brine" && sourceId.startsWith("brine:")))
+      && !["done", "skipped", "blocked"].includes(slot.status));
+  }
+
+  _feedingNearestSlot(slots) {
+    const now = this._feedingState().data?.nowLocal;
+    const current = now ? String(now).slice(11, 16) : this._nowLocalInputValue().slice(11, 16);
+    const minute = (clock) => { const [h, m] = String(clock || "00:00").split(":").map(Number); return h * 60 + m; };
+    return [...slots].filter((slot) => slot.at != null).sort((a, b) => Math.abs(minute(a.at) - minute(current)) - Math.abs(minute(b.at) - minute(current)))[0] || slots[0];
+  }
+
+  _feedingOpenEditor(foodId = "", entryId = "", plannedId = "") {
+    const st = this._feedingState();
+    const row = entryId ? (st.data?.rows || []).find((item) => item.id === entryId) : null;
+    const planned = plannedId ? (st.data?.planned || []).find((item) => item.id === plannedId) : null;
+    const food = this._feedingFood(row?.foodId || planned?.foodId || foodId) || this._feedingFoods()[0];
+    if (!food) { this._feedingNewFood(); return; }
+    if (row && !row.editable) return;
+    const source = this._feedingSources(food).find((s) => s.id === (row?.sourceId || row?.source || planned?.source))
+      || this._feedingSources(food).find((s) => s.loggable !== false && s.available !== false);
+    const when = row?.at ? new Date(row.at) : new Date();
+    st.draft = { kind: "feed", entryId: row?.id || "", foodId: food.id, amount: row?.amount ?? planned?.amount ?? food.portion ?? 1,
+      sourceId: source?.id || row?.sourceId || row?.source || "", at: this._feedingInputValue(when),
+      slot: planned ? planned.at || "anytime" : "extra", originalSlot: row?.slot || "", plannedAmount: row?.plannedAmount ?? null };
+    st.error = "";
+    this._render();
+    setTimeout(() => {
+      this.shadowRoot?.querySelector("[data-feeding-editor]")?.scrollIntoView?.({ block: "nearest" });
+      this.shadowRoot?.querySelector('[data-feeding-draft="amount"]')?.focus?.({ preventScroll: true });
+    }, 0);
+  }
+
+  _feedingNewFood(foodId = "") {
+    const st = this._feedingState();
+    const food = this._feedingFood(foodId);
+    st.draft = { kind: "food", foodId: food?.id || "", native: !!food && !food.custom, name: food?.name || "", unit: food?.unit || "pinch", portion: food?.portion ?? 1, live: food?.live === true };
+    st.error = "";
+    this._render();
+  }
+
+  _feedingDraftChanged(field, value, eventType = "change") {
+    const st = this._feedingState();
+    if (field === "chartFood") { st.chartFood = String(value); if (eventType === "change") this._render(); return; }
+    const draft = st.draft;
+    if (!draft || st.busy) return;
+    if (!["foodId", "sourceId", "at", "amount", "slot", "name", "unit", "portion", "live"].includes(field)) return;
+    draft[field] = value;
+    if (draft.kind === "feed" && field === "foodId") {
+      const food = this._feedingFood(value);
+      draft.amount = food?.portion ?? 1;
+      draft.sourceId = this._feedingSources(food).find((source) => source.loggable !== false && source.available !== false)?.id || "";
+      draft.slot = "extra";
+    }
+    if (draft.kind === "feed" && ["sourceId", "at"].includes(field) && draft.slot !== "extra"
+      && !this._feedingAvailableSlots(draft.foodId, draft.at, draft.sourceId).some((slot) => (slot.at || "anytime") === draft.slot)) draft.slot = "extra";
+    if (draft.kind === "food" && field === "unit" && value !== "ml") draft.live = false;
+    if (eventType === "change" && ["foodId", "sourceId", "at", "slot", "unit"].includes(field)) this._render();
+  }
+
+  async _feedingCommand(message, success, { close = true, noticeUndo = "Undo" } = {}) {
+    const st = this._feedingState();
+    if (st.busy) return false;
+    if (this._nps?.demo) { st.error = "Exit demo to record feeding in your tank."; this._render(); return false; }
+    st.busy = true; st.error = ""; st.message = ""; st.noticeEntry = "";
+    this._render();
+    let ok = false;
+    try {
+      const result = await this._callWS(message);
+      st.message = success;
+      st.noticeEntry = result?.entry_id || result?.entry?.id || "";
+      st.noticeUndo = noticeUndo;
+      if (close) st.draft = null;
+      ok = true;
+    } catch (err) { st.error = err?.message || "Could not save that feeding record. Your changes are still here."; }
+    finally { st.busy = false; st.at = 0; this._render(); }
+    if (ok) {
+      await this._feedingLoad(true);
+      if (this._nps) this._npsLoadSummary(true);
+    }
+    return ok;
+  }
+
+  _feedingQuick(foodId) {
+    const st = this._feedingState();
+    const food = this._feedingFood(foodId);
+    if (!food || st.busy || !(Number(food.portion) > 0)) return;
+    const sources = this._feedingSources(food).filter((source) => source.loggable !== false && source.available !== false);
+    if (!sources.length) { st.error = "No available source for this food. Check its shelf or culture card."; this._render(); return; }
+    const nearest = this._feedingNearestSlot(this._feedingAvailableSlots(food.id, "", sources[0].id));
+    if (nearest || sources.length > 1) {
+      this._feedingOpenEditor(food.id, "", nearest?.id || "");
+      return;
+    }
+    return this._feedingCommand({ type: "openreef/feeding_log", food_id: food.id, source_id: sources[0].id, amount: Number(food.portion), extra: true },
+      `Logged ${this._feedingQuantity(food.portion, food.unit)} of ${food.name}.`);
+  }
+
+  _feedingSaveDraft() {
+    const st = this._feedingState(), draft = st.draft;
+    if (!draft || st.busy) return;
+    if (draft.kind === "food") {
+      if (!String(draft.name || "").trim() || !Number.isFinite(Number(draft.portion)) || Number(draft.portion) <= 0) {
+        st.error = "Give the food a name and a positive usual portion."; this._render(); return;
+      }
+      return this._feedingCommand({ type: "openreef/feeding_food_save", ...(draft.foodId ? { food_id: draft.foodId } : {}),
+        name: String(draft.name).trim(), unit: draft.unit, portion: Number(draft.portion), live: draft.unit === "ml" && draft.live === true }, "Usual portion saved.");
+    }
+    const food = this._feedingFood(draft.foodId), amount = Number(draft.amount), at = new Date(draft.at);
+    if (!food || !Number.isFinite(amount) || amount <= 0 || !draft.at || !Number.isFinite(at.getTime()) || at.getTime() > Date.now()) {
+      st.error = "Enter a positive amount and a valid feeding time, up to now."; this._render(); return;
+    }
+    if (draft.entryId) return this._feedingCommand({ type: "openreef/feeding_edit", entry_id: draft.entryId, amount, at: at.toISOString() },
+      "Feeding record updated. Totals use the corrected amount and time.", { noticeUndo: "Remove entry" });
+    if (!this._feedingSources(food).some((source) => source.id === draft.sourceId && source.loggable !== false && source.available !== false)) {
+      st.error = "Choose an available source."; this._render(); return;
+    }
+    const slot = this._feedingAvailableSlots(food.id, draft.at, draft.sourceId).find((item) => (item.at || "anytime") === draft.slot);
+    if (draft.slot !== "extra" && !slot) { st.error = "That planned feed is no longer open. Choose Extra feed or an open slot."; this._render(); return; }
+    return this._feedingCommand({ type: "openreef/feeding_log", food_id: food.id, source_id: draft.sourceId, amount, at: at.toISOString(),
+      ...(slot ? { slot: slot.at || "anytime", ...(slot.at == null ? { extra: false } : {}) } : { extra: true }) },
+      `Logged ${this._feedingQuantity(amount, food.unit)} of ${food.name}.${slot ? ` ${slot.at || "Any-time"} feed complete.` : ""}`);
+  }
+
+  _feedingOverviewAction(action, data = {}) {
+    const st = this._feedingState();
+    if (action === "days") { st.days = [1, 7, 30].includes(Number(data.id)) ? Number(data.id) : 1; st.at = 0; st.selected = ""; st.shown = 8; st.draft = null; this._render(); this._feedingLoad(true); }
+    else if (action === "simple") { st.simple = !st.simple; try { window.localStorage?.setItem("openreef:feeding-simple", st.simple ? "1" : "0"); } catch { /* optional preference */ } this._render(); }
+    else if (action === "detail") { st.selected = st.selected === data.id ? "" : data.id; this._render(); }
+    else if (action === "trend") { st.chartFood = data.id; st.days = 7; st.at = 0; this._render(); this._feedingLoad(true); }
+    else if (action === "quick") this._feedingQuick(data.id);
+    else if (action === "add") this._feedingOpenEditor();
+    else if (action === "plan") this._feedingOpenEditor("", "", data.id);
+    else if (action === "edit") this._feedingOpenEditor("", data.id);
+    else if (action === "undo") this._feedingCommand({ type: "openreef/feeding_undo", entry_id: data.id }, "Entry removed from totals. Its planned feed is open again where applicable.", { close: false });
+    else if (action === "food") this._feedingNewFood(data.id);
+    else if (action === "save") this._feedingSaveDraft();
+    else if (action === "cancel") { st.draft = null; st.error = ""; this._render(); }
+    else if (action === "more") { st.shown += 30; this._render(); }
+    else if (action === "manage") { st.manage = !st.manage; this._render(); }
+    else if (action === "dismiss") { st.message = ""; st.noticeEntry = ""; this._render(); }
+    else if (action === "refresh") this._feedingLoad(true);
+  }
+
+  _feedingEditor() {
+    const st = this._feedingState(), d = st.draft;
+    if (!d) return "";
+    const esc = (value) => this._escape(String(value ?? ""));
+    const field = (key) => `data-feeding-draft="${key}"`;
+    const controls = `<div class="button-row"><button type="button" class="primary compact-button" data-action="feeding-overview-save" ${st.busy ? "disabled" : ""}>${st.busy ? "Saving…" : d.kind === "food" ? "Save usual portion" : d.entryId ? "Save changes" : "Log feed"}</button><button type="button" class="secondary compact-button" data-action="feeding-overview-cancel" ${st.busy ? "disabled" : ""}>Cancel</button></div>`;
+    if (d.kind === "food") return `<article class="panel stack feed-overview-editor" data-feeding-editor>
+      <h3>${d.foodId ? "Edit usual portion" : "Add a food"}</h3><div class="feed-overview-fields">
+      <label>Food name<input ${field("name")} maxlength="100" value="${esc(d.name)}" placeholder="e.g. Vitalis flake" ${d.native ? "disabled" : ""}></label>
+      <label>Unit<select ${field("unit")} ${d.foodId ? "disabled" : ""}>${["ml", "pinch", "scoop", "g", "cube", "drop"].map((unit) => `<option value="${unit}" ${unit === d.unit ? "selected" : ""}>${unit}</option>`).join("")}</select></label>
+      <label>Usual portion<input type="number" min="0.001" step="any" inputmode="decimal" ${field("portion")} value="${esc(d.portion)}"></label></div>
+      ${d.unit === "ml" ? `<label class="check-row"><input type="checkbox" ${field("live")} ${d.live ? "checked" : ""}>Live food (liquid volume includes carrier water)</label>` : ""}
+      <small>Saved portions are for spontaneous feeding. They do not create a schedule.</small>${controls}</article>`;
+    const food = this._feedingFood(d.foodId);
+    const sources = this._feedingSources(food);
+    const plans = d.entryId ? [] : this._feedingAvailableSlots(d.foodId, d.at, d.sourceId);
+    const selected = plans.find((item) => (item.at || "anytime") === d.slot);
+    return `<article class="panel stack feed-overview-editor" data-feeding-editor><h3>${d.entryId ? "Edit recorded feed" : "Log a feed"}</h3>
+      <div class="feed-overview-fields">
+        <label>Food<select ${field("foodId")} ${d.entryId ? "disabled" : ""}>${this._feedingFoods().map((f) => `<option value="${esc(f.id)}" ${f.id === d.foodId ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select></label>
+        <label>Amount · ${esc(food?.unit || "ml")}<input type="number" min="0.001" step="any" inputmode="decimal" ${field("amount")} value="${esc(d.amount)}"></label>
+        <label>Fed at · device time<input type="datetime-local" ${field("at")} max="${esc(this._nowLocalInputValue())}" value="${esc(d.at)}"></label>
+        <label>Source<select ${field("sourceId")} ${d.entryId ? "disabled" : ""}>${sources.map((s) => `<option value="${esc(s.id)}" ${s.id === d.sourceId ? "selected" : ""} ${(s.loggable === false || s.available === false) && !d.entryId ? "disabled" : ""}>${esc(s.label || s.id)}${s.loggable === false || s.available === false ? ` · ${esc(s.reason || "unavailable")}` : ""}</option>`).join("")}</select></label>
+      </div>
+      ${plans.length ? `<fieldset class="feed-overview-slots"><legend>Count this as</legend>${plans.map((p) => `<label><input type="radio" name="feeding-slot" ${field("slot")} value="${esc(p.at || "anytime")}" ${d.slot === (p.at || "anytime") ? "checked" : ""}>${esc(p.at || "Any time")} feed · ${esc(this._feedingQuantity(p.amount, p.unit))} planned</label>`).join("")}<label><input type="radio" name="feeding-slot" ${field("slot")} value="extra" ${d.slot === "extra" ? "checked" : ""}>Extra feed</label></fieldset>` : !d.entryId ? `<small>Recorded as an extra feed.</small>` : `<small>${d.originalSlot ? `Keeps its ${esc(d.originalSlot === "anytime" ? "any-time" : d.originalSlot)} planned slot. ` : ""}Changes correct this entry without adding another feed.</small>`}
+      ${selected ? `<small>This completes the ${esc(selected.at || "any-time")} feed, including if you fed less than the planned amount.</small>` : ""}
+      <small>This records food already fed. It does not run a pump.</small>${controls}</article>`;
+  }
+
+  _feedingNutrientCard() {
+    const esc = (value) => this._escape(String(value ?? ""));
+    const lines = ["nitrate", "phosphate"].map((id) => {
+      const label = id === "nitrate" ? "Nitrate" : "Phosphate";
+      const latest = this._manualLatestReading(id);
+      return latest ? `${label}: ${this._feedingNumber(latest.value)} ppm · ${new Date(this._manualReadingTime(latest)).toLocaleDateString()}` : `${label}: no recorded test`;
+    });
+    return `<article class="panel feed-overview-test"><div><p class="eyebrow">Manual Tests</p><h3>Pick up from today.</h3><small>${lines.map(esc).join("<br>")}</small></div>
+      <button class="secondary compact-button" data-action="tab" data-id="manual">Log nutrient tests</button></article>`;
+  }
+
+  _feedingHistoryChart() {
+    const st = this._feedingState(), data = st.data || {};
+    const foods = this._feedingFoods();
+    const food = this._feedingFood(st.chartFood) || this._feedingFood(data.totals?.[0]?.foodId) || foods[0];
+    if (!food) return "";
+    const esc = (value) => this._escape(String(value ?? ""));
+    const points = (data.perDay || []).map((day) => {
+      const value = (day.foods || []).find((row) => row.foodId === food.id && row.unit === food.unit);
+      return { date: day.date, amount: value?.amount ?? null, feeds: value?.feeds || 0, unknown: value?.unknownAmount || 0 };
+    });
+    const max = Math.max(1, ...points.map((p) => Number(p.amount) || 0));
+    const label = (date) => new Date(`${date}T12:00:00`).toLocaleDateString([], { day: "numeric", month: "short" });
+    return `<article class="panel stack"><div class="feed-overview-head"><h3>Feeding over time</h3><label class="feed-overview-chart-select">Food<select data-feeding-draft="chartFood">${foods.map((f) => `<option value="${esc(f.id)}" ${f.id === food.id ? "selected" : ""}>${esc(f.name)}</option>`).join("")}</select></label></div>
+      <small>${esc(food.unit)} recorded per day · gaps mean unknown, not zero. Today is still in progress.</small>
+      <div class="feed-overview-chart" role="img" aria-label="${esc(food.name)} daily recorded amounts">
+        ${points.map((p) => `<div class="feed-overview-bar ${p.amount == null ? "gap" : ""}"><span>${p.amount == null ? "—" : esc(this._feedingNumber(p.amount))}${p.unknown ? " + ?" : ""}</span><div class="feed-overview-bar-track"><i style="height:${p.amount == null ? 0 : Math.max(0, Number(p.amount)) / max * 100}%"></i></div><small>${esc(label(p.date))}</small><span class="feed-overview-chart-a11y">${p.amount == null ? "No amount recorded" : esc(this._feedingQuantity(p.amount, food.unit))}</span></div>`).join("")}
+      </div></article>`;
+  }
+
+  _feedingOverviewLog() {
+    const st = this._feedingState();
+    const rows = st.data?.rows || [], shown = rows.slice(0, st.shown);
+    const esc = (value) => this._escape(String(value ?? ""));
+    return `<article class="panel stack feed-overview-log"><div class="feed-overview-head"><h3>Feeding log</h3><small>Actual feeding times</small></div>
+      ${shown.length ? shown.map((row) => `<div class="feed-overview-log-row ${row.undone ? "undone" : ""}">
+        <small>${esc(row.date === st.data?.date ? "Today" : row.date)}<br>${esc(row.time || "")}</small>
+        <div><strong>${esc(row.name)} · ${esc(this._feedingQuantity(row.amount, row.unit))}</strong><small>${esc(row.sourceLabel || row.from || row.source || "")}${row.slot && row.slot !== "extra" ? ` · ${esc(row.slot === "anytime" ? "Any-time" : row.slot)} slot${row.plannedAmount != null ? ` · ${esc(this._feedingQuantity(row.plannedAmount, row.unit))} planned` : ""}` : row.how === "pump" || row.drip ? " · Automatic feed" : row.extra === true ? " · Extra feed" : " · Recorded feed"}${row.undone ? " · Undone" : ""}</small></div>
+        <div class="button-row">${row.editable && !row.undone ? `<button class="secondary compact-button" data-action="feeding-overview-edit" data-id="${esc(row.id)}" ${st.busy ? "disabled" : ""}>Edit</button>` : ""}${row.undoable && !row.undone ? `<button class="secondary compact-button" data-action="feeding-overview-undo" data-id="${esc(row.id)}" ${st.busy ? "disabled" : ""}>Undo</button>` : ""}</div></div>`).join("") : `<p class="hint">No feeding records in this period.</p>`}
+      ${rows.length > shown.length ? `<button class="secondary compact-button" data-action="feeding-overview-more">Show more (${rows.length - shown.length})</button>` : ""}
+      ${st.data?.truncated ? `<small>The newest entries are shown here; totals include all retained records in this period.</small>` : ""}</article>`;
+  }
+
+  _feedingOverviewTimeline() {
+    const st = this._feedingState(), data = st.data || {};
+    const esc = (value) => this._escape(String(value ?? ""));
+    const rows = (data.rows || []).filter((row) => !row.undone && row.date === data.date);
+    const planned = (data.planned || []).filter((row) => !["done", "skipped"].includes(row.status));
+    const ids = [...new Set([...rows.map((row) => row.foodId), ...planned.map((row) => row.foodId)])];
+    if (!ids.length) return "";
+    const lanes = ids.map((id) => {
+      const food = this._feedingFood(id) || rows.find((row) => row.foodId === id) || planned.find((row) => row.foodId === id);
+      const events = rows.filter((row) => row.foodId === id).map((row) => ({ ...row, clock: row.time || "", planned: false }))
+        .concat(planned.filter((row) => row.foodId === id).map((row) => ({ ...row, clock: row.at || "Any time", planned: true })))
+        .sort((a, b) => a.clock.localeCompare(b.clock));
+      return `<div class="feed-overview-lane"><strong>${esc(food.name)}</strong><div class="feed-overview-lane-events">${events.map((event) => {
+        const text = `${event.clock} · ${this._feedingQuantity(event.amount, event.unit)}${event.planned ? " planned" : " fed"}`;
+        const action = event.planned && event.status !== "blocked" ? "plan" : !event.planned && event.editable ? "edit" : "";
+        return action ? `<button class="secondary compact-button ${event.planned ? "planned" : "fed"}" data-action="feeding-overview-${action}" data-id="${esc(event.id)}" ${st.busy ? "disabled" : ""}>${esc(text)}</button>` : `<span class="feed-overview-lane-readonly ${event.planned ? "planned" : "fed"}">${esc(text)}</span>`;
+      }).join("")}</div></div>`;
+    }).join("");
+    return `<article class="panel stack"><h3>Today’s timeline</h3><small>Actual feeding times · planned feeds keep their own slots</small>${lanes}</article>`;
+  }
+
+  _feedingOverview() {
+    const st = this._feedingState();
+    if (this._nps?.demo) return "";
+    if (this._hass && this.shadowRoot && !st.loading && (!st.at || Date.now() - st.at > 30000)) setTimeout(() => this._feedingLoad(), 0);
+    const data = st.data && Number(st.data.days) === st.days ? st.data : null;
+    const esc = (value) => this._escape(String(value ?? ""));
+    const button = (action, id, text, primary = false) => `<button class="${primary ? "primary" : "secondary"} compact-button" data-action="feeding-overview-${action}"${id ? ` data-id="${esc(id)}"` : ""} ${st.busy ? "disabled" : ""}>${text}</button>`;
+    const head = `<div class="feed-overview-head"><div><p class="eyebrow">Whole-tank feeding</p><h2>${st.days === 1 ? "Today, at a glance." : "Your feeding history"}</h2></div><button class="secondary compact-button" data-action="feeding-overview-simple" aria-pressed="${st.simple}">${st.simple ? "✓ " : ""}Keep it simple</button></div>
+      <div class="feed-overview-head"><div class="button-row feed-overview-period">${[[1, "Today"], [7, "7 days"], [30, "30 days"]].map(([days, text]) => `<button class="${st.days === days ? "primary" : "secondary"} compact-button" data-action="feeding-overview-days" data-id="${days}" aria-pressed="${st.days === days}">${text}</button>`).join("")}</div><div class="button-row">${button("food", "", "Add food")}${button("add", "", "Log a feed", true)}</div></div>`;
+    const notice = `${st.error ? `<div class="notice warning-notice" role="alert">${esc(st.error)} ${button("refresh", "", "Retry")}</div>` : ""}${st.message ? `<div class="notice info-notice feed-overview-head" role="status"><span>${esc(st.message)}</span><div class="button-row">${st.noticeEntry ? button("undo", st.noticeEntry, esc(st.noticeUndo)) : ""}${button("dismiss", "", "Dismiss")}</div></div>` : ""}`;
+    if (!data) return `<section class="stack feed-overview">${head}${notice}${this._feedingEditor()}<article class="panel"><p class="hint">${st.loading ? "Loading feeding records…" : "Feeding records will appear here."}</p></article></section>`;
+    const foods = this._feedingFoods(), totals = data.totals || [];
+    const cards = totals.map((total) => `<button class="feed-overview-total" data-action="feeding-overview-detail" data-id="${esc(total.foodId)}" aria-pressed="${st.selected === total.foodId}">
+      <span>${esc(total.name)}</span><strong>${esc(this._feedingQuantity(total.amount, total.unit))}</strong><small>${Number(total.feeds) || 0} recorded feeds${total.unknownAmount ? ` · ${Number(total.unknownAmount)} unquantified` : ""}</small>
+      ${total.live && total.unit === "ml" && total.tankVolumePct != null ? `<small class="feed-overview-percent">${esc(this._feedingPercent(total.tankVolumePct))} of tank volume added</small>` : ""}</button>`).join("");
+    const selected = totals.find((total) => total.foodId === st.selected);
+    const selectedFood = this._feedingFood(st.selected);
+    const detail = selected ? `<div class="feed-overview-detail"><strong>${esc(selected.name)}</strong><ul>${(selected.sources || []).map((source) => `<li>${esc(source.label || source.id)} · ${esc(this._feedingQuantity(source.amount, source.unit || selected.unit))}</li>`).join("")}</ul><div class="button-row">${button("trend", selected.foodId, "View daily amounts")}${selectedFood ? button("food", selected.foodId, "Edit portion / food type") : ""}</div></div>` : "";
+    const live = `<article class="feed-overview-live"><div><span>Live-feed liquid added ${st.days === 1 ? "today" : `over ${st.days} days`}</span><strong>${esc(this._feedingQuantity(data.liveLiquidMl ?? 0, "ml"))}${data.liveVolumePct != null ? ` · ${esc(this._feedingPercent(data.liveVolumePct))} of tank volume` : ""}</strong></div><small>${data.tankLitres > 0 ? `Based on ${esc(this._feedingNumber(data.tankLitres))} L configured water volume. ` : "Set your tank water volume to see an estimated percentage. "}Logged live-food liquid, including carrier water; cumulative additions, not the amount currently in the tank.${data.unknownLiveFeeds ? ` ${Number(data.unknownLiveFeeds)} live feeds have no recorded volume.` : ""}${data.unclassifiedLiquidMl > 0 ? ` ${esc(this._feedingQuantity(data.unclassifiedLiquidMl, "ml"))} of unclassified liquid is excluded; review its food type under Manage portions.` : ""}</small></article>`;
+    const coverage = data.coverage || {};
+    const coverageText = typeof coverage === "string" ? coverage : coverage.note || coverage.text || (coverage.notes || []).join(" ") || "Totals use available records. Gaps do not mean no feeding.";
+    const favourites = foods.filter((food) => food.enabled !== false && Number(food.portion) > 0 && this._feedingSources(food).some((source) => source.loggable !== false && source.available !== false));
+    const quick = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Your usual portions</h3>${button("manage", "", "Manage portions")}</div><div class="feed-overview-portions">${favourites.map((food) => `<button class="secondary feed-overview-portion" data-action="feeding-overview-quick" data-id="${esc(food.id)}" ${st.busy ? "disabled" : ""}><span>${esc(food.name)}</span><strong>+ ${esc(this._feedingQuantity(food.portion, food.unit))}</strong></button>`).join("")}</div>${!favourites.length ? `<p class="hint">Add your usual flake, pellets or other foods to start one-tap logging.</p>` : ""}${st.manage ? `<div class="feed-overview-manage">${foods.map((food) => `<div><span>${esc(food.name)} · ${esc(this._feedingQuantity(food.portion, food.unit))}</span>${button("food", food.id, "Edit portion / food type")}</div>`).join("")}</div>` : ""}</article>` : "";
+    const plans = (data.planned || []).filter((plan) => !["done", "skipped"].includes(plan.status));
+    const due = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Still planned today</h3><small>${plans.length} open feeds</small></div><div class="feed-overview-planned">${plans.map((plan) => `<div class="feed-overview-plan"><small>${esc(plan.at || "Any time")}${["late", "missed", "due"].includes(plan.status) ? " · Unconfirmed" : plan.status === "blocked" ? " · Source unavailable" : " · Upcoming"}</small><strong>${esc(plan.name)}</strong><small>${esc(this._feedingQuantity(plan.amount, plan.unit))} planned</small>${plan.status !== "blocked" ? button("plan", plan.id, "Log this feed", ["late", "missed", "due"].includes(plan.status)) : ""}</div>`).join("") || `<p class="hint">No open planned feeds. Your usual portions are here for extras.</p>`}</div></article>` : "";
+    return `<section class="stack feed-overview ${st.simple ? "is-simple" : ""}">${head}${notice}<article class="panel stack"><h3>${st.days === 1 ? "Fed today" : `Recorded over ${st.days} days`}</h3><div class="feed-overview-totals">${cards || `<p class="hint">No food amounts recorded in this period.</p>`}</div>${detail}<small>${esc(coverageText)}</small>${live}</article>${quick}${this._feedingEditor()}${due}${st.days > 1 ? this._feedingHistoryChart() : !st.simple ? this._feedingOverviewTimeline() : ""}${this._feedingNutrientCard()}${!st.simple ? this._feedingOverviewLog() : ""}</section>`;
+  }
+
   async _npsLoadSummary(force = false) {
     const st = this._nps;
     if (st.demo) return;   // the staged summary IS the view while the demo is up
@@ -11084,6 +11434,7 @@ class OpenReefPanel extends HTMLElement {
       await this._callWS(msg);
       this._nps.message = okMessage || "";
       this._nps.error = "";
+      if (this._feedingUi) { this._feedingUi.at = 0; this._feedingLoad(true); }
     } catch (err) {
       this._nps.error = (err && err.message) || "That didn't work — try again.";
     }
@@ -16861,7 +17212,7 @@ const rigSteps = [
 
     const hatcheryPanel = this._hatcheryPanel(true);
 
-    return `<section class="stack">${head}${notices}${setupCard}${heroPanel}${this._npsStatusCards()}${this._npsFeedLogPanel()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}</section>`;
+    return `<section class="stack">${head}${notices}${this._feedingOverview()}${this._npsStatusCards()}${this._feedingDetails("nps-specialist-station", "NPS station, pumps & food shelf", `${setupCard}${heroPanel}${this._npsFeedLogPanel()}${pumpsPanel}${speciesPanel}${hatcheryPanel}${shelfPanel}`, st.demo)}</section>`;
   }
 
   // The Helm (0.7.72, Reece's pick — option C): five task groups replace the
@@ -17070,8 +17421,7 @@ const rigSteps = [
             system: "The machinery — switches and every setting.",
           }[groupId] || "")}</p>
         </div>
-        ${groupId === "feeding" ? this._npsFeedingStrip() : ""}
-        <div class="summary-grid hub-grid">${cards}</div>
+        ${groupId === "feeding" ? `${this._feedingOverview()}${this._feedingDetails("feeding-specialist-tools", "Hatchery, cultures & NPS controls", `${this._npsFeedingStrip()}<div class="summary-grid hub-grid">${cards}</div>`)}` : `<div class="summary-grid hub-grid">${cards}</div>`}
       </section>`;
   }
 
@@ -36554,6 +36904,90 @@ ${parts.buttons}
         .nps-tl-card { border: 1px solid #294055; border-radius: 10px; padding: 10px 12px; margin-top: 8px; background: #0f1b28; }
         .nps-tl-late { display: inline-flex; gap: 6px; align-items: center; }
         .nps-tl-late input[type="time"] { width: auto; min-width: 0; padding: 4px 6px; }
+        /* Whole-tank feeding overview; existing hardware cards keep their own controls. */
+        .feed-overview { min-width: 0; }
+        .feed-overview h2, .feed-overview h3, .feed-overview p { margin: 0; }
+        .feed-overview h2 { font-size: 27px; letter-spacing: -.5px; }
+        .feed-overview h3 { font-size: 16px; }
+        .feed-overview .eyebrow { margin-bottom: 4px; }
+        .feed-overview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .feed-overview .feed-overview-period { flex-wrap: nowrap; }
+        .feed-overview .feed-overview-period button { flex: 1 1 auto; min-width: 0; width: auto; }
+        .feed-overview small { color: var(--openreef-text-muted, #9fb2c7); }
+        .feed-overview .compact-button { min-height: 40px; }
+        .feed-overview-totals, .feed-overview-portions { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 10px; }
+        .feed-overview-total { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; text-align: left; min-width: 0; border: 1px solid #33495d; border-radius: 10px; padding: 16px; background: var(--openreef-card-alt, #172637); color: inherit; }
+        .feed-overview-total > span { min-height: 40px; font-size: 13px; }
+        .feed-overview-total strong { font-size: 23px; font-weight: 700; color: var(--openreef-accent, #67e8f9); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+        .feed-overview-total small { font-size: 12px; }
+        .feed-overview-total[aria-pressed="true"] { border-color: var(--openreef-accent, #67e8f9); }
+        .feed-overview-percent { color: var(--openreef-text-muted, #9fb2c7); }
+        .feed-overview-live { display: grid; gap: 10px; padding-top: 16px; border-top: 1px solid #33495d; }
+        .feed-overview-live > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .feed-overview-live strong { color: var(--openreef-accent, #67e8f9); font-size: 18px; font-variant-numeric: tabular-nums; }
+        .feed-overview-live small { line-height: 1.5; }
+        .feed-overview-detail { display: grid; gap: 10px; background: var(--openreef-card-alt, #172637); padding: 14px; border-radius: 8px; }
+        .feed-overview-detail ul { margin: 0; padding-left: 20px; }
+        .feed-overview-portion { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; text-align: left; padding: 14px; background: #143328; border-color: #315c48; min-width: 0; }
+        .feed-overview-portion span { font-size: 12px; color: #b8c8bf; overflow-wrap: anywhere; }
+        .feed-overview-portion strong { color: #4ade80; font-size: 16px; }
+        .feed-overview-planned { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+        .feed-overview-plan { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; border: 1px solid #33495d; border-radius: 8px; padding: 14px; background: var(--openreef-card-alt, #172637); }
+        .feed-overview-plan .compact-button { margin-top: auto; }
+        .feed-overview-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+        .feed-overview-fields label { display: grid; gap: 6px; font-size: 13px; min-width: 0; }
+        .feed-overview-fields input, .feed-overview-fields select { width: 100%; min-width: 0; max-width: 100%; min-height: 44px; }
+        .feed-overview-editor { border-color: var(--openreef-accent, #67e8f9); scroll-margin-top: 20px; }
+        .feed-overview-slots { display: flex; gap: 10px; flex-wrap: wrap; border: 0; padding: 0; margin: 0; min-width: 0; }
+        .feed-overview-slots legend { margin-bottom: 10px; font-size: 13px; color: #9fb2c7; }
+        .feed-overview-slots label { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; background: var(--openreef-card-alt, #172637); padding: 8px 12px; border-radius: 7px; }
+        .feed-overview-slots input { width: auto; min-height: 0; }
+        .feed-overview-editor .check-row { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+        .feed-overview-test { display: flex; align-items: center; justify-content: space-between; gap: 18px; flex-wrap: wrap; }
+        .feed-overview-test h3 { margin: 4px 0 8px; }
+        .feed-overview-chart-select { display: flex; align-items: center; gap: 10px; font-size: 13px; min-width: 0; }
+        .feed-overview-chart-select select { min-width: 0; max-width: 100%; }
+        .feed-overview-chart { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(38px, 1fr); gap: 8px; align-items: end; overflow-x: auto; padding-bottom: 8px; }
+        .feed-overview-bar { min-width: 0; display: grid; gap: 8px; justify-items: center; font-size: 11px; }
+        .feed-overview-bar > span:first-child { font-variant-numeric: tabular-nums; }
+        .feed-overview-bar > small { font-size: 11px; text-align: center; line-height: 1.3; }
+        .feed-overview-bar-track { display: flex; align-items: flex-end; justify-content: center; width: 100%; height: 130px; background: var(--openreef-card-alt, #172637); border-radius: 4px; }
+        .feed-overview-bar-track i { display: block; width: 75%; background: var(--openreef-accent, #67e8f9); border-radius: 3px 3px 0 0; }
+        .feed-overview-bar.gap .feed-overview-bar-track { background: repeating-linear-gradient(135deg, #172637, #172637 4px, #24374b 4px, #24374b 6px); }
+        .feed-overview-chart-a11y { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+        .feed-overview-log-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 12px 0; border-bottom: 1px solid #33495d; }
+        .feed-overview-log-row > div:first-of-type { display: grid; gap: 5px; min-width: 0; overflow-wrap: anywhere; }
+        .feed-overview-log-row strong { font-size: 14px; }
+        .feed-overview-log-row.undone strong { text-decoration: line-through; opacity: .65; }
+        .feed-overview-lane { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid #33495d; }
+        .feed-overview-lane > strong { font-size: 13px; }
+        .feed-overview-lane-events { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+        .feed-overview-lane .fed { border-color: #315c48; background: #143328; }
+        .feed-overview-lane-readonly { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+        .feed-overview-manage { display: grid; gap: 8px; border-top: 1px solid #33495d; padding-top: 12px; }
+        .feed-overview-manage > div { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+        .feed-overview.is-simple .feed-overview-totals { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+        .feed-overview.is-simple .feed-overview-total { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 0; border-bottom: 1px solid #33495d; border-radius: 0; padding: 12px 0; background: transparent; align-items: center; }
+        .feed-overview.is-simple .feed-overview-total > span { min-height: 0; }
+        .feed-overview.is-simple .feed-overview-total > strong { font-size: 20px; }
+        .feed-overview.is-simple .feed-overview-total > small { grid-column: 1 / -1; }
+        .feed-overview.is-simple .feed-overview-total > small:not(.feed-overview-percent) { display: none; }
+        @media (max-width: 700px) {
+          .feed-overview-totals, .feed-overview-portions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          .feed-overview .panel { padding: 14px; }
+          .feed-overview-total { padding: 12px; }
+          .feed-overview-total strong { font-size: 20px; }
+          .feed-overview .compact-button { min-height: 44px; }
+          .feed-overview-fields { grid-template-columns: minmax(0, 1fr); }
+          .feed-overview-fields input, .feed-overview-fields select { font-size: 16px; }
+          .feed-overview-log-row { grid-template-columns: 62px minmax(0, 1fr); gap: 10px; }
+          .feed-overview-log-row .button-row { grid-column: 2; }
+          .feed-overview-lane { grid-template-columns: minmax(0, 1fr); }
+          .feed-overview-lane-events { display: grid; grid-template-columns: minmax(0, 1fr); }
+          .feed-overview-lane-events button { text-align: left; }
+          .feed-overview-chart-select { width: 100%; }
+          .feed-overview-chart-select select { flex: 1; }
+        }
         /* The feeding log (doc §13.19): the strip's ledgers as a list, by day. */
         .nps-log-controls { flex-wrap: wrap; }
         .nps-log-day { margin: 4px 0 0; }

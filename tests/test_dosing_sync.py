@@ -46,6 +46,14 @@ class _FixedDt:
     def utcnow(self):
         return NOW_UTC
 
+    def as_local(self, value):
+        # Feeding history is captured on config saves, including dosing saves.
+        # Preserve real calendar arithmetic in this fixed-UTC test clock.
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    def as_utc(self, value):
+        return self.as_local(value)
+
     def __getattr__(self, name):
         return _ha_stubs._Universal()
 
