@@ -137,6 +137,7 @@ class OpenReefPanel extends HTMLElement {
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
     this._manualHistoryRange = {};
+    this._manualHistorySource = {};
     this._maintenanceHistoryOpen = {};
     this._maintenanceView = "upcoming";   // 0.7.195: upcoming | tasks | trends
     this._maintenanceExpanded = "";       // the one row open to its full card
@@ -2410,6 +2411,14 @@ class OpenReefPanel extends HTMLElement {
       if (target.dataset.manualHistoryRange) {
         if (event.type === "change" && this._manualHistoryRanges().some(([range]) => range === value)) {
           this._manualHistoryRange[target.dataset.manualHistoryRange] = value;
+          this._render();
+        }
+        return;
+      }
+      if (target.dataset.manualHistorySource) {
+        const parameter = target.dataset.manualHistorySource;
+        if (event.type === "change" && this._manualHistorySources(parameter).some(([source]) => source === value)) {
+          this._manualHistorySource[parameter] = value;
           this._render();
         }
         return;
@@ -30491,6 +30500,18 @@ const rigSteps = [
     ];
   }
 
+  _manualHistorySources(id, readings = this._manualReadings(id)) {
+    const sources = new Set(readings.map((entry) => String(entry.source ?? "").trim()));
+    const selected = this._manualHistorySource[id] || "";
+    // Keep the selection visible if its last result is deleted or refreshed away.
+    if (selected.startsWith("source:")) sources.add(selected.slice(7));
+    return [
+      ["", "All sources"],
+      ...[...sources].sort((a, b) => a.localeCompare(b))
+        .map((source) => [`source:${source}`, source || "No source recorded"]),
+    ];
+  }
+
   _manualTestCard(id) {
     const meta = this._manualTestMeta(id);
     const schedule = this._manualTestConfig(id);
@@ -30499,9 +30520,12 @@ const rigSteps = [
     const readings = this._manualReadings(id);
     const open = this._manualHistoryOpen[id] === true;
     const range = this._manualHistoryRange[id] || "all";
+    const source = this._manualHistorySource[id] || "";
     const now = Date.now();
     const cutoff = now - this._trendRangeMs(range);
-    const history = range === "all" ? readings : readings.filter((entry) => {
+    const history = readings.filter((entry) => {
+      if (source && `source:${String(entry.source ?? "").trim()}` !== source) return false;
+      if (range === "all") return true;
       const time = this._manualReadingTime(entry);
       return time >= cutoff && time <= now;
     });
@@ -30530,8 +30554,13 @@ const rigSteps = [
                 ${this._manualHistoryRanges().map(([key, label]) => `<option value="${key}" ${range === key ? "selected" : ""}>${label}</option>`).join("")}
               </select>
             </label>
+            <label>Source
+              <select data-manual-history-source="${this._escape(id)}" aria-label="${this._escape(meta.label)} history source">
+                ${this._manualHistorySources(id, readings).map(([key, label]) => `<option value="${this._escape(key)}" ${source === key ? "selected" : ""}>${this._escape(label)}</option>`).join("")}
+              </select>
+            </label>
             <small role="status">Showing ${history.length} of ${readings.length} saved result${readings.length === 1 ? "" : "s"} · newest first</small>
-            <div class="manual-history-list" data-manual-history-list="${this._escape(`${id}:${range}`)}" tabindex="0" role="region" aria-label="${this._escape(meta.label)} history results">
+            <div class="manual-history-list" data-manual-history-list="${this._escape(`${id}:${range}:${source}`)}" tabindex="0" role="region" aria-label="${this._escape(meta.label)} history results">
             ${history.length ? history.map((entry) => `
               <div class="manual-history-row">
                 <div>
@@ -30541,7 +30570,7 @@ const rigSteps = [
                 </div>
                 <button class="danger-text compact-button" data-action="delete-manual-reading" data-id="${this._escape(id)}" data-reading="${this._escape(entry.id)}">Delete</button>
               </div>
-            `).join("") : `<p class="muted">${readings.length ? "No results in this period. Choose All history to view older tests." : "No history yet."}</p>`}
+            `).join("") : `<p class="muted">${!readings.length ? "No history yet." : source ? "No results match this source and time period. Try another period or All sources." : "No results in this period. Choose All history to view older tests."}</p>`}
             </div>
           </div>
         ` : ""}
