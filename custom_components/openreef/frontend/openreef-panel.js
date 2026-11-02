@@ -136,6 +136,7 @@ class OpenReefPanel extends HTMLElement {
     this._settingsSections = this._loadSettingsSections();
     this._healthSections = this._loadHealthSections();
     this._manualHistoryOpen = {};
+    this._manualHistoryRange = {};
     this._maintenanceHistoryOpen = {};
     this._maintenanceView = "upcoming";   // 0.7.195: upcoming | tasks | trends
     this._maintenanceExpanded = "";       // the one row open to its full card
@@ -2406,6 +2407,13 @@ class OpenReefPanel extends HTMLElement {
         return;
       }
 
+      if (target.dataset.manualHistoryRange) {
+        if (event.type === "change" && this._manualHistoryRanges().some(([range]) => range === value)) {
+          this._manualHistoryRange[target.dataset.manualHistoryRange] = value;
+          this._render();
+        }
+        return;
+      }
       if (target.dataset.manualField === "parameter") {
         const unitInput = this.shadowRoot.querySelector('[data-manual-field="unit"]');
         if (unitInput) unitInput.value = this._manualTestMeta(value).unit || "";
@@ -8411,16 +8419,22 @@ class OpenReefPanel extends HTMLElement {
     return {
       wizard: wizard ? wizard.scrollTop : 0,
       key: wizard ? String(wizard.className || "") : "",
+      manualHistory: Array.from(this.shadowRoot.querySelectorAll?.("[data-manual-history-list]") || [],
+        (node) => [node.dataset.manualHistoryList, node.scrollTop]),
     };
   }
 
   _restoreScrollState(scrollState) {
-    if (!scrollState || !scrollState.key) return;
+    if (!scrollState || (!scrollState.key && !scrollState.manualHistory?.length)) return;
+    const historyPositions = new Map(scrollState.manualHistory || []);
     const apply = () => {
       const wizard = this.shadowRoot.querySelector(".wizard");
       // Only the SAME dialog gets its position back; a different one (or the
       // setup wizard on a new step, handled by the caller) starts at the top.
       if (wizard && String(wizard.className || "") === scrollState.key) wizard.scrollTop = scrollState.wizard;
+      for (const node of this.shadowRoot.querySelectorAll?.("[data-manual-history-list]") || []) {
+        if (historyPositions.has(node.dataset.manualHistoryList)) node.scrollTop = historyPositions.get(node.dataset.manualHistoryList);
+      }
     };
     apply();
     if (typeof requestAnimationFrame === "function") requestAnimationFrame(apply);
@@ -8501,8 +8515,8 @@ class OpenReefPanel extends HTMLElement {
     this._lastRenderedSetupOpen = this._setupOpen;
     this._lastRenderedSetupStep = this._setupOpen ? this._setupStep : null;
     // The setup wizard keeps its place only within a step; every other
-    // dialog keeps it for as long as it stays open.
-    if (this._setupOpen ? preserveSetupScroll : Boolean(scrollState.key)) this._restoreScrollState(scrollState);
+    // dialog and manual history list keep it for as long as they stay open.
+    if (!this._setupOpen || preserveSetupScroll) this._restoreScrollState(scrollState);
     if (this._activeTab === "live") this._loadLiveSparklines();
     if (this._pendingScroll) {
       const anchor = this._pendingScroll;
@@ -30372,7 +30386,7 @@ const rigSteps = [
         </div>
         ${this._manualEntryPanel()}
         ${this._manualDataToolsPanel()}
-        <div class="grid four">
+        <div class="grid four manual-tests-grid">
           ${this._manualTestParameterIds().map((id) => this._manualTestCard(id)).join("")}
         </div>
       </section>
@@ -30466,6 +30480,17 @@ const rigSteps = [
     `;
   }
 
+  _manualHistoryRanges() {
+    return [
+      ["7d", "Past week"],
+      ["30d", "Past 30 days"],
+      ["90d", "Past 3 months (90 days)"],
+      ["180d", "Past 6 months (180 days)"],
+      ["365d", "Past year (365 days)"],
+      ["all", "All history"],
+    ];
+  }
+
   _manualTestCard(id) {
     const meta = this._manualTestMeta(id);
     const schedule = this._manualTestConfig(id);
@@ -30473,6 +30498,13 @@ const rigSteps = [
     const latest = state.latest;
     const readings = this._manualReadings(id);
     const open = this._manualHistoryOpen[id] === true;
+    const range = this._manualHistoryRange[id] || "all";
+    const now = Date.now();
+    const cutoff = now - this._trendRangeMs(range);
+    const history = range === "all" ? readings : readings.filter((entry) => {
+      const time = this._manualReadingTime(entry);
+      return time >= cutoff && time <= now;
+    });
     const value = latest ? this._manualReadingText(id, latest) : "--";
     return `
       <article class="manual-test-card ${state.status}">
@@ -30493,7 +30525,14 @@ const rigSteps = [
         </div>
         ${open ? `
           <div class="manual-history">
-            ${readings.length ? readings.slice(0, 12).map((entry) => `
+            <label>Time period
+              <select data-manual-history-range="${this._escape(id)}" aria-label="${this._escape(meta.label)} history time period">
+                ${this._manualHistoryRanges().map(([key, label]) => `<option value="${key}" ${range === key ? "selected" : ""}>${label}</option>`).join("")}
+              </select>
+            </label>
+            <small role="status">Showing ${history.length} of ${readings.length} saved result${readings.length === 1 ? "" : "s"} · newest first</small>
+            <div class="manual-history-list" data-manual-history-list="${this._escape(`${id}:${range}`)}" tabindex="0" role="region" aria-label="${this._escape(meta.label)} history results">
+            ${history.length ? history.map((entry) => `
               <div class="manual-history-row">
                 <div>
                   <strong>${this._escape(this._manualReadingText(id, entry))}</strong>
@@ -30502,7 +30541,8 @@ const rigSteps = [
                 </div>
                 <button class="danger-text compact-button" data-action="delete-manual-reading" data-id="${this._escape(id)}" data-reading="${this._escape(entry.id)}">Delete</button>
               </div>
-            `).join("") : `<p class="muted">No history yet.</p>`}
+            `).join("") : `<p class="muted">${readings.length ? "No results in this period. Choose All history to view older tests." : "No history yet."}</p>`}
+            </div>
           </div>
         ` : ""}
       </article>
@@ -36804,6 +36844,7 @@ ${parts.buttons}
         .manual-row-hint { grid-column: 1 / -1; color: var(--secondary-text-color, #94a3b8); font-size: .78rem; }
         .manual-notes { min-width: 0; }
         textarea { width: 100%; min-height: 44px; resize: vertical; border: 1px solid #294055; border-radius: 8px; background: #0b1724; color: #f8fafc; padding: 10px; }
+        .manual-tests-grid { align-items: start; }
         .manual-test-card { border: 1px solid #24364a; border-radius: 8px; padding: 14px; background: #121f2f; display: grid; gap: 9px; align-content: start; min-height: 220px; }
         .manual-test-card.ok { border-color: #166534; background: #0b2b24; }
         .manual-test-card.warning { border-color: #a16207; background: #2f2614; }
@@ -36812,6 +36853,7 @@ ${parts.buttons}
         .manual-test-card > strong { color: #67e8f9; font-size: 24px; overflow-wrap: anywhere; }
         .manual-test-card p { color: #9fb2c7; }
         .manual-history { display: grid; gap: 8px; border-top: 1px solid #24364a; padding-top: 10px; }
+        .manual-history-list { display: grid; gap: 8px; max-height: 480px; overflow-y: auto; }
         .maintenance-when { grid-column: 1 / -1; }
         .maintenance-auto-note { grid-column: 1 / -1; color: #c4b5fd; }
         .maintenance-week-group { display: grid; gap: 8px; }
@@ -38123,6 +38165,7 @@ ${parts.buttons}
              to one column, which turned Mission Control into a 3,800px scroll
              of half-empty cards. */
           .grid.four, .grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+          .grid.manual-tests-grid { grid-template-columns: 1fr; }
           .summary-card { min-height: 96px; padding: 13px; }
           /* Action rows wrap two-up instead of stacking full width: four
              stacked buttons turned every card head into 240px of chrome. */

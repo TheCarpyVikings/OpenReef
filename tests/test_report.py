@@ -382,7 +382,7 @@ def test_due_kinds_catch_up_and_the_tick_stores_and_pushes():
         "maintenance": {"enabled": True, "tasks": {}, "completions": {}, "reminders": {"enabled": True, "time": "09:00", "notifyTarget": "mobile_app_pixel", "persistent": True}},
     }})
     hass = FakeHass(entries=[entry])
-    made = run(integration._async_report_tick(hass, entry, datetime.now(timezone.utc)))
+    made = run(integration._async_report_tick(hass, entry, NOW))
     assert made == ["week"]
     items = entry.options[CONF_SETTINGS]["reports"]["items"]
     assert [i["kind"] for i in items] == ["week", "month"] and items[0]["generatedAt"]
@@ -390,15 +390,15 @@ def test_due_kinds_catch_up_and_the_tick_stores_and_pushes():
     assert len(pushes) == 1 and pushes[0].service == "mobile_app_pixel" and "Reef Report" in pushes[0].data["title"]
     assert entry.options[CONF_SETTINGS]["activity"][0]["message"].startswith("Weekly Reef Report ready")
     assert entry.options[CONF_SETTINGS]["reports"]["events"][0]["kind"] == "report"
-    assert run(integration._async_report_tick(hass, entry, datetime.now(timezone.utc))) == [], "stored: nothing owed"
+    assert run(integration._async_report_tick(hass, entry, NOW)) == [], "stored: nothing owed"
     # Push off: the digest carries one line instead, the day it was written.
     entry.options[CONF_SETTINGS]["reports"]["schedule"]["push"] = False
-    line = integration._report_digest_line(entry.options[CONF_SETTINGS], datetime.now(timezone.utc))
+    line = integration._report_digest_line(entry.options[CONF_SETTINGS], NOW)
     assert line.startswith("the weekly Reef Report is ready")
-    assert integration._report_digest_line(entry.options[CONF_SETTINGS], datetime.now(timezone.utc) + timedelta(days=1)) == ""
+    assert integration._report_digest_line(entry.options[CONF_SETTINGS], NOW + timedelta(days=1)) == ""
     entry.options[CONF_SETTINGS]["reports"]["schedule"]["enabled"] = False
     del entry.options[CONF_SETTINGS]["reports"]["items"][:]
-    assert run(integration._async_report_tick(hass, entry, datetime.now(timezone.utc))) == [], "the schedule off writes nothing"
+    assert run(integration._async_report_tick(hass, entry, NOW)) == [], "the schedule off writes nothing"
 
 
 def test_ws_list_generate_and_anchor():

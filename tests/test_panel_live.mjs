@@ -489,7 +489,7 @@ test("trend modal for a hand-logged parameter: the band and the chart, no ring, 
     assert(html.includes('class="live-spark-band"') && html.includes(">11.00</text>"), "band from the manual range");
     assert(!html.includes("live-spark-mark") && !html.includes("live-spark-event") && !html.includes("<small>Since "), "nothing from the ring or the ledger");
     assert(html.includes('data-live-range="30d"'), "hover formats dates beyond a day");
-    assertEqual(panel._liveTrendWhen(minsAgo(0), "24h").length, 5);
+    assertEqual(panel._liveTrendWhen(minsAgo(0), "24h"), new Date(minsAgo(0)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     assert(panel._liveTrendWhen(minsAgo(0), "30d").length > 5, "date + clock");
   } finally { restore(); }
 });
