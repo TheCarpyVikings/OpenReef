@@ -1414,6 +1414,8 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
             },
             "history": history[:600],
         }
+        if phyto:
+            cultures_engine.repair_refilled_phyto_draws(jars[jid], datetime.now(timezone.utc))
     raw_bottle = raw.get("bottle") if isinstance(raw.get("bottle"), dict) else {}
     bottle_history = []
     for item in (raw_bottle.get("history") if isinstance(raw_bottle.get("history"), list) else [])[:600]:
@@ -21581,8 +21583,8 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
     out, and its harvested share then goes to waste. Stage C: a ``cone`` share
     ({to, ml, jarId}) feeds a rotifer or pod jar straight from the vessel
     (refused while that jar is still green); and a split that takes under
-    PHYTO_DRAW_MAX_PCT of the working volume in batch mode is a DRAW — the
-    ledger moves, the colour, the split clock and the cycle counter stay.
+    PHYTO_DRAW_MAX_PCT of the working volume without refill in batch mode is
+    a DRAW — the ledger moves, the colour, split clock and cycle counter stay.
     ``cone_stamps`` False = the cone's own ceremony already fed it. Returns
     (code, message) on refusal; nothing is written before every check has passed."""
     cultures = _nps_cultures_cfg(config)
@@ -21757,9 +21759,9 @@ def _cultures_phyto_split_apply(hass: HomeAssistant, config: dict[str, Any], jar
     if tint in cultures_engine.PHYTO_TINTS:
         state["lastLookedAt"] = now.isoformat()
     # A DRAW (Stage C): under PHYTO_DRAW_MAX_PCT of the working volume out in
-    # batch mode — a cone dose, a syringe for the tank — moves the ledger and
-    # nothing else: the colour, the split clock and the counter stay.
-    draw = bool(not fresh_vessel and out_ml > 0 and str(jar.get("mode") or "batch") != "daily"
+    # batch mode without fresh water — a cone dose, a syringe for the tank —
+    # keeps the colour and clocks. A refill starts a cycle at any split size.
+    draw = bool(not fresh_vessel and out_ml > 0 and fresh <= 0 and str(jar.get("mode") or "batch") != "daily"
                 and awc_engine._f(guide.get("removalPct")) < cultures_engine.PHYTO_DRAW_MAX_PCT)
     state["workingL"] = round(awc_engine._f(guide["workingMlAfter"]) / 1000.0, 2)
     if not draw:

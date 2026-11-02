@@ -2798,19 +2798,20 @@ def test_ws_phyto_split_feeds_a_cone_and_refuses_a_green_one():
     assert conn.errors[-1].code == "still_green" and len(_cultures(entry)["jars"]["c2"]["history"]) == before
     run(integration.websocket_cultures_split(hass, conn, {"id": 3, "jar_id": "c2", "ml": 100, "to": [{"to": "cone", "ml": 100, "jarId": "c2"}]}))
     assert conn.errors[-1].code == "unknown_destination"
-    # A small draw to the tank keeps the vessel's colour and clock.
+    # A small draw to the tank without a refill keeps the colour and clock.
     cfg = _config(entry)
     cfg["nps"]["cultures"]["jars"]["c2"]["state"]["lastTint"] = "dark"
     cfg["nps"]["cultures"]["jars"]["c2"]["history"].insert(0, {"event": "tint", "at": _iso(REAL), "tint": "dark"})
     entry.options = {**entry.options, CONF_SETTINGS: cfg}
     anchor = cfg["nps"]["cultures"]["jars"]["c2"]["state"]["lastHarvestAt"]
     refused = len(conn.errors)
-    run(integration.websocket_cultures_split(hass, conn, {"id": 4, "jar_id": "c2", "ml": 60, "to": [{"to": "tank", "ml": 60}]}))
+    run(integration.websocket_cultures_split(hass, conn, {"id": 4, "jar_id": "c2", "ml": 60, "fresh_ml": 0,
+                                                          "to": [{"to": "tank", "ml": 60}]}))
     assert len(conn.errors) == refused, conn.errors[-1]
     v_after = _cultures(entry)["jars"]["c2"]
     assert v_after["history"][0]["draw"] is True and v_after["state"]["lastTint"] == "dark" and v_after["state"]["lastHarvestAt"] == anchor
-    assert v_after["history"][0]["dests"] == [{"to": "tank", "ml": 60}] and v_after["history"][0]["freshMl"] == 60
-    assert v_after["state"]["workingL"] == 3.5, "the tile's default is like for like — a draw topped up keeps its working volume"
+    assert v_after["history"][0]["dests"] == [{"to": "tank", "ml": 60}] and v_after["history"][0]["freshMl"] == 0
+    assert v_after["state"]["workingL"] == 3.44, "a withdrawal without fresh water reduces the working volume"
     # In daily mode every draw is the day's split: the clock re-anchors.
     cfg = _config(entry)
     cfg["nps"]["cultures"]["jars"]["c2"]["mode"] = "daily"

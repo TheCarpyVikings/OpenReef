@@ -91,9 +91,9 @@ HOME_CULTURE_CELLS_PER_ML_ESTIMATE = 1.5e7
 # Stage C (doc §4.1, §5.5): the cone's "light green" ~1 × 10⁶ cells/ml — one
 # tint dose of a 2.5 L cone from a dark home culture ≈ 170 ml, an ESTIMATE.
 CONE_TINT_CELLS_PER_ML = 1.0e6
-# A phyto split that takes less than this share of the working volume is a
-# DRAW (a cone dose, a syringe for the tank): the vessel's ledger moves, its
-# colour, split clock and cycle counter do not. Daily mode always re-anchors.
+# A withdrawal below this share, WITHOUT fresh water, is a DRAW (a cone dose,
+# a syringe for the tank): its colour, split clock and cycle counter stay.
+# Refilling starts a new growth cycle even below this share.
 PHYTO_DRAW_MAX_PCT = 30.0
 SECCHI_FIT_MIN_POINTS = 4          # cm readings across ≥ 2 days before the fit speaks
 SECCHI_BAND_MIN_READINGS = 2       # readings at a tint before its band is drawn on the stick
@@ -1820,6 +1820,39 @@ def clearing_samples(history: Any) -> list[float]:
     return samples
 
 
+def repair_refilled_phyto_draws(jar: dict[str, Any], now: datetime) -> None:
+    """Repair legacy sub-30% refills that were wrongly marked as draws.
+
+    Only the classification and cycle state change; the recorded volumes,
+    harvest colour and all stock/water ledgers remain as recorded. Removing
+    the flag makes this safe to run on every normalisation without recounting.
+    """
+    rows = [(at, row) for at, row in _chronological(jar.get("history")) if at <= now]
+    repaired = []
+    for at, row in rows:
+        if row.get("event") == "harvest" and row.get("draw") and _f(row.get("freshMl")) > 0:
+            row.pop("draw")
+            repaired.append(at)
+    if not repaired:
+        return
+    state = jar["state"]
+    started = _parse_iso(state.get("startedAt"))
+    if started is None or started > now:
+        return
+    fresh = max(started, _parse_iso(state.get("lastRestartAt")) or started)
+    active = [at for at in repaired if at >= fresh]
+    if not active:
+        return
+    state["cyclesSinceFresh"] = min(999, int(_f(state.get("cyclesSinceFresh"))) + len(active))
+    last_split = _parse_iso(state.get("lastHarvestAt")) or started
+    if active[-1] >= last_split:
+        state["lastHarvestAt"] = active[-1].isoformat()
+        # The split's tint records the crop BEFORE dilution. Later looks
+        # still take precedence; a later index reading is not a new look.
+        state["lastTint"] = replay_state([row for at, row in rows if at >= active[-1]],
+                                         jar.get("species"))["lastTint"]
+
+
 def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
     """The jar's tap stamps re-read from the surviving journal (0.7.191) —
     what ``state`` would say had the taken-back row never happened. Only
@@ -1829,6 +1862,7 @@ def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
     A crash stops the walk — nothing after it is a running jar's word."""
     out: dict[str, Any] = {"lastTint": phyto_seed_tint(species_id) if species_id else "green",
                            "lastFedAt": "", "lastFeedSkippedAt": "", "lastSignAt": "", "lastSign": ""}
+    phyto = species_kind(species_id) == "phyto"
     tint_done = sign_done = False
     for at, row in reversed(_chronological(history)):
         event = row.get("event")
@@ -1840,7 +1874,13 @@ def replay_state(history: Any, species_id: Any = None) -> dict[str, Any]:
             out["lastFedAt"] = stamp
         if not out["lastFeedSkippedAt"] and row.get("skipped"):
             out["lastFeedSkippedAt"] = stamp
-        if not tint_done and str(row.get("tint") or "") in ALL_TINTS:
+        if not tint_done and phyto and event in ("harvest", "restart") and not row.get("draw"):
+            # The journal keeps the pre-split colour, but the ceremony
+            # resets the vessel to pale after replacing its medium.
+            out["lastTint"] = "pale"
+            tint_done = True
+        if not tint_done and not (phyto and event == "harvest" and row.get("draw")) \
+                and str(row.get("tint") or "") in ALL_TINTS:
             out["lastTint"] = str(row["tint"])
             tint_done = True
         if not sign_done and str(row.get("sign") or "") in ALL_SIGNS:

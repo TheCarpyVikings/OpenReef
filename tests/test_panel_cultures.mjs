@@ -74,6 +74,14 @@ function jarSummary(over = {}) {
   };
 }
 
+test("the phyto journal distinguishes withdrawals from refilled splits", async () => {
+  const panel = await makePanel();
+  const jars = [{ id: "p", kind: "phyto" }];
+  const row = { jarId: "p", event: "harvest", ml: 1000, tint: "dark", dests: [{ to: "bottle", ml: 1000 }] };
+  assert(panel._culturesJournalWhat({ ...row, draw: true, freshMl: 0 }, jars) === "withdrawal → 1000 ml bottle");
+  assert(panel._culturesJournalWhat({ ...row, freshMl: 1000, nutrientMl: 1.5 }, jars) === "split → 1000 ml bottle · 1000 ml fresh + 1.5 ml f/2");
+});
+
 // What the backend's cultures.rig_state would say for these jars (the panel
 // only draws it; test_cultures.py pins the maths).
 function rigFixture(list) {

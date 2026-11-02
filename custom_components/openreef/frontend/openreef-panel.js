@@ -16699,6 +16699,7 @@ const rigSteps = [
     const secchi = h.secchiCm != null ? ` · Secchi ${h.secchiCm} cm` : "";
     if (kind === "phyto") {
       const word = h.event === "harvest" && Number(h.ml) === 0 && Number(h.freshMl) > 0 ? "refilled"
+        : h.event === "harvest" && h.draw ? "withdrawal"
         : ({ harvest: "split", restart: "fresh vessel", tint: "looked", seeded: "seeded", split: "seeded B", sign: "sign", crashed: "crashed" })[h.event] || h.event;
       return `${word}${dests}${fresh}${secchi}${h.arrivalTint ? ` · arrived ${h.arrivalTint}` : ""}`;
     }
@@ -16806,7 +16807,7 @@ const rigSteps = [
         ${destRow("bottle", "→ bottle", "The home fridge bottle on the food shelf — the tank's daily driver. Blank = whatever the other shares leave.", !refill && (j.harvestTo || "bottle") !== "source", "", " (blank = the rest)")}
         ${destRow("tank", "→ tank", "Straight into the tank by hand — a feed: the hand-feed reminder logs done, the feeding log gets its row.", !refill && (j.harvestTo || "bottle") === "source", doseMl ? Math.round(doseMl) : "")}
         ${drips.length ? destRow("drip", "→ drip", `Load the drip's jar (${drips.map((d) => d.name).join(", ")}) — the oldest remaining load keeps its clock; the jar takes what fits.`, false, "", "the jar's fill", true) : ""}
-        ${cones.length ? destRow("cone", `→ ${esc(cones.length === 1 ? cones[0].name : "cone")}`, `Feed a rotifer or pod jar straight from the vessel — one tint of it (${cones.map((c) => `${c.name} ~${c.doseMl} ml`).join(", ")}) as the default; refused while that jar is still green (one big dose is the classic rotifer crash). Under 30 % of the working volume this is a draw: the vessel keeps its colour and its split clock.`, false, cones[0].doseMl, cones[0].stillGreen ? " (still green — it will refuse)" : "") : ""}
+        ${cones.length ? destRow("cone", `→ ${esc(cones.length === 1 ? cones[0].name : "cone")}`, `Feed a rotifer or pod jar straight from the vessel — one tint of it (${cones.map((c) => `${c.name} ~${c.doseMl} ml`).join(", ")}) as the default; refused while that jar is still green (one big dose is the classic rotifer crash). Under 30 % without a refill is a withdrawal: the vessel keeps its colour and split clock. Adding fresh water starts a new cycle.`, false, cones[0].doseMl, cones[0].stillGreen ? " (still green — it will refuse)" : "") : ""}
         ${cones.length > 1 ? `<div class="culture-field"><span></span><select data-cultures-dest-cone-jar="${esc(j.id)}" style="width:auto;">${cones.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(c.tint || "no tint")}</option>`).join("")}</select></div>` : ""}
         ${canB ? (refresh.backupId
           ? destRow("vessel", `→ ${esc(refresh.backupName)}`, `Refresh ${refresh.backupName} from this vessel — its old culture to waste, this share of today's crop as the new seed (1:4 into fresh water + f/2).`, false, "", ` to refresh ${esc(refresh.backupName)}`)
