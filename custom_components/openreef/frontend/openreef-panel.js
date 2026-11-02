@@ -2101,6 +2101,7 @@ class OpenReefPanel extends HTMLElement {
       if (action === "cultures-seed-phyto") this._culturesPhytoSeed(id, target.dataset.recipe || "");
       if (action === "cultures-seed-bottle") this._culturesPhytoSeed(id, "", { fromBottle: true });
       if (action === "cultures-split-phyto") this._culturesPhytoSplit(id, false);
+      if (action === "cultures-share-bottle") this._culturesShareBottle(id, target.dataset.target);
       if (action === "cultures-review-refill") this._culturesReviewDonorRefill(id);
       if (action === "cultures-fresh-vessel") this._culturesPhytoSplit(id, true);
       if (action === "cultures-add-phyto") this._culturesAddJar("nanno");
@@ -13712,6 +13713,7 @@ class OpenReefPanel extends HTMLElement {
         ${bar}
         <small>${s.bottleMl ? `${esc(s.remainingMl)} of ${esc(s.bottleMl)} ml` : "Set the bottle size in Settings to start the ledger"} · ${runway}</small>
         ${planLine}
+        ${s.cultureNames?.length > 1 ? `<small data-shared-phyto-stock="${eid}">Shared harvest stock · ${s.cultureNames.map(esc).join(" + ")}</small>` : ""}
         ${handKept ? `<small class="awc-hint" data-shelf-hand-kept="${eid}">${esc(handKept)}</small>` : ""}
         ${s.splitNudge ? `<small style="color:var(--warning-color,#f5a524)" data-shelf-nudge="${eid}">${esc(s.splitNudge)}</small>` : ""}
         <div class="button-row">
@@ -14715,6 +14717,33 @@ const rigSteps = [
     }
     this._culturesLoadSummary(true);
     return succeeded;
+  }
+
+  async _culturesShareBottle(jarId, targetJarId) {
+    if (this._busy) return;
+    const notice = (text, error = false) => { this._culturesShareNotice = { jarId, text, error }; };
+    if (this._cultures.demo || this._configDirty) {
+      notice(this._cultures.demo ? "Exit demo view to combine stock." : "Save your Settings edits before combining stock.", true);
+      this._render();
+      return;
+    }
+    this._busy = true;
+    this._render();
+    try {
+      const result = await this._callWS({ type: "openreef/cultures_share_bottle", jar_id: jarId, target_jar_id: targetJarId });
+      if (result?.config) this._config = result.config;
+      notice("Stock combined. Both cultures now fill one shared stock entry; the destination's capacity and dose plan are kept.");
+      this._cultures.error = "";
+      this._cultures.at = 0;
+      this._nps.at = 0;
+      if (this._feedingUi) this._feedingUi.at = 0;
+      await Promise.all([this._culturesLoadSummary(true), this._npsLoadSummary(true)]);
+    } catch (err) {
+      notice(err?.message || "Could not combine the stock entries.", true);
+    } finally {
+      this._busy = false;
+      this._render();
+    }
   }
 
   // The daily tap: the tint the keeper saw (a select beside the jar) plus
@@ -17032,6 +17061,8 @@ const rigSteps = [
     const nutrient = jar?.nutrient || {};
     const light = jar?.light || {};
     const index = jar?.index || {};
+    const bottleId = jar?.bottleProductId || `home_phyto_${jid}`;
+    const bottle = products[bottleId];
     return `
         <div class="stack" style="gap:6px;padding:8px 0;border-top:1px solid rgba(255,255,255,0.06);" data-culture-settings-kind="phyto">
           <div class="mini-grid">
@@ -17049,7 +17080,7 @@ const rigSteps = [
               <option value="bottle" ${(jar?.harvestTo || "bottle") !== "source" ? "selected" : ""}>the home fridge bottle (the default)</option>
               <option value="source" ${jar?.harvestTo === "source" ? "selected" : ""}>straight from the vessel, by tint</option>
             </select></label>
-            <label title="The fridge bottle's size — the container the split is poured into.">Fridge bottle (ml)<input type="number" min="100" max="20000" step="50" data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="bottleMl" value="${esc(jar?.bottleMl ?? 1000)}"></label>
+            <label title="Total harvested stock capacity across your physical bottles, for example 5 × 500 ml = 2500 ml.">Fridge stock capacity (ml)<input type="number" min="100" max="20000" step="50" data-scope="${bottle ? "consumable" : "nps-culture-jar"}" data-id="${esc(bottle ? bottleId : jid)}" data-field="bottleMl" value="${esc(bottle?.bottleMl ?? jar?.bottleMl ?? 1000)}"></label>
             <label title="Guillard's f/2 on the food shelf (Reefphyto's preset) — every seed and split debits it by the FRESH litres. Blank = the first bottle on the shelf that says f/2.">f/2 bottle<select data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="nutrientProductId">
               <option value="">Find it by name</option>
               ${Object.entries(products).map(([pid, p]) => `<option value="${esc(pid)}" ${(nutrient.productId || "") === pid ? "selected" : ""}>${esc(p?.name || pid)}</option>`).join("")}
@@ -17060,6 +17091,7 @@ const rigSteps = [
               <option value="daily" ${jar?.mode === "daily" ? "selected" : ""}>daily — a small split every day</option>
             </select></label>
           </div>
+          ${this._culturesSharedStockControls(jid, jar, products)}
           <div class="mini-grid" data-culture-light="${esc(jid)}">
             <label title="Sun: the rack's window — the day length comes from Home Assistant's sun. Lamp: the LED on a plug, on at the time below for the light hours. Sun + lamp: the plug runs from SUNSET until daylight + lamp reach the light hours, never past the latest-off time.">Light<select data-scope="nps-culture-jar" data-id="${esc(jid)}" data-field="light.mode">
               ${[["sun", "sun — the window, no plug"], ["lamp", "lamp — the LED on a plug"], ["sun+lamp", "sun + lamp — the plug from sunset"]].map(([v, l]) => `<option value="${v}" ${(light.mode || "sun") === v ? "selected" : ""}>${l}</option>`).join("")}
@@ -17087,6 +17119,38 @@ const rigSteps = [
             <button class="danger-text compact-button" data-action="cultures-remove-jar" data-id="${esc(jid)}" ${running ? 'title="Mark it crashed first"' : ""}>Remove vessel</button>
           </div>
         </div>`;
+  }
+
+  _culturesSharedStockControls(jid, jar, products) {
+    const esc = (v) => this._escape(String(v ?? ""));
+    const jars = this._config?.nps?.cultures?.jars || {};
+    const pid = jar?.bottleProductId || `home_phyto_${jid}`;
+    const product = products[pid];
+    if (!product) return "";
+    const owners = Object.entries(jars).filter(([id, j]) => (j.bottleProductId || `home_phyto_${id}`) === pid);
+    const seen = new Set([pid]);
+    const options = Object.entries(jars).flatMap(([id, j]) => {
+      const into = j.bottleProductId || `home_phyto_${id}`;
+      const p = products[into];
+      if (j.species !== jar.species || Number(j.salinityPpt) !== Number(jar.salinityPpt) || seen.has(into) || p?.category !== "phyto") return [];
+      seen.add(into);
+      const total = Math.round(((Number(product.remainingMl) || 0) + (Number(p.remainingMl) || 0)) * 100) / 100;
+      const capacity = Number(p.bottleMl) || 0;
+      const dose = Number(p.doseMl) || 0;
+      const cadence = Number(p.doseTimesPerDay) > 0 ? `${p.doseTimesPerDay} times a day`
+        : Number(p.doseEveryHours) > 0 ? `every ${p.doseEveryHours} h`
+          : Number(p.doseEveryDays) > 0 ? `every ${Number(p.doseEveryDays) === 1 ? "day" : `${p.doseEveryDays} days`}` : "no reminder";
+      return [`<div class="stack" style="gap:4px;">
+        <small>Combine with ${esc(j.name || id)}: ${esc(total)} / ${esc(capacity)} ml. Keep its ${esc(dose)} ml dose${cadence ? ` · ${esc(cadence)}` : " plan"}.${total > capacity ? " Increase the destination capacity first." : ""}</small>
+        <button class="secondary compact-button" data-action="cultures-share-bottle" data-id="${esc(jid)}" data-target="${esc(id)}" ${this._busy || this._configDirty || total > capacity || capacity <= 0 ? "disabled" : ""}>Combine stock with ${esc(j.name || id)}</button>
+      </div>`];
+    });
+    const note = this._culturesShareNotice?.jarId === jid ? this._culturesShareNotice : null;
+    return `<div class="stack" style="gap:8px;" data-culture-shared-stock="${esc(jid)}">
+      <small><strong>${owners.length > 1 ? "Shared fridge stock" : "Harvest stock"}</strong>: ${esc(product.name || pid)} · ${esc(product.remainingMl || 0)} / ${esc(product.bottleMl || 0)} ml${owners.length > 1 ? ` · ${owners.map(([, j]) => esc(j.name)).join(" + ")}` : ""}</small>
+      ${options.length ? `<small>Harvesting the same culture into the same bottles? Combine their recorded remaining stock into one entry. The selected destination keeps its capacity and dose schedule; the oldest stock date is retained.</small>${this._configDirty ? "<small>Save your Settings edits before combining stock.</small>" : ""}${options.join("")}` : ""}
+      ${note ? `<small role="status"${note.error ? ' style="color:var(--error-color,#e5484d)"' : ""}>${esc(note.text)}</small>` : ""}
+    </div>`;
   }
 
   _hatcheryEnabled() {

@@ -1444,6 +1444,14 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", False)),
         "tempEntity": _awc_str(raw.get("tempEntity"), 80),
         "jars": jars,
+        # Server-owned redirects keep old Settings tabs from recreating stock
+        # entries that were explicitly combined into a shared phyto bottle.
+        "bottleMerges": {_awc_str(pid, 64): {"into": _awc_str(row.get("into"), 64),
+                                             "at": _awc_str(row.get("at"), 40)}
+                         for pid, row in list((raw.get("bottleMerges") or {}).items())[:64]
+                         if isinstance(row, dict) and _awc_str(pid, 64)
+                         and _awc_str(row.get("into"), 64) and pid != row.get("into")}
+                        if isinstance(raw.get("bottleMerges"), dict) else {},
         "bottle": {
             "volumeMl": _awc_num(raw_bottle.get("volumeMl"), 1000, 0, 20000),
             "remainingMl": _awc_num(raw_bottle.get("remainingMl"), 0, 0, 20000),
@@ -1982,6 +1990,8 @@ def _normalise_nps_config(config: dict[str, Any]) -> None:
                 if item.get("kind") in ("dose", "pump", "transfer", "refill") else "dose",
                 # The planned slot a hand dose satisfies (0.7.135), if it said.
                 **({"recordedAt": _awc_str(item.get("recordedAt"), 40)} if item.get("recordedAt") else {}),
+                **({"originProductId": _awc_str(item.get("originProductId"), 64)}
+                   if item.get("originProductId") else {}),
                 **({"extra": True} if item.get("extra") is True else {}),
                 **({"slot": _normalise_schedule_time(item.get("slot"))} if _normalise_schedule_time(item.get("slot")) else {}),
                 # Taken back (0.7.136): kept as a tombstone so a stale save
@@ -9365,6 +9375,26 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
             jid = str(pid)[len(nps_engine.HOME_PHYTO_PREFIX):]
             if isinstance(dst_jars, dict) and isinstance(dst_jars.get(jid), dict):
                 incoming_products[pid] = deepcopy(src)
+
+    # Bottle merges are explicit commands. A stale whole-config save cannot
+    # split them back out, restore the old dose reminder, or count stock twice.
+    merges = ((stored.get("nps") or {}).get("cultures") or {}).get("bottleMerges") or {}
+    if merges:
+        previous = ((incoming.get("nps") or {}).get("cultures") or {}).get("bottleMerges") or {}
+        incoming.setdefault("nps", {}).setdefault("cultures", {})["bottleMerges"] = deepcopy(merges)
+        if isinstance(incoming_products, dict) and isinstance(stored_products, dict):
+            for old_pid, row in merges.items():
+                pid = _cultures_resolve_bottle(stored, old_pid)
+                if pid not in incoming_products and pid in stored_products:
+                    incoming_products[pid] = deepcopy(stored_products[pid])
+                if previous.get(old_pid) != row and pid in stored_products and pid in incoming_products:
+                    for key in ("remainingMl", "history", "openedAt", "lastShakenAt", "lastDosedAt", "doseSkippedAt",
+                                "cellsPerMl", "cellsPerMlSource", "cellsPerMlAt"):
+                        if key in stored_products[pid]:
+                            incoming_products[pid][key] = deepcopy(stored_products[pid][key])
+                        else:
+                            incoming_products[pid].pop(key, None)
+        _cultures_relink_shared_bottles(incoming)
 
 
 def _merge_activity(stored: Any, incoming: dict[str, Any]) -> None:
@@ -18943,7 +18973,8 @@ def _feeding_native_row(config: dict[str, Any], row: dict[str, Any]) -> tuple[An
     stamp = str(row.get("at") or "")
     history, vessel, load, capacity = [], None, "", 0.0
     if source.startswith("shelf:"):
-        vessel = ((config.get("consumables") or {}).get("products") or {}).get(source[6:])
+        pid = _cultures_resolve_bottle(config, source[6:])
+        vessel = ((config.get("consumables") or {}).get("products") or {}).get(pid)
         if vessel:
             history, load, capacity = vessel.get("history", []), vessel.get("openedAt") or "", vessel.get("bottleMl") or 0
     elif source.startswith("brine:") or source == "brine":
@@ -18955,6 +18986,7 @@ def _feeding_native_row(config: dict[str, Any], row: dict[str, Any]) -> tuple[An
         vessel = _nps_cultures_cfg(config)["bottle"]
         history, load, capacity = vessel["history"], vessel.get("filledAt") or "", vessel.get("volumeMl") or 0
     target = next((r for r in history if str(r.get("at") or "") == stamp
+                   and (not source.startswith("shelf:") or str(r.get("originProductId") or pid) == source[6:])
                    and r.get("kind", "dose") == "dose" and r.get("event", "fed_tank") == "fed_tank"
                    and (not source.startswith("brine:") or r.get("from", "container") == source.split(":", 1)[1])), None)
     return target, vessel, str(load), float(capacity)
@@ -19404,7 +19436,8 @@ async def _feeding_correct(hass: HomeAssistant, connection: websocket_api.Active
     if changed["id"] == row["id"]:
         row.update(changed)
     source = str(row.get("sourceId") or "")
-    task = _nps_shelf_task_id(source[6:]) if source.startswith("shelf:") else MAINTENANCE_HAND_FEED_TASK_ID
+    product_id = _cultures_resolve_bottle(config, source[6:]) if source.startswith("shelf:") else ""
+    task = _nps_shelf_task_id(product_id) if product_id else MAINTENANCE_HAND_FEED_TASK_ID
     if native_row is not None:
         native_row["recordedAt"] = now.isoformat()
         _drop_completion(config, task, old_at)
@@ -19413,7 +19446,7 @@ async def _feeding_correct(hass: HomeAssistant, connection: websocket_api.Active
                       and not r.get("undoneAt") and not r.get("extra")]
             vessel["lastDosedAt"] = max(active) if active else ""
             if not undo and not changed.get("extra"):
-                _nps_shelf_log_completion(config, source[6:], at, "Feeding entry corrected")
+                _nps_shelf_log_completion(config, product_id, at, "Feeding entry corrected")
         elif not undo and not changed.get("extra"):
             _nps_hand_feed_done(config, at, "Feeding entry corrected")
     _append_activity(config, f"{row.get('name') or 'Feeding'} entry {'undone' if undo else 'corrected'}", "control")
@@ -20282,6 +20315,121 @@ def _cultures_home_bottle_id(jar_id: str) -> str:
     return f"{nps_engine.HOME_PHYTO_PREFIX}{jar_id}"
 
 
+def _cultures_resolve_bottle(config: dict[str, Any], pid: str) -> str:
+    merges = ((config.get("nps") or {}).get("cultures") or {}).get("bottleMerges") or {}
+    seen = set()
+    while pid in merges and pid not in seen:
+        seen.add(pid)
+        pid = str(merges[pid].get("into") or pid)
+    return pid
+
+
+def _cultures_relink_shared_bottles(config: dict[str, Any]) -> None:
+    """Apply saved bottle redirects without moving any stock a second time."""
+    cultures = ((config.get("nps") or {}).get("cultures") or {})
+    merges = cultures.get("bottleMerges") or {}
+    if not merges:
+        return
+    products = (config.get("consumables") or {}).get("products") or {}
+    for jid, jar in (cultures.get("jars") or {}).items():
+        if cultures_engine.species_kind(jar.get("species")) == "phyto":
+            pid = str(jar.get("bottleProductId") or _cultures_home_bottle_id(jid))
+            jar["bottleProductId"] = _cultures_resolve_bottle(config, pid)
+        feed = jar.get("feed") or {}
+        if feed.get("productId"):
+            feed["productId"] = _cultures_resolve_bottle(config, feed["productId"])
+    for channel in ((config.get("dosing") or {}).get("channels") or {}).values():
+        reservoir = channel.get("reservoir") or {}
+        if reservoir.get("productId"):
+            reservoir["productId"] = _cultures_resolve_bottle(config, reservoir["productId"])
+    for pid in merges:
+        if _cultures_resolve_bottle(config, pid) != pid:
+            products.pop(pid, None)
+            _nps_shelf_drop_reminder(config, pid)
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/cultures_share_bottle",
+    vol.Required("jar_id"): str,
+    vol.Required("target_jar_id"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_cultures_share_bottle(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Combine two existing stocks, retaining the destination's capacity/plan."""
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    cultures = _nps_cultures_cfg(config)
+    jars = cultures["jars"]
+    source_id, target_id = str(msg["jar_id"]), str(msg["target_jar_id"])
+    source, target = jars.get(source_id), jars.get(target_id)
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        connection.send_error(msg["id"], "unknown_jar", "Choose two existing phyto cultures")
+        return
+    old_pid = str(source.get("bottleProductId") or _cultures_home_bottle_id(source_id))
+    new_pid = str(target.get("bottleProductId") or _cultures_home_bottle_id(target_id))
+    owners = [jar for jid, jar in jars.items()
+              if str(jar.get("bottleProductId") or _cultures_home_bottle_id(jid)) in (old_pid, new_pid)]
+    if (cultures_engine.species_kind(source.get("species")) != "phyto"
+            or any(jar.get("species") != source["species"] for jar in owners)):
+        connection.send_error(msg["id"], "species_mismatch", "Shared stock needs cultures of the same phyto species")
+        return
+    if any(abs(awc_engine._f(jar.get("salinityPpt")) - awc_engine._f(source.get("salinityPpt"))) > .01
+           for jar in owners):
+        connection.send_error(msg["id"], "salinity_mismatch", "Shared stock needs the same recorded salinity")
+        return
+    if old_pid == new_pid:
+        _awc_send(connection, msg, hass, config)
+        return
+    products = config["consumables"]["products"]
+    old, shared = products.get(old_pid), products.get(new_pid)
+    if any(not isinstance(p, dict) or p.get("category") != "phyto" for p in (old, shared)):
+        connection.send_error(msg["id"], "unknown_product", "Both cultures need a phyto stock entry first")
+        return
+    total = round(awc_engine._f(old.get("remainingMl")) + awc_engine._f(shared.get("remainingMl")), 2)
+    capacity = awc_engine._f(shared.get("bottleMl"))
+    if total > capacity or capacity <= 0:
+        connection.send_error(msg["id"], "stock_overflow",
+                              f"The combined {total:g} ml exceeds the destination's {capacity:g} ml capacity; edit its stock capacity first")
+        return
+    now = datetime.now(timezone.utc)
+    # Archive both original ledgers before combining their bounded histories.
+    # Origin ids keep feed report rows stable after they move to the shared stock.
+    _feeding_capture(config, config, now)
+    cultures = config["nps"]["cultures"]  # capture normalises the culture block
+    occupied = [p for p in (old, shared) if awc_engine._f(p.get("remainingMl")) > 0]
+    opened = [_parse_datetime(p.get("openedAt")) for p in occupied]
+    shared["openedAt"] = min(opened).isoformat() if opened and all(at and at <= now for at in opened) else ""
+    for key in ("lastDosedAt", "doseSkippedAt"):
+        stamps = [_parse_datetime(p.get(key)) for p in (old, shared)]
+        shared[key] = max(at for at in stamps if at and at <= now).isoformat() if any(at and at <= now for at in stamps) else ""
+    # Shaking one of several physical bottles does not mean all were shaken.
+    shaken = [_parse_datetime(p.get("lastShakenAt")) for p in occupied]
+    shared["lastShakenAt"] = min(shaken).isoformat() if shaken and all(at and at <= now for at in shaken) else ""
+    history = [dict(row, originProductId=row.get("originProductId") or old_pid) for row in old.get("history", [])]
+    history += deepcopy(shared.get("history") or [])
+    history.append({"at": now.isoformat(), "recordedAt": now.isoformat(), "kind": "refill", "ml": 0})
+    shared["history"] = sorted(history, key=lambda row: str(row.get("at") or ""))[-CONSUMABLE_HISTORY_MAX:]
+    shared["remainingMl"] = total
+    if awc_engine._f(old.get("remainingMl")) > 0:
+        # Different harvests do not establish one measured cell density.
+        shared["cellsPerMl"] = 0
+        shared.pop("cellsPerMlSource", None)
+        shared.pop("cellsPerMlAt", None)
+    cultures.setdefault("bottleMerges", {})[old_pid] = {"into": new_pid, "at": now.isoformat()}
+    _cultures_relink_shared_bottles(config)
+    _append_activity(config, f"Shared phyto stock: {source['name']} combined with {target['name']} — "
+                     f"{total:g} / {capacity:g} ml; destination dose plan retained", "control")
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 def _cultures_home_bottle(config: dict[str, Any], jar_id: str, jar: dict[str, Any],
                           create: bool = False, now: datetime | None = None) -> dict[str, Any] | None:
     """The phyto vessel's home fridge bottle (doc §5.4): a REAL shelf product
@@ -20343,17 +20491,24 @@ def _cultures_shelf_nudges(config: dict[str, Any], states: dict[str, Any], now: 
     try:
         cultures = ((config.get("nps") or {}).get("cultures") or {}) if isinstance(config.get("nps"), dict) else {}
         jars = cultures.get("jars") if isinstance(cultures, dict) and isinstance(cultures.get("jars"), dict) else {}
-        by_bottle: dict[str, tuple[str, dict[str, Any]]] = {}
+        by_bottle: dict[str, list[tuple[str, dict[str, Any]]]] = {}
         for jid, jar in jars.items():
             if not isinstance(jar, dict) or cultures_engine.species_kind(jar.get("species")) != "phyto":
                 continue
             pid = str(jar.get("bottleProductId") or "") or _cultures_home_bottle_id(str(jid))
-            by_bottle[pid] = (str(jid), jar)
+            by_bottle.setdefault(pid, []).append((str(jid), jar))
         for pid, state in states.items():
             if not isinstance(state, dict) or str(pid) not in by_bottle:
                 continue
-            jid, jar = by_bottle[str(pid)]
-            st = cultures_engine.culture_state(jar, now)
+            owners = by_bottle[str(pid)]
+            state["cultureNames"] = [str(jar.get("name") or jid) for jid, jar in owners]
+            candidates = [(jid, jar, cultures_engine.culture_state(jar, now)) for jid, jar in owners]
+            # Any ready supplier can fill shared stock. A greening/failed
+            # sibling must not overwrite its harvest advice by dict order.
+            jid, jar, st = min(candidates, key=lambda item: (
+                not cultures_engine.harvest_ready(item[2], phyto=True),
+                item[2].get("harvestBlocked", False),
+                item[2].get("status") not in ("establishing", "producing"), item[0]))
             learned = cultures_engine.learned_cadences(jar, [], now) if st["status"] in ("establishing", "producing") else {}
             state["splitNudge"] = nps_engine.home_bottle_nudge(
                 state, st, str(jar.get("name") or jid), (learned.get("daysToDark") or {}).get("days"))
@@ -20366,6 +20521,7 @@ def _cultures_ensure_home_bottles(config: dict[str, Any]) -> None:
     save, so a vessel added in Settings gets one at once). Quiet when the
     cultures are off, never destructive."""
     try:
+        _cultures_relink_shared_bottles(config)
         cultures = ((config.get("nps") or {}).get("cultures") or {}) if isinstance(config.get("nps"), dict) else {}
         if not isinstance(cultures, dict) or not cultures.get("enabled"):
             return
@@ -28552,6 +28708,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_cultures_restart)
     websocket_api.async_register_command(hass, websocket_cultures_water_change)
     websocket_api.async_register_command(hass, websocket_cultures_split)
+    websocket_api.async_register_command(hass, websocket_cultures_share_bottle)
     websocket_api.async_register_command(hass, websocket_cultures_fresh_vessel)
     websocket_api.async_register_command(hass, websocket_cultures_refresh_backup)
     websocket_api.async_register_command(hass, websocket_cultures_index)

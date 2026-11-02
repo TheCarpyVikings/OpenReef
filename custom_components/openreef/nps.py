@@ -3182,7 +3182,8 @@ def feed_log(now_local: datetime, *, products: dict[str, Any], channels: dict[st
             pumped = item.get("kind") == "pump"
             if pumped and (item.get("drip") or pid in drip_products):
                 continue  # the drip's day rows are the channel's (above)
-            add(item.get("at"), how="pump" if pumped else "hand", source=source, name=name, productId=pid,
+            origin = str(item.get("originProductId") or pid)
+            add(item.get("at"), how="pump" if pumped else "hand", source=f"shelf:{origin}", name=name, productId=pid,
                 ml=round(_f(item.get("ml")), 2), via=bottle_channel.get(pid, "") if pumped else "",
                 slot=str(item.get("slot") or ""), undone=bool(item.get("undoneAt")),
                 undoneAt=item.get("undoneAt") or None, undoable=not pumped,
