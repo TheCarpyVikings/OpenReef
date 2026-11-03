@@ -18961,10 +18961,15 @@ def _feeding_capture(stored: Any, incoming: dict[str, Any], now: datetime | None
 def _feeding_timeline(config: dict[str, Any], now_local: datetime) -> dict[str, Any]:
     hatchery, cultures = _nps_hatchery_v2(config), _nps_cultures_cfg(config)
     quiet, species = _nps_feed_scope(hatchery, cultures)
+    exchange = (config.get("nps") or {}).get("feedExchange") or {}
     return nps_engine.feed_timeline(now_local,
         products=(config.get("consumables") or {}).get("products") or {}, channels=_dosing_channels(config),
         cultures=cultures, hatchery=_nps_feed_hatchery(config), brine_feeds=hatchery["handFeeds"],
-        quiet_product_ids=quiet, culture_bottle_species=species, tank_l=_awc_effective_tank_l(config))
+        quiet_product_ids=quiet, culture_bottle_species=species, tank_l=_awc_effective_tank_l(config),
+        awc=_awc_cfg(config) or {},
+        lighting=spawning.lighting_window_summary(_effective_lighting_cfg(config) or {}, now_local),
+        fx_channel_id=str(exchange.get("channelId") or ""), fx_enabled=bool(exchange.get("enabled")),
+        truce=_nps_truce_timeline_cfg(config))
 
 
 def _feeding_native_row(config: dict[str, Any], row: dict[str, Any]) -> tuple[Any, Any, str, float]:
@@ -19022,13 +19027,17 @@ def _feeding_summary(hass: HomeAssistant, config: dict[str, Any], days: int) -> 
                         "at": f"{minute // 60:02d}:{minute % 60:02d}" if minute is not None else None,
                         "amount": event.get("ml"), "unit": food["unit"], "source": source,
                         "status": event.get("status"), "note": event.get("note") or ""})
-    for row in summary["rows"]:
+    for row in {row["id"]: row for row in summary["rows"] + summary["timelineRows"]}.values():
         manual = str(row.get("sourceId") or "").startswith("manual:")
         native_row = _feeding_native_row(config, row)[0] if not manual else None
         can_change = not row["undone"] and row.get("how") != "pump" and (
             manual or (native_row is not None and _undo_window_ok(_parse_datetime(row["at"]), now)))
         row["editable"] = row["undoable"] = can_change
     summary.update(planned=planned, nowLocal=now_local.isoformat(),
+                   timelineContext={"date": timeline["date"], "nowMin": timeline["nowMin"],
+                                    "night": timeline["night"],
+                                    "events": [event for event in timeline["events"]
+                                               if event.get("how") in ("pump", "system")]},
                    timeZone=str(getattr(hass.config, "time_zone", "") or now_local.tzinfo),
                    retentionDays=FEEDING_RETENTION_DAYS,
                    rotation=feeding_engine.rotation_summary(now_local, block["rotation"], catalog))

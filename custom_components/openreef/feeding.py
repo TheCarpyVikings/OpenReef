@@ -502,6 +502,10 @@ def summarize(now_local: datetime, rows: Any, catalog: Any, *, days: Any = 7,
     return {
         "date": today.isoformat(), "since": since.isoformat(), "days": days,
         "foods": list(_items(catalog).values()), "rows": all_rows[:limit],
+        # Today's timeline must not silently lose feeds at the log's display
+        # cap. These are the same canonical rows, not a second feeding ledger.
+        "timelineRows": [row for row in all_rows if row["date"] == today.isoformat()
+                         and not row["undone"]] if days == 1 else [],
         "totals": ordered, "perDay": per_day,
         "counts": {"feeds": active, "undone": sum(row["undone"] for row in all_rows)},
         "truncated": len(all_rows) > limit, "rowCount": len(all_rows),

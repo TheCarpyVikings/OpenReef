@@ -264,7 +264,7 @@ class OpenReefPanel extends HTMLElement {
       this._modeCountdownTimer = window.setInterval(() => {
         this._refreshAfterAutoReturnIfDue();
         this._updateModeCountdownElements();
-        this._feedingRefreshRotationIfDue();
+        this._feedingRefreshIfDue();
       }, 1000);
     }
     if (!this._pulseKeyHandler) {
@@ -10947,12 +10947,12 @@ class OpenReefPanel extends HTMLElement {
     }
   }
 
-  _feedingRefreshRotationIfDue() {
-    // Reuse the mounted panel's clock so a quiet tank still changes its phase
-    // badge after midnight. The loader owns throttling, errors and rendering.
+  _feedingRefreshIfDue() {
+    // Keep the timeline, local day and rotation current even on a quiet tank.
+    // The loader owns throttling; a draft or focused control keeps its place.
     const st = this._feedingUi;
     if (!this._hass || !["feeding", "nps"].includes(this._activeTab) || document.visibilityState === "hidden"
-      || this._nps?.demo || !st?.data?.rotation?.enabled || st.draft || st.busy || st.loading
+      || this._nps?.demo || !st?.data || st.draft || st.busy || st.loading
       || Date.now() - (st.at || 0) < 60000 || this._setupOpen || (this.shadowRoot && this._isEditingFormControl())) return;
     return this._feedingLoad();
   }
@@ -11023,7 +11023,7 @@ class OpenReefPanel extends HTMLElement {
 
   _feedingOpenEditor(foodId = "", entryId = "", plannedId = "") {
     const st = this._feedingState();
-    const row = entryId ? (st.data?.rows || []).find((item) => item.id === entryId) : null;
+    const row = entryId ? [...(st.data?.rows || []), ...(st.data?.timelineRows || [])].find((item) => item.id === entryId) : null;
     const planned = plannedId ? (st.data?.planned || []).find((item) => item.id === plannedId) : null;
     const choices = this._feedingLogFoods();
     const food = this._feedingFood(row?.foodId || planned?.foodId || foodId)
@@ -11223,6 +11223,18 @@ class OpenReefPanel extends HTMLElement {
     if (action === "days") { st.days = [1, 7, 30].includes(Number(data.id)) ? Number(data.id) : 1; st.at = 0; st.selected = ""; st.shown = 8; st.draft = null; this._render(); this._feedingLoad(true); }
     else if (action === "simple") { st.simple = !st.simple; try { window.localStorage?.setItem("openreef:feeding-simple", st.simple ? "1" : "0"); } catch { /* optional preference */ } this._render(); }
     else if (action === "detail") { st.selected = st.selected === data.id ? "" : data.id; this._render(); }
+    else if (action === "timeline-detail") {
+      st.timelineExpanded = !st.timelineExpanded; this._render();
+      this.shadowRoot?.querySelector('[data-action="feeding-overview-timeline-detail"]')?.focus?.({ preventScroll: true });
+    }
+    else if (action === "timeline-event") {
+      st.timelineSelected = st.timelineSelected === data.id ? "" : data.id;
+      this._render();
+      const card = this.shadowRoot?.querySelector("[data-feeding-timeline-card]");
+      if (card) { card.focus?.({ preventScroll: true }); card.scrollIntoView?.({ block: "nearest" }); }
+      else [...(this.shadowRoot?.querySelectorAll?.('[data-action="feeding-overview-timeline-event"]') || [])]
+        .find((node) => node.dataset.id === data.id && node.getClientRects().length)?.focus?.({ preventScroll: true });
+    }
     else if (action === "trend") { st.chartFood = data.id; st.days = 7; st.at = 0; this._render(); this._feedingLoad(true); }
     else if (action === "quick") this._feedingQuick(data.id);
     else if (action === "add") this._feedingOpenEditor();
@@ -11378,25 +11390,128 @@ class OpenReefPanel extends HTMLElement {
       ${st.data?.truncated ? `<small>The newest entries are shown here; totals include all retained records in this period.</small>` : ""}</article>`;
   }
 
-  _feedingOverviewTimeline() {
+  _feedingTimelineEvents() {
+    const st = this._feedingState(), data = st.data || {};
+    const minute = (clock) => /^\d{2}:\d{2}$/.test(clock || "") ? Number(clock.slice(0, 2)) * 60 + Number(clock.slice(3, 5)) : null;
+    const rows = (data.timelineRows || data.rows || []).filter((row) => !row.undone && row.date === data.date);
+    const planned = (data.planned || []).filter((row) => !["done", "skipped"].includes(row.status));
+    return rows.map((row) => ({ ...row, key: `record:${row.id}`, kind: "record", how: row.how || "hand",
+      clock: row.drip ? "Daily total" : row.time || "Time unrecorded", minute: row.drip ? null : minute(row.time),
+      status: row.drip ? "total" : "recorded" }))
+      .concat(planned.map((row) => ({ ...row, key: `plan:${row.id}`, kind: "plan", how: "hand",
+        sourceLabel: this._feedingSources(this._feedingFood(row.foodId)).find((source) => source.id === row.source)?.label || row.source,
+        clock: row.at || "Any time", minute: minute(row.at),
+        status: ["due", "late", "missed"].includes(row.status) ? "unconfirmed" : row.status === "blocked" ? "blocked" : "upcoming" })))
+      .sort((a, b) => (a.minute ?? 1441) - (b.minute ?? 1441) || a.key.localeCompare(b.key));
+  }
+
+  _feedingTimelineStatus(event) {
+    return { recorded: "✓ Recorded", total: "Σ Recorded total", unconfirmed: "○ Awaiting confirmation",
+      upcoming: "○ Upcoming", blocked: "! Source unavailable", planned: "○ Planned",
+      expected: "≈ Expected · unconfirmed", reported: "✓ Run reported", done: "✓ Completed",
+      running: "▶ Running", skipped: "– Skipped" }[event.status] || event.status;
+  }
+
+  _feedingTimelineContext() {
+    const data = this._feedingState().data || {}, context = data.timelineContext;
+    if (context?.date !== data.date) return [];
+    const hm = (value) => `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+    return (context.events || []).map((event) => ({ ...event, key: `context:${event.id}`, kind: "context",
+      foodId: event.source, amount: event.ml, unit: "ml", sourceLabel: event.name,
+      minute: event.band?.[0] ?? event.doneAt ?? event.at,
+      clock: event.band ? `${hm(event.band[0])}–${hm(event.band[1])}` : event.doneAt != null || event.at != null ? hm(event.doneAt ?? event.at) : "Any time",
+      status: event.how === "pump" && event.status === "done" ? "reported" : event.status,
+    })).sort((a, b) => (a.minute ?? 1441) - (b.minute ?? 1441));
+  }
+
+  _feedingTimelineButton(event, { named = false, style = "" } = {}) {
+    const esc = (value) => this._escape(String(value ?? ""));
+    const selected = this._feedingState().timelineSelected === event.key;
+    const suggested = named && (this._feedingState().data?.rotation?.suggestedFoodIds || []).includes(event.foodId);
+    const method = event.how === "pump" ? "Pump" : event.how === "system" ? "Equipment" : "By hand";
+    const quantity = event.kind === "context" && event.amount == null ? "" : this._feedingQuantity(event.amount, event.unit);
+    return `<button class="feed-timeline-event ${esc(event.status)}" data-action="feeding-overview-timeline-event" data-id="${esc(event.key)}" aria-pressed="${selected}" aria-label="${esc(`${event.name} · ${event.clock} · ${quantity} · ${this._feedingTimelineStatus(event)} · ${method}`)}"${style ? ` style="${style}"` : ""}>
+      ${named ? `<strong>${esc(event.name)}</strong>` : ""}<span>${esc(event.clock)}${quantity ? ` · ${esc(quantity)}` : ""}</span>
+      <small>${esc(this._feedingTimelineStatus(event))} · ${method}</small>${suggested ? `<small class="feed-rotation-suggested">Suggested today</small>` : ""}</button>`;
+  }
+
+  _feedingTimelineClock(events) {
     const st = this._feedingState(), data = st.data || {};
     const esc = (value) => this._escape(String(value ?? ""));
-    const rows = (data.rows || []).filter((row) => !row.undone && row.date === data.date);
-    const planned = (data.planned || []).filter((row) => !["done", "skipped"].includes(row.status));
-    const ids = [...new Set([...rows.map((row) => row.foodId), ...planned.map((row) => row.foodId)])];
-    if (!ids.length) return "";
-    const lanes = ids.map((id) => {
-      const food = this._feedingFood(id) || rows.find((row) => row.foodId === id) || planned.find((row) => row.foodId === id);
-      const events = rows.filter((row) => row.foodId === id).map((row) => ({ ...row, clock: row.time || "", planned: false }))
-        .concat(planned.filter((row) => row.foodId === id).map((row) => ({ ...row, clock: row.at || "Any time", planned: true })))
-        .sort((a, b) => a.clock.localeCompare(b.clock));
-      return `<div class="feed-overview-lane"><strong>${esc(food.name)}</strong><div class="feed-overview-lane-events">${events.map((event) => {
-        const text = `${event.clock} · ${this._feedingQuantity(event.amount, event.unit)}${event.planned ? " planned" : " fed"}`;
-        const action = event.planned && event.status !== "blocked" ? "plan" : !event.planned && event.editable ? "edit" : "";
-        return action ? `<button class="secondary compact-button ${event.planned ? "planned" : "fed"}" data-action="feeding-overview-${action}" data-id="${esc(event.id)}" ${st.busy ? "disabled" : ""}>${esc(text)}</button>` : `<span class="feed-overview-lane-readonly ${event.planned ? "planned" : "fed"}">${esc(text)}</span>`;
-      }).join("")}</div></div>`;
+    const context = data.timelineContext?.date === data.date ? data.timelineContext : {};
+    const nowMin = context.nowMin ?? (Number(String(data.nowLocal || "").slice(11, 13)) * 60 + Number(String(data.nowLocal || "").slice(14, 16)));
+    const pct = (value) => Math.max(0, Math.min(100, Number(value) / 14.4 || 0));
+    const groups = [...new Set(events.map((event) => event.foodId))];
+    const suggested = new Set(data.rotation?.suggestedFoodIds || []);
+    const lanes = groups.map((foodId) => {
+      const foodEvents = events.filter((event) => event.foodId === foodId);
+      const timed = foodEvents.filter((event) => event.minute != null), untimed = foodEvents.filter((event) => event.minute == null);
+      // Cards occupy 19% of the clock. Put neighbours on separate tracks;
+      // the small marker always retains the exact minute, even near midnight.
+      const ends = [];
+      const marks = timed.map((event) => {
+        const at = pct(event.minute), left = Math.min(81, Math.max(0, at - 9.5));
+        let track = ends.findIndex((end) => end + 1 <= left);
+        if (track < 0) track = ends.length;
+        ends[track] = left + 19;
+        const top = track * 104;
+        const spans = event.band ? (event.band[1] > event.band[0] ? [event.band] : [[event.band[0], 1440], [0, event.band[1]]]) : [];
+        return `${spans.map(([a, b]) => `<span class="feed-timeline-band" style="left:${pct(a)}%;width:${pct(b) - pct(a)}%;top:${top + 4}px"></span>`).join("")}
+          <span class="feed-timeline-dot ${esc(event.status)}" style="left:${at}%;top:${top + 4}px" aria-hidden="true"></span>
+          ${this._feedingTimelineButton(event, { style: `left:${left}%;top:${top + 18}px` })}`;
+      }).join("");
+      const night = context.night;
+      return `<div class="feed-timeline-clock-row"><div class="feed-timeline-food"><strong>${esc(foodEvents[0].name)}</strong>${suggested.has(foodId) ? `<small class="feed-rotation-suggested">Suggested today</small>` : ""}</div>
+        <div><div class="feed-timeline-track" style="height:${Math.max(1, ends.length) * 104}px">
+          ${night ? `<span class="feed-timeline-night" style="left:0;width:${pct(night.onMin)}%"></span><span class="feed-timeline-night" style="left:${pct(night.offMin)}%;right:0"></span>` : ""}
+          <span class="feed-timeline-now" style="left:${pct(nowMin)}%" aria-hidden="true"></span>${marks}
+          ${!timed.length ? `<small class="feed-timeline-no-time">${untimed.some((event) => event.drip) ? "Daily total below" : "No timed feeds"}</small>` : ""}</div>
+        ${untimed.length ? `<div class="feed-timeline-untimed"><small>Without a fixed time</small>${untimed.map((event) => this._feedingTimelineButton(event)).join("")}</div>` : ""}</div></div>`;
     }).join("");
-    return `<article class="panel stack"><h3>Today’s timeline</h3><small>Actual feeding times · planned feeds keep their own slots</small>${lanes}</article>`;
+    return `<div class="feed-timeline-desktop" tabindex="0" role="region" aria-label="24-hour feeding clock"><div class="feed-timeline-clock">
+      <div class="feed-timeline-axis"><small>Tank time · ${esc(data.timeZone || "local")}</small><div>${[0, 6, 12, 18, 24].map((hour) => `<span style="left:${hour / 24 * 100}%">${String(hour).padStart(2, "0")}:00</span>`).join("")}</div></div>${lanes}</div></div>
+      <div class="feed-timeline-mobile"><small>In time order · ${esc(data.timeZone || "tank time")}</small>${events.map((event) => this._feedingTimelineButton(event, { named: true })).join("")}</div>`;
+  }
+
+  _feedingTimelineCard(events) {
+    const st = this._feedingState(), event = events.find((item) => item.key === st.timelineSelected);
+    if (!event) return "";
+    const esc = (value) => this._escape(String(value ?? ""));
+    const actions = [];
+    const button = (action, label) => `<button class="secondary compact-button" data-action="feeding-overview-${action}" data-id="${esc(event.id)}" ${st.busy ? "disabled" : ""}>${label}</button>`;
+    if (event.kind === "plan" && event.status !== "blocked") actions.push(button("plan", "Log this feed"));
+    if (event.kind === "record" && event.editable) actions.push(button("edit", "Edit"));
+    if (event.kind === "record" && event.undoable) actions.push(button("undo", "Undo"));
+    const slot = event.slot && event.slot !== "extra" ? `${event.slot === "anytime" ? "Any-time" : event.slot} slot${event.plannedAmount != null ? ` · ${this._feedingQuantity(event.plannedAmount, event.unit)} planned` : ""}` : event.extra ? "Extra feed · does not complete a planned slot" : "";
+    return `<div class="feed-timeline-card stack" data-feeding-timeline-card tabindex="-1" role="region" aria-label="Feed details">
+      <div class="feed-overview-head"><strong>${esc(event.name)} · ${esc(event.clock)}</strong><button class="secondary compact-button" data-action="feeding-overview-timeline-event" data-id="${esc(event.key)}" aria-label="Close feed details">Close</button></div>
+      <span>${esc(this._feedingTimelineStatus(event))}${event.kind !== "context" || event.amount != null ? ` · ${esc(this._feedingQuantity(event.amount, event.unit))}${event.kind === "context" && event.how === "pump" ? " scheduled" : ""}` : ""}</span>
+      <small>${esc(event.sourceLabel || event.from || event.source || "By hand")}${slot ? ` · ${esc(slot)}` : ""}</small>
+      ${event.drip ? `<small>Running daily pump total; the individual delivery times are not recorded here.</small>` : ""}
+      ${event.note ? `<small>${esc(event.note)}</small>` : ""}${event.truce ? `<small>Equipment pause after this dose: ${esc(event.truce)}</small>` : ""}
+      ${event.kind === "context" && event.how === "pump" ? `<small>Schedule and run information only. Recorded quantities are shown in the food rows and totals.</small>` : ""}
+      ${actions.length ? `<div class="button-row">${actions.join("")}</div>` : ""}</div>`;
+  }
+
+  _feedingOverviewTimeline() {
+    const st = this._feedingState(), data = st.data || {}, events = this._feedingTimelineEvents();
+    const context = this._feedingTimelineContext();
+    if (!events.length && !context.length) return "";
+    const esc = (value) => this._escape(String(value ?? ""));
+    const count = (status) => events.filter((event) => event.status === status).length;
+    const counts = [`${count("recorded")} recorded`, ...[["unconfirmed", "awaiting confirmation"], ["upcoming", "upcoming"], ["blocked", "unavailable"], ["total", count("total") === 1 ? "pump daily total" : "pump daily totals"]].filter(([status]) => count(status)).map(([status, label]) => `${count(status)} ${label}`)];
+    const suggested = new Set(data.rotation?.suggestedFoodIds || []);
+    const compact = [...new Set(events.map((event) => event.foodId))].map((id) => {
+      const rows = events.filter((event) => event.foodId === id);
+      return `<div class="feed-overview-lane"><div class="feed-timeline-food"><strong>${esc(rows[0].name)}</strong>${suggested.has(id) ? `<small class="feed-rotation-suggested">Suggested today</small>` : ""}</div><div class="feed-overview-lane-events">${rows.map((event) => this._feedingTimelineButton(event)).join("")}</div></div>`;
+    }).join("");
+    const equipment = st.timelineExpanded && context.length ? this._feedingDetails("feeding-timeline-equipment", "Pump schedules & equipment",
+      `<small>Scheduled pump doses, water changes and equipment pauses. These do not add to recorded feed counts or totals.</small>${this._feedingTimelineClock(context)}`) : "";
+    return `<article class="panel stack feed-timeline"><div class="feed-overview-head"><div><h3>Today’s timeline</h3><small>${esc(counts.join(" · "))}</small></div>
+      <button class="secondary compact-button" data-action="feeding-overview-timeline-detail" aria-expanded="${!!st.timelineExpanded}">${st.timelineExpanded ? "Show compact timeline" : "Show detailed timeline"}</button></div>
+      <small>${esc(data.date)} · Actual feeding times; open plans keep their own slots. Missing records do not mean no feeding.</small>
+      ${st.timelineExpanded ? `<small>✓ Recorded · ○ Open plan<span class="feed-timeline-clock-hint"> · red line = now</span>. Select a feed for its source, planned amount and actions.</small>${events.length ? this._feedingTimelineClock(events) : ""}` : compact || `<small>No feeds recorded yet. Expand for pump schedules and equipment.</small>`}
+      ${equipment}${this._feedingTimelineCard([...events, ...(st.timelineExpanded ? context : [])])}</article>`;
   }
 
   _feedingOverview() {
@@ -11424,7 +11539,7 @@ class OpenReefPanel extends HTMLElement {
     const suggested = new Set(data.rotation?.enabled && ["active", "needs_foods"].includes(data.rotation.status) ? data.rotation.suggestedFoodIds || [] : []);
     const quick = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Your usual portions</h3>${button("manage", "", "Manage portions")}</div><div class="feed-overview-portions">${favourites.map((food) => `<button class="secondary feed-overview-portion" data-action="feeding-overview-quick" data-id="${esc(food.id)}" ${st.busy ? "disabled" : ""}><span>${esc(food.name)}</span><strong>+ ${esc(this._feedingQuantity(food.portion, food.unit))}</strong>${suggested.has(food.id) ? `<small class="feed-rotation-suggested">Suggested today</small>` : ""}</button>`).join("")}</div>${!favourites.length ? `<p class="hint">Add your usual flake, pellets or other foods to start one-tap logging.</p>` : ""}${st.manage ? `<div class="feed-overview-manage">${foods.map((food) => `<div><span>${esc(food.name)}${food.tankFeed === false ? `<br><small>${esc(food.tankFeedReason || "Not used for tank feeding.")}</small>` : ` · ${esc(this._feedingQuantity(food.portion, food.unit))}`}</span>${button("food", food.id, food.tankFeed === false ? "Review use" : "Edit portion / food type")}</div>`).join("")}</div>` : ""}</article>` : "";
     const plans = (data.planned || []).filter((plan) => !["done", "skipped"].includes(plan.status));
-    const due = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Still planned today</h3><small>${plans.length} open feeds</small></div><div class="feed-overview-planned">${plans.map((plan) => `<div class="feed-overview-plan"><small>${esc(plan.at || "Any time")}${["late", "missed", "due"].includes(plan.status) ? " · Unconfirmed" : plan.status === "blocked" ? " · Source unavailable" : " · Upcoming"}</small><strong>${esc(plan.name)}</strong><small>${esc(this._feedingQuantity(plan.amount, plan.unit))} planned</small>${plan.status !== "blocked" ? button("plan", plan.id, "Log this feed", ["late", "missed", "due"].includes(plan.status)) : ""}</div>`).join("") || `<p class="hint">No open planned feeds. Your usual portions are here for extras.</p>`}</div></article>` : "";
+    const due = st.days === 1 ? `<article class="panel stack"><div class="feed-overview-head"><h3>Still planned today</h3><small>${plans.length} open feeds</small></div><div class="feed-overview-planned">${plans.map((plan) => `<div class="feed-overview-plan"><small>${esc(plan.at || "Any time")}${["late", "missed", "due"].includes(plan.status) ? " · Awaiting confirmation" : plan.status === "blocked" ? " · Source unavailable" : " · Upcoming"}</small><strong>${esc(plan.name)}</strong><small>${esc(this._feedingQuantity(plan.amount, plan.unit))} planned</small>${plan.status !== "blocked" ? button("plan", plan.id, "Log this feed", ["late", "missed", "due"].includes(plan.status)) : ""}</div>`).join("") || `<p class="hint">No open planned feeds. Your usual portions are here for extras.</p>`}</div></article>` : "";
     return `<section class="stack feed-overview ${st.simple ? "is-simple" : ""}">${head}${notice}<article class="panel stack"><h3>${st.days === 1 ? "Fed today" : `Recorded over ${st.days} days`}</h3><div class="feed-overview-totals">${cards || `<p class="hint">No food amounts recorded in this period.</p>`}</div>${detail}<small>${esc(coverageText)}</small>${live}</article>${this._feedingRotationCard()}${st.draft?.kind === "rotation" ? this._feedingEditor() : ""}${quick}${st.draft?.kind !== "rotation" ? this._feedingEditor() : ""}${due}${st.days > 1 ? this._feedingHistoryChart() : !st.simple ? this._feedingOverviewTimeline() : ""}${this._feedingNutrientCard()}${!st.simple ? this._feedingOverviewLog() : ""}</section>`;
   }
 
@@ -17686,7 +17801,7 @@ const rigSteps = [
           }[groupId] || "")}</p>
         </div>
         <div class="summary-grid hub-grid">${cards}</div>
-        ${groupId === "feeding" ? `${this._feedingOverview()}${this._feedingDetails("feeding-specialist-tools", "Detailed feeding timeline", this._npsFeedingStrip())}` : ""}
+        ${groupId === "feeding" ? (this._nps?.demo ? this._npsFeedingStrip() : this._feedingOverview()) : ""}
       </section>`;
   }
 
@@ -37291,6 +37406,44 @@ ${parts.buttons}
         .feed-overview-lane-events { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
         .feed-overview-lane .fed { border-color: #315c48; background: #143328; }
         .feed-overview-lane-readonly { display: inline-flex; align-items: center; min-height: 40px; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+        .feed-timeline { min-width: 0; }
+        .feed-timeline h3 { margin: 0 0 6px; }
+        .feed-timeline-food { display: grid; align-content: start; justify-items: start; gap: 8px; overflow-wrap: anywhere; }
+        .feed-timeline-food strong { font-size: 13px; }
+        .feed-timeline-event { display: grid; align-content: center; gap: 5px; min-height: 54px; padding: 9px 11px; border: 1px solid #476078; border-radius: 7px; background: var(--openreef-card-alt, #172637); color: inherit; text-align: left; font: inherit; font-size: 12px; line-height: 1.35; cursor: pointer; overflow-wrap: anywhere; }
+        .feed-timeline-event small { font-size: 11px; color: #bed0df; }
+        .feed-timeline-event.recorded, .feed-timeline-event.total { border-color: #3a7859; background: #143328; }
+        .feed-timeline-event.unconfirmed { border-color: #b58a3c; }
+        .feed-timeline-event.blocked { border-color: #d46c70; }
+        .feed-timeline-event[aria-pressed="true"] { outline: 2px solid var(--openreef-accent, #67e8f9); outline-offset: 2px; }
+        .feed-timeline :is(button, [tabindex]):focus-visible { outline: 2px solid var(--openreef-accent, #67e8f9); outline-offset: 3px; }
+        .feed-timeline-desktop { min-width: 0; max-width: 100%; overflow-x: auto; padding: 5px 6px 12px 0; }
+        .feed-timeline-clock { min-width: 950px; }
+        .feed-timeline-axis, .feed-timeline-clock-row { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 18px; }
+        .feed-timeline-axis { padding: 0 0 12px; }
+        .feed-timeline-axis > div { position: relative; height: 20px; margin: 0 18px; }
+        .feed-timeline-axis > div > span { position: absolute; transform: translateX(-50%); font-size: 11px; color: #b2c6d8; }
+        .feed-timeline-clock-row { border-top: 1px solid #33495d; padding: 14px 0; }
+        .feed-timeline-clock-row > div:last-child { min-width: 0; padding: 0 18px; }
+        .feed-timeline-track { position: relative; background: repeating-linear-gradient(to right, #33495d66 0, #33495d66 1px, transparent 1px, transparent 25%); }
+        .feed-timeline-track .feed-timeline-event { position: absolute; width: 19%; min-height: 76px; padding: 6px 8px; font-size: 12px; }
+        .feed-timeline-track .feed-timeline-event small { font-size: 11px; }
+        .feed-timeline-dot { position: absolute; width: 10px; height: 10px; border: 2px solid #b7cde0; border-radius: 50%; transform: translateX(-50%); box-sizing: border-box; background: #172637; }
+        .feed-timeline-dot.recorded, .feed-timeline-dot.done, .feed-timeline-dot.reported { background: #46d487; border-color: #46d487; }
+        .feed-timeline-dot.unconfirmed { border-color: #ffc761; }
+        .feed-timeline-dot.blocked { border-color: #ff8585; }
+        .feed-timeline-now { position: absolute; top: 0; bottom: 0; border-left: 2px solid #f27579; pointer-events: none; }
+        .feed-timeline-night { position: absolute; inset-block: 0; background: #08142055; pointer-events: none; }
+        .feed-timeline-band { position: absolute; height: 8px; border-radius: 3px; background: #a798de88; }
+        .feed-timeline-no-time { display: block; padding: 24px 12px; }
+        .feed-timeline-untimed { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+        .feed-timeline-card { border: 1px solid #6389a6; border-radius: 9px; padding: 16px; background: var(--openreef-card-alt, #172637); scroll-margin: 16px; overflow-wrap: anywhere; }
+        .feed-timeline-mobile { display: none; }
+        @media (max-width: 1050px) {
+          .feed-timeline-desktop, .feed-timeline-clock-hint { display: none; }
+          .feed-timeline-mobile { display: grid; gap: 10px; }
+          .feed-timeline-event { width: 100%; }
+        }
         .feed-overview-manage { display: grid; gap: 8px; border-top: 1px solid #33495d; padding-top: 12px; }
         .feed-overview-manage > div { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
         .feed-overview.is-simple .feed-overview-totals { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
@@ -37313,6 +37466,10 @@ ${parts.buttons}
           .feed-overview-lane { grid-template-columns: minmax(0, 1fr); }
           .feed-overview-lane-events { display: grid; grid-template-columns: minmax(0, 1fr); }
           .feed-overview-lane-events button { text-align: left; }
+          .feed-timeline-desktop { display: none; }
+          .feed-timeline-mobile { display: grid; gap: 10px; }
+          .feed-timeline-event { width: 100%; }
+          .feed-timeline-card { padding: 12px; }
           .feed-overview-chart-select { width: 100%; }
           .feed-overview-chart-select select { flex: 1; }
         }

@@ -458,14 +458,15 @@ test("the Feeding hub and the Pulse wall carry the strip; the demo stages a mixe
   try {
     const panel = await npsPanel();
     panel._npsLoadSummary = async () => {};
+    panel._feedingOverview = () => '<article>Whole-tank timeline</article>';
     const hub = panel._hubTab("feeding");
-    assert(hub.includes("Today's feeds") && hub.includes("12 feeds today"), "the Feeding hub shows the strip");
+    assert(hub.includes("Whole-tank timeline") && !hub.includes("12 feeds today"), "the Feeding hub uses the whole-tank view, without the duplicate NPS strip");
     // Zero pumps, one hand plan: still a strip (the hand-feeder's view).
     panel._config.nps.enabled = false;
     panel._config.consumables.products.rj = { name: "Reef Juice", doseEveryDays: 1 };
-    assert(panel._hubTab("feeding").includes("Today's feeds"), "hand-feeders get the strip without NPS");
+    assert(panel._hubTab("feeding").includes("Whole-tank timeline"), "hand-feeders get the whole-tank view without NPS");
     delete panel._config.consumables.products.rj;
-    assert(!panel._hubTab("feeding").includes("Today's feeds"), "no plans, no NPS, no strip");
+    assert(panel._hubTab("feeding").includes("Whole-tank timeline"), "dry-only tanks still get their feeding timeline");
     panel._config.nps.enabled = true;
     const wall = panel._pulseFeedStripMarkup();
     assert(wall.includes("pulse-feeds") && !wall.includes("data-action=") && wall.includes("12 feeds today"), "the wall strip is compact and read-only");

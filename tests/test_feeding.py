@@ -118,6 +118,23 @@ def test_same_timestamp_separate_feeds_count_and_same_id_upserts():
     assert total(result, "phyto:nanno")["amount"] == 250
 
 
+def test_todays_timeline_uses_all_active_canonical_rows_in_tank_timezone():
+    from zoneinfo import ZoneInfo
+    local = NOW.astimezone(ZoneInfo("Pacific/Auckland"))
+    rows = [row(str(i), ml=10) for i in range(350)]
+    rows += [row("dry", "manual:flake", None, amount=1, unit="pinch"),
+             row("undo", undoneAt=NOW.isoformat()), row("old", days_ago=1),
+             row("future", at=(NOW + timedelta(minutes=1)).isoformat()),
+             row("transfer", to="jar"), row("planned", status="planned")]
+    result = feeding.summarize(local, rows, catalog(), days=1, limit=3)
+    assert len(result["rows"]) == 3 and result["truncated"]
+    assert len(result["timelineRows"]) == 351
+    assert {r["date"] for r in result["timelineRows"]} == {local.date().isoformat()}
+    dry = next(r for r in result["timelineRows"] if r["id"] == "dry")
+    assert dry["foodId"] == "manual:flake" and dry["amount"] == 1 and dry["unit"] == "pinch"
+    assert feeding.summarize(local, rows, catalog(), days=7)["timelineRows"] == []
+
+
 def test_undo_plans_transfers_and_stalls_are_not_actual_food():
     rows = [row("real", ml=100), row("undo", ml=500, undoneAt=NOW.isoformat()),
             row("planned", ml=1000, status="planned"), row("jar", ml=1000, to="jar"),

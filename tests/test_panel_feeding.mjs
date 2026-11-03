@@ -108,34 +108,36 @@ test("rotation save sends one shared configuration and never logs or schedules f
   assert(p._feedingState().draft === null && !p._feedingState().noticeEntry, "success closes settings without inventing a feed or undo entry");
 });
 
-test("rotation clock refreshes stale visible guidance without interrupting drafts or inactive pages", async () => {
+test("feeding clock refreshes timeline and rotation without interrupting drafts or inactive pages", async () => {
   const p = await panel(rotationSummary()), st = p._feedingState(); let loads = 0;
   p._hass = {}; p._activeTab = "feeding";
   p._feedingLoad = async () => { loads++; };
   st.at = Date.now() - 59999;
-  await p._feedingRefreshRotationIfDue();
+  await p._feedingRefreshIfDue();
   assert(loads === 0, "fresh snapshot is retained");
   st.at = Date.now() - 60000;
   const blocked = [
     [() => { st.draft = { kind: "rotation" }; }, () => { st.draft = null; }],
     [() => { st.busy = true; }, () => { st.busy = false; }],
     [() => { st.loading = true; }, () => { st.loading = false; }],
-    [() => { st.data.rotation.enabled = false; }, () => { st.data.rotation.enabled = true; }],
     [() => { p._activeTab = "water"; }, () => { p._activeTab = "feeding"; }],
     [() => { p._hass = null; }, () => { p._hass = {}; }],
     [() => { p._nps.demo = true; }, () => { p._nps.demo = false; }],
     [() => { p._setupOpen = true; }, () => { p._setupOpen = false; }],
     [() => { p.shadowRoot = {}; p._isEditingFormControl = () => true; }, () => { p.shadowRoot = null; }],
   ];
-  for (const [set, restore] of blocked) { set(); await p._feedingRefreshRotationIfDue(); restore(); }
+  for (const [set, restore] of blocked) { set(); await p._feedingRefreshIfDue(); restore(); }
   const visibility = document.visibilityState;
-  try { document.visibilityState = "hidden"; await p._feedingRefreshRotationIfDue(); }
+  try { document.visibilityState = "hidden"; await p._feedingRefreshIfDue(); }
   finally { document.visibilityState = visibility; }
   assert(loads === 0, "draft, busy, hidden, editing and unrelated pages do not fetch or redraw");
-  await p._feedingRefreshRotationIfDue();
+  await p._feedingRefreshIfDue();
   assert(loads === 1, "visible Feeding refreshes the backend calendar after sixty seconds");
-  p._activeTab = "nps"; await p._feedingRefreshRotationIfDue();
+  p._activeTab = "nps"; await p._feedingRefreshIfDue();
   assert(loads === 2, "NPS overview uses the same refresh path");
+  st.data.rotation.enabled = false;
+  await p._feedingRefreshIfDue();
+  assert(loads === 3, "the timeline keeps refreshing without a Vitalis rotation");
 });
 
 test("rotation validation catches missing groups, overlap, invalid dates and removed foods", async () => {
@@ -510,6 +512,71 @@ test("backend names, sources and errors are escaped before entering markup", asy
   const html = p._feedingOverview();
   assert(!html.includes("<img") && !html.includes("<script>bad") && !html.includes("<svg onload"), "untrusted text cannot create markup");
   assert(html.includes("&lt;img") && html.includes("&lt;svg"), "text remains readable");
+});
+
+test("whole-tank timeline includes simultaneous dry feeds, actual times and independent open slots", async () => {
+  const data = summary();
+  data.rows[0].time = "13:02"; data.rows[0].at = "2026-11-01T13:02:00Z";
+  const dry = { foodId: "manual:flake", name: "Vitalis flake", unit: "pinch", amount: 1,
+    date: data.date, time: "13:34", at: "2026-11-01T13:34:00Z", how: "hand", extra: true,
+    sourceLabel: "By hand", editable: true, undoable: true };
+  data.timelineRows = [...data.rows, { ...dry, id: "dry-one" }, { ...dry, id: "dry-two" }];
+  data.planned.push({ id: "brine:anytime", foodId: "brine", name: "Live brine", amount: 100, unit: "ml", at: null, status: "due" });
+  const p = await panel(data), st = p._feedingState();
+  const events = p._feedingTimelineEvents();
+  assert(events.length === 5, "three recorded feeds and two plans, with no cross-view duplication");
+  assert(events[0].minute === 782 && events[0].slot === "11:00", "actual time positions the feed; planned slot remains attached");
+  assert(events.filter((event) => event.minute === 814).length === 2, "same-minute records remain separate");
+  assert(events.at(-1).minute === null, "an any-time plan has no invented position");
+  assert(p._feedingOverviewTimeline().includes("3 recorded · 1 awaiting confirmation · 1 upcoming"), "counts come from all timeline records, beyond the capped log");
+  st.timelineExpanded = true;
+  const clock = p._feedingOverviewTimeline();
+  assert(clock.includes("1 pinch") && clock.includes("13:02") && clock.includes("Without a fixed time"), "units and actual times are readable");
+  assert(clock.includes("feed-timeline-mobile") && clock.includes("top:122px"), "mobile list and stacked same-minute cards are available");
+  p._feedingOverviewAction("timeline-event", { id: "record:dry-one" });
+  assert(p._feedingOverviewTimeline().includes("Extra feed · does not complete a planned slot"), "extra detail is explicit");
+  assert(!st.draft, "selecting a marker only inspects the record");
+  p._feedingOverviewAction("edit", { id: "dry-one" });
+  assert(st.draft.entryId === "dry-one" && st.draft.amount === 1, "a feed outside the visible log can still be edited");
+  st.timelineSelected = "record:brine@one";
+  const card = p._feedingTimelineCard(events);
+  assert(card.includes("Fridge bottle") && card.includes("11:00 slot · 250 ml planned") && card.includes("feeding-overview-undo"), "source, plan and correction actions stay together");
+});
+
+test("pump context never becomes a second feeding record and daily totals have no invented midnight feed", async () => {
+  const data = summary();
+  data.timelineRows = [...data.rows, { id: "drip", foodId: "phyto:nanno", name: "Live phyto · Nanno", date: data.date,
+    time: "00:00", amount: 200, unit: "ml", how: "pump", drip: true }];
+  data.timelineContext = { date: data.date, nowMin: 1110, events: [
+    { id: "pump:one", source: "channel:phyto", how: "pump", name: "Phyto pump", at: 720, doneAt: 725, status: "done", ml: 2 },
+    { id: "pump:two", source: "channel:phyto", how: "pump", name: "Phyto pump", at: 900, status: "expected", ml: 2 },
+    { id: "uv", source: "truce:uv", how: "system", name: "UV pause", band: [1380, 60], status: "planned" },
+  ] };
+  const p = await panel(data), st = p._feedingState(); st.timelineExpanded = true;
+  assert(p._feedingTimelineEvents().find((event) => event.id === "drip").minute === null, "daily aggregate stays off the clock");
+  const html = p._feedingOverviewTimeline();
+  assert(html.includes("1 recorded · 1 upcoming · 1 pump daily total"), "context and daily totals are not counted as individual feeds");
+  assert(html.includes("Run reported") && html.includes("Expected · unconfirmed") && html.includes("UV pause"), "confirmed and expected context remain distinct");
+  assert(!html.includes("nps-timeline-dosenow") && !html.includes("nps-timeline-log"), "inspecting context cannot trigger equipment or bypass feed logging");
+  st.timelineSelected = "context:pump:one";
+  assert(p._feedingOverviewTimeline().includes("Recorded quantities are shown in the food rows"), "schedule quantities are labelled as such");
+  data.timelineContext.date = "2026-10-31";
+  assert(p._feedingTimelineContext().length === 0, "stale equipment context is not shown on another day");
+});
+
+test("timeline excludes undone rows, does not invent dry schedules and escapes expanded details", async () => {
+  const data = summary();
+  data.rotation = { suggestedFoodIds: ["manual:flake"] };
+  data.rows.push({ ...data.rows[0], id: "undone", undone: true });
+  data.rows[0].note = '<img src=x onerror="bad()">'; data.rows[0].sourceLabel = "<script>bad()</script>";
+  const p = await panel(data), st = p._feedingState();
+  assert(p._feedingTimelineEvents().length === 2, "only one active record and its independent future plan");
+  assert(!p._feedingOverviewTimeline().includes("Vitalis flake"), "rotation suggestion alone creates no planned feed");
+  st.timelineExpanded = true; st.timelineSelected = "record:brine@one";
+  const html = p._feedingOverviewTimeline();
+  assert(!html.includes("<img") && !html.includes("<script>") && html.includes("&lt;img"), "detail text is safely escaped");
+  data.planned[0].status = "blocked"; st.timelineSelected = "plan:brine:21";
+  assert(!p._feedingTimelineCard(p._feedingTimelineEvents()).includes("feeding-overview-plan"), "unavailable plan has no logging shortcut");
 });
 
 await runTests();

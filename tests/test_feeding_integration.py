@@ -106,11 +106,15 @@ class FeedingIntegration(unittest.TestCase):
         self.assertEqual(self.total(result, "brine")["amount"], 100)
         self.assertFalse([p for p in result["planned"] if p["foodId"] == "brine"])
         row = self.active(result, "brine")[0]
+        timeline_row = next(r for r in result["timelineRows"] if r["id"] == row["id"])
+        self.assertTrue(timeline_row["editable"] and timeline_row["undoable"])
+        self.assertEqual(timeline_row["at"], self.feed_at)
         self.assertEqual(row["plannedAmount"], 250)
         self.assertEqual(self.saved()["nps"]["hatchery"]["reservoir"]["remainingMl"], 1900)
         self.call("feeding_undo", entry_id=row["id"])
         after = self.summary()
         self.assertFalse(self.active(after, "brine"))
+        self.assertFalse([r for r in after["timelineRows"] if r["foodId"] == "brine"])
         self.assertEqual(len([p for p in after["planned"] if p["foodId"] == "brine"]), 1)
         self.assertEqual(self.saved()["nps"]["hatchery"]["reservoir"]["remainingMl"], 2000)
 
@@ -316,6 +320,15 @@ class FeedingIntegration(unittest.TestCase):
         self.assertEqual(self.total(second, "product:phyto")["amount"], 200)
         self.assertEqual(second["liveLiquidMl"], 200)
         self.assertEqual(len(self.active(second, "product:phyto")), 1)
+        daily = [row for row in second["timelineRows"] if row["foodId"] == "product:phyto"]
+        self.assertEqual(len(daily), 1)
+        self.assertTrue(daily[0]["drip"])
+        self.assertEqual(daily[0]["amount"], 200)
+        self.assertFalse(daily[0]["editable"] or daily[0]["undoable"])
+        context = second["timelineContext"]
+        self.assertEqual(context["date"], second["date"])
+        self.assertTrue(any(event["source"] == "channel:drip" for event in context["events"]))
+        self.assertTrue(all(event["how"] in ("pump", "system") for event in context["events"]))
 
     def test_anytime_plan_can_complete_with_smaller_amount_and_undo(self):
         hand = self.saved()["nps"]["hatchery"]["handFeed"]

@@ -3,8 +3,9 @@
 Added in OpenReef 0.7.230. The Feeding hub and NPS page show what was recorded
 today, what is still planned, and food totals over 7 or 30 days. From 0.7.231,
 the NPS, Brine hatchery, Cultures and Spawning cards sit at the top of Feeding,
-above the overview, matching the Water and Watch hubs. The detailed feeding
-timeline remains available below the log.
+above the overview, matching the Water and Watch hubs. **Today's timeline**
+now combines the compact food rows and an expandable detailed view above the
+log; it replaces the separate NPS-only strip at the bottom of Feeding.
 
 ## Everyday use
 
@@ -40,6 +41,33 @@ Logging records a feed already performed. It does not run a pump. Existing
 source inventory and expiry checks still apply. Custom foods are records only;
 they do not manage a physical bottle's stock. Culture harvests continue through
 the Cultures controls and contribute their recorded tank share to the overview.
+
+## Whole-tank timeline
+
+- All recorded tank foods appear, including custom dry foods, with their saved
+  units. The timeline reads the same canonical records as the totals and log.
+- **Show detailed timeline** opens a 24-hour clock with named food rows on
+  wide screens and a chronological list on narrow screens. Both use the tank's
+  local time, even when the browser is in another timezone.
+- Completed feeds use their actual time. Select one to see its source, original
+  planned slot and amount, notes, and available **Edit** and **Undo** actions.
+  Nearby marks stack so simultaneous feeds remain individually selectable.
+- Open plans retain their own slots. Any-time plans sit outside the clock;
+  logging an extra does not complete one. **Awaiting confirmation** describes
+  an unrecorded hand feed without asserting that it was missed.
+- Counts separate recorded feeds, unconfirmed plans and upcoming plans. Running
+  pump daily totals appear separately without inventing a midnight feeding time.
+- **Pump schedules & equipment**, inside the detailed view, preserves pump
+  schedule/run information, water changes and equipment-pause bands. Expected
+  runs remain labelled unconfirmed. This context never adds a second feed or
+  inflates recorded quantities; selecting it only displays information.
+- The timeline includes today's retained active records beyond the feeding
+  log's 300-entry display limit. Undo removes the mark and reopens its plan
+  where applicable. Vitalis suggestions do not create scheduled feeds.
+- The mounted page refreshes the timeline and rotation approximately once a
+  minute when visible, without interrupting an open editor or focused control.
+
+The specialist NPS station and Reef Pulse retain their existing pump views.
 
 ## Optional Vitalis rotation
 
