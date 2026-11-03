@@ -234,6 +234,8 @@ from . import cultures as cultures_engine
 from . import livestock as livestock_engine
 from . import report as report_engine
 from . import cooling as cooling_engine
+from . import heater_health as heater_engine
+from . import heater_monitor
 from . import nps as nps_engine
 from . import feeding as feeding_engine
 from . import spawning
@@ -3004,6 +3006,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
             )
             equipment_config["cost_entity_id"] = _normalise_entity_id(
                 equipment_config.get("cost_entity_id")
+            )
+            equipment_config["heaterMonitor"] = heater_engine.normalise_settings(
+                equipment_config.get("heaterMonitor")
             )
             equipment_config["armed"] = bool(equipment_config.get("armed", False))
             explicit_type = _normalise_equipment_profile(
@@ -7171,6 +7176,7 @@ async def _async_save_config(
     await _async_schedule_dosing_tick(hass, entry, _config_from_entry(entry))
     await _async_schedule_spawning_tick(hass, entry, _config_from_entry(entry))
     await _async_schedule_cooling_tick(hass, entry, _config_from_entry(entry))
+    await _async_setup_heater_monitor(hass, entry)
     await _async_schedule_cultures_tick(hass, entry, _config_from_entry(entry))
     # The circulation chain re-arms from its persisted stamps on every save —
     # that save-driven re-arm IS how its burst legs chain (see the scheduler).
@@ -27241,6 +27247,42 @@ async def _async_schedule_cooling_tick(
     _arm()
 
 
+async def _async_setup_heater_monitor(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
+    async def notify(config, notification_id, title, message):
+        await _async_send_mode_notification(hass, config, notification_id, title, message)
+
+    await heater_monitor.configure(hass, entry, lambda: _config_from_entry(entry), notify)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openreef/heater_health"})
+@callback
+def websocket_heater_health(hass, connection, msg) -> None:
+    monitor = hass.data.setdefault(DOMAIN, {}).get(heater_monitor.KEY)
+    connection.send_result(msg["id"], {"equipment": monitor.snapshot() if monitor else {}})
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/heater_health_respond",
+    vol.Required("equipmentId"): str,
+    vol.Required("action"): vol.In(["identify", "replaced", "settings_changed", "acknowledge"]),
+    vol.Optional("loadId", default=""): str,
+    vol.Optional("role", default=""): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_heater_health_respond(hass, connection, msg) -> None:
+    monitor = hass.data.setdefault(DOMAIN, {}).get(heater_monitor.KEY)
+    if monitor is None:
+        connection.send_error(msg["id"], "not_configured", "Enable heater monitoring in Equipment settings first")
+        return
+    try:
+        await monitor.respond(msg["equipmentId"], msg["action"], msg.get("loadId", ""), msg.get("role", ""))
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_response", str(err))
+        return
+    connection.send_result(msg["id"], {"equipment": monitor.snapshot()})
+
+
 @websocket_api.websocket_command({vol.Required("type"): "openreef/cooling_status"})
 @callback
 def websocket_cooling_status(
@@ -28650,6 +28692,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_list_reef_presets)
     websocket_api.async_register_command(hass, websocket_spawning_execution_status)
     websocket_api.async_register_command(hass, websocket_cooling_status)
+    websocket_api.async_register_command(hass, websocket_heater_health)
+    websocket_api.async_register_command(hass, websocket_heater_health_respond)
     websocket_api.async_register_command(hass, websocket_cooling_simulate)
     websocket_api.async_register_command(hass, websocket_cooling_dehumidifier)
     websocket_api.async_register_command(hass, websocket_cooling_vent)
@@ -28868,6 +28912,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) -> 
     await _async_schedule_dosing_tick(hass, entry, normalised)
     await _async_schedule_spawning_tick(hass, entry, normalised)
     await _async_schedule_cooling_tick(hass, entry, normalised)
+    await _async_setup_heater_monitor(hass, entry)
     await _async_schedule_cultures_tick(hass, entry, normalised)
     await _async_setup_dosing_mirror(hass, entry, normalised)
     if _dosing_channels(normalised):
@@ -29030,6 +29075,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: OpenReefConfigEntry) ->
     hass.data.setdefault(DOMAIN, {}).pop(SPAWNING_RUNTIME, None)
     _clear_cooling_tick(hass)
     _clear_cultures_tick(hass)
+    await heater_monitor.stop(hass)
     hass.data.setdefault(DOMAIN, {}).pop(COOLING_RUNTIME, None)
     beta_feedback.async_stop(hass)  # BETA-FEEDBACK: remove after beta
     _store = hass.data.setdefault(DOMAIN, {})

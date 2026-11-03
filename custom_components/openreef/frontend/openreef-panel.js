@@ -105,6 +105,7 @@ class OpenReefPanel extends HTMLElement {
                   logOpen: "" };
     this._cultures = { summary: null, at: 0, loading: false, error: "", loadError: "", message: "", demo: false, timelineDays: 14 };
     this._cooling = { status: null, at: 0, loading: false, error: "" };
+    this._heaterHealth = { status: null, at: 0, loading: false, error: "" };
     this._npsDemoStash = null;
     this._icp = { subview: "dashboard", view: "import", pending: null, drift: [], selectedReportId: "", sampleType: "tank", lab: "auto", busy: false, error: "", message: "", lastText: null, lastFileName: "", lastKind: "" };
     this._icpDashboard = { payload: null, loading: false, error: "", requestId: 0 };
@@ -265,6 +266,7 @@ class OpenReefPanel extends HTMLElement {
         this._refreshAfterAutoReturnIfDue();
         this._updateModeCountdownElements();
         this._feedingRefreshIfDue();
+        this._loadHeaterHealth();
       }, 1000);
     }
     if (!this._pulseKeyHandler) {
@@ -553,6 +555,7 @@ class OpenReefPanel extends HTMLElement {
       if (this._activeTab === "spawning") this._loadSpawnExecStatus(true);
       // Cooling headroom is computed backend-side from the saved bindings/target.
       if (this._coolingEnabled()) this._loadCoolingStatus(true);
+      this._loadHeaterHealth(true);
     } catch (err) {
       this._error = err instanceof Error ? err.message : "Could not save OpenReef";
     } finally {
@@ -1329,6 +1332,15 @@ class OpenReefPanel extends HTMLElement {
       if (action === "spawn-exec-resume") this._spawnExecResume();
       if (action === "spawn-exec-refresh") this._loadSpawnExecStatus(true);
       if (action === "cooling-refresh") this._loadCoolingStatus(true);
+      if (action === "heater-refresh") this._loadHeaterHealth(true);
+      if (action === "heater-respond") this._heaterRespond(id, target.dataset.response, target.dataset.load, target.dataset.role);
+      if (action === "heater-reset") { this._heaterReset = { id, action: target.dataset.response }; this._render(); }
+      if (action === "heater-reset-cancel") { this._heaterReset = null; this._render(); }
+      if (action === "heater-reset-confirm" && this._heaterReset) {
+        const reset = this._heaterReset;
+        this._heaterReset = null;
+        this._heaterRespond(reset.id, reset.action);
+      }
       if (action === "coral-open") { this._coralDialogOpen = true; this._render(); }
       if (action === "coral-close") { this._coralDialogOpen = false; this._render(); }
       if (action === "nps-library-open") { this._npsLibraryDialogOpen = true; this._render(); }
@@ -2499,6 +2511,10 @@ class OpenReefPanel extends HTMLElement {
           this._config.equipment[id].allowAutoRestart = displayWavemaker ? false : true;
           this._config.equipment[id].wavemakerNotifications = displayWavemaker;
         }
+      }
+      if (scope === "heater-monitor") {
+        const item = this._config.equipment[id];
+        item.heaterMonitor = { mode: "off", climateEntity: "", ...(item.heaterMonitor || {}), [field]: value };
       }
       if (scope === "camera") {
         this._config.cameras = this._config.cameras || {};
@@ -21740,6 +21756,11 @@ const rigSteps = [
     // (dew point vs tank); the card reads the cached status only.
     const cooling = this._coolingInsightCard();
     if (cooling) push(cooling.key, cooling.kicker, cooling.title, cooling.detail, cooling.status);
+    this._loadHeaterHealth();
+    for (const [id, item] of Object.entries(this._heaterHealth?.status?.equipment || {})) {
+      if (item.issue) push(`heater-${id}`, `Heater health · ${item.label}`, item.issue.title,
+        `${item.issue.message} Open Energy → Heater health.`, item.issue.severity);
+    }
 
     // Reef health: the top deduction, or the clean sheet.
     try {
@@ -29841,6 +29862,7 @@ const rigSteps = [
           ${this._missionSummaryCard("Monthly cost", monthlyCost, "at the current tariff", monthly && this._config.energy[monthly[1]] ? "ok" : "unknown", "energy")}
         </div>
         ${hasEnergyMappings ? "" : this._emptyState("Energy is not mapped yet", "Map daily, weekly, monthly, or per-device energy entities in Settings. OpenReef will show blanks until then.", "settings", "Map energy")}
+        ${this._heaterHealthCards()}
         <div class="grid three">
           ${totals.map(([label, energyKey, costKey]) => this._energyTotalCard(label, energyKey, costKey)).join("")}
         </div>
@@ -29852,6 +29874,107 @@ const rigSteps = [
         </div>
       </section>
     `;
+  }
+
+  _heaterMonitoredEquipment() {
+    return Object.entries(this._config?.equipment || {}).filter(([, item]) =>
+      ["heater", "shared_fan", "shared_chiller"].includes(item.heaterMonitor?.mode));
+  }
+
+  async _loadHeaterHealth(force = false) {
+    if (!this._heaterMonitoredEquipment().length || !this._hass) return;
+    const state = this._heaterHealth ||= { status: null, at: 0, loading: false, error: "" };
+    if (state.loading || (!force && Date.now() - state.at < 60000)) return;
+    state.loading = true;
+    state.at = Date.now();
+    try {
+      state.status = await this._callWS({ type: "openreef/heater_health" });
+      state.error = "";
+    } catch (err) {
+      state.error = err?.message || "Could not load heater monitoring";
+    } finally {
+      state.loading = false;
+      this._render();
+    }
+  }
+
+  async _heaterRespond(id, action, loadId = "", role = "") {
+    if (this._configDirty) {
+      this._error = "Save your settings before responding to heater monitoring.";
+      this._render();
+      return;
+    }
+    if (this._heaterHealth?.responding) return;
+    const state = this._heaterHealth ||= { status: null, at: 0, loading: false, error: "" };
+    state.responding = true;
+    try {
+      state.status = await this._callWS({ type: "openreef/heater_health_respond", equipmentId: id, action, loadId, role });
+      state.at = Date.now();
+      state.error = "";
+      this._message = action === "identify" ? "Power pattern identified. Learning continues automatically." :
+        action === "acknowledge" ? "Noted. The reference is preserved and monitoring continues." : "New learning period started. The previous reference is retained.";
+    } catch (err) {
+      state.error = err?.message || "Could not update heater monitoring";
+    } finally {
+      state.responding = false;
+      this._render();
+    }
+  }
+
+  _heaterHealthCards() {
+    const equipment = this._heaterMonitoredEquipment();
+    if (!equipment.length) return `<article class="panel"><h3>Heater health</h3><p>Learn normal heating behaviour and get notified when a check is needed. Supports heaters and shared thermostat supplies.</p><button class="secondary" data-action="tab" data-id="settings">Set up in Equipment</button></article>`;
+    this._loadHeaterHealth();
+    const cache = this._heaterHealth || {};
+    return `<div class="section-head"><div><h3>Heater health</h3><p>Learns during normal use. Monitoring only; your thermostat remains in control.</p></div><button class="secondary compact-button" data-action="heater-refresh">Refresh</button></div>
+      ${cache.error ? `<p class="error" role="alert">Monitoring status unavailable: ${this._escape(cache.error)}</p>` : ""}
+      <div class="grid two">${equipment.map(([id, equipmentItem]) => {
+        const item = !cache.error && cache.status?.equipment?.[id];
+        const e = (value) => this._escape(String(value ?? ""));
+        if (!item) return `<article class="panel"><h4>${e(equipmentItem.label || id)}</h4><p>${this._configDirty ? "Save settings to start learning." : "Waiting for monitoring status. No health result available yet."}</p></article>`;
+        const level = item.status === "critical" ? "critical" : item.status === "check" ? "warning" : item.status === "monitoring" ? "ok" : "unknown";
+        const labels = { critical: "Urgent check", check: "Input needed", monitoring: "Monitoring", learning: "Learning", paused: "Paused", waiting: "Waiting for normal use" };
+        const loads = (item.loads || []).filter((load) => !load.role && !load.ambiguous);
+        const disabled = cache.responding ? "disabled" : "";
+        const reset = this._heaterReset?.id === id ? this._heaterReset : null;
+        return `<article class="panel stat-accent heater-health-card ${level}">
+          <div class="card-head"><h4>${e(item.label)}</h4><span class="pill ${level}">${e(labels[item.status] || "Unknown")}</span></div>
+          <p><strong>${e({ heating: "Heating", cooling: "Cooling", idle: "Standby", uncertain: "Unassigned power pattern", unknown: "Waiting for readings" }[item.current] || "Unknown")}</strong>${item.watts != null ? ` · ${e(item.watts.toFixed(1))} W` : ""}${item.source === "inferred" ? " · inferred" : ""}</p>
+          <p>${e(item.reason)}</p>
+          ${item.issue ? `<div class="notice ${level}" role="status"><strong>${e(item.issue.title)}</strong><p>${e(item.issue.message)}</p></div>` : ""}
+          <div class="energy-metrics">
+            <div><span>Active power vs reference</span><strong>${item.powerPercent == null ? "—" : `${e(item.powerPercent)}%`}</strong></div>
+            <div><span>Heating time / observed time</span><strong>${item.heatingLoadPercent == null ? "—" : `${e(item.heatingLoadPercent)}%`}</strong></div>
+          </div>
+          <details><summary>Learning and energy details</summary>
+          <p class="hint">${item.baselineReady ? "Reference established" : `${e(item.cycles)} complete reference cycles · needs at least ${e(item.cyclesNeeded)} across ${e(item.minimumDays)} days`}. Power percentage is a comparison, not efficiency or remaining life.</p>
+          <p class="hint">Past 24 hours: ${e(item.coverageHours)} hours observed · estimated heating ${e(item.heatingWhEstimate)} Wh${item.mode !== "heater" ? ` · estimated cooling ${e(item.coolingWhEstimate)} Wh` : ""}${item.unassignedWhEstimate ? ` · unassigned ${e(item.unassignedWhEstimate)} Wh` : ""}. Gaps are excluded.</p>
+          ${item.mode !== "heater" && !item.coolingObserved ? `<p class="hint">Cooling: waiting for normal use or identification. Heater learning continues independently.</p>` : ""}
+          </details>
+          ${loads.map((load) => `<div class="mapping-card"><p><strong>What uses about ${e(load.watts)} W on this supply?</strong></p><div class="button-row">${[["heating", "Heater"], ["cooling", "Cooling equipment"], ["idle", "Controller standby"]].map(([role, label]) => `<button class="secondary compact-button" ${disabled} data-action="heater-respond" data-response="identify" data-id="${e(id)}" data-load="${e(load.id)}" data-role="${role}">${label}</button>`).join("")}</div><p class="hint">Choose only if you recognise it. Unassigned readings stay out of the reference.</p></div>`).join("")}
+          <details><summary>Equipment or settings changed?</summary><div class="button-row">
+            <button class="secondary compact-button" ${disabled} data-action="heater-reset" data-response="replaced" data-id="${e(id)}">Heater replaced</button>
+            <button class="secondary compact-button" ${disabled} data-action="heater-reset" data-response="settings_changed" data-id="${e(id)}">Thermostat / probe changed</button>
+            ${item.issue ? `<button class="secondary compact-button" ${disabled} data-action="heater-respond" data-response="acknowledge" data-id="${e(id)}">Nothing changed — keep monitoring</button>` : ""}
+          </div></details>
+          ${reset ? `<div class="notice"><p>${reset.action === "replaced" ? "Start learning the replacement heater? Heating patterns will be relearned; identified cooling patterns remain." : "Start a new temperature-response reference for the changed settings? Identified power patterns remain."} The previous reference is retained.</p><div class="button-row"><button ${disabled} data-action="heater-reset-confirm">Start new learning period</button><button class="secondary" data-action="heater-reset-cancel">Cancel</button></div></div>` : ""}
+        </article>`;
+      }).join("")}</div>`;
+  }
+
+  _heaterMonitorSettings(id, item) {
+    const cfg = item.heaterMonitor || {};
+    const e = (value) => this._escape(String(value ?? ""));
+    const open = (cfg.mode && cfg.mode !== "off") || item.type === "heater" || /heater|inkbird|thermostat/i.test(item.label || "");
+    return `<details class="mapping-card entity-card heater-health-settings" ${open ? "open" : ""}><summary>Heater health monitoring</summary>
+      <p class="muted">Choose what this power monitor measures once. OpenReef learns in the background and notifies you when input is needed.</p>
+      <label>This power monitor measures<select data-scope="heater-monitor" data-id="${e(id)}" data-field="mode">
+        ${[["off", "Monitoring off"], ["heater", "Heater only (with or without a thermostat)"], ["shared_fan", "Thermostat + heater + cooling fan"], ["shared_chiller", "Thermostat + heater + chiller"]].map(([value, label]) => `<option value="${value}" ${(cfg.mode || "off") === value ? "selected" : ""}>${label}</option>`).join("")}
+      </select></label>
+      <p class="hint">Uses this equipment’s Power mapping and the tank and room temperature sensors in Settings. A shared plug must supply only the thermostat and its heating/cooling equipment. Arming is not required.</p>
+      <details><summary>Connected thermostat (optional)</summary><label>Home Assistant climate entity<input data-scope="heater-monitor" data-id="${e(id)}" data-field="climateEntity" value="${e(cfg.climateEntity || "")}" placeholder="climate.aquarium"></label><p class="hint">If it reports its heating/cooling action, OpenReef can identify loads automatically. Otherwise you may be asked to identify a power pattern once.</p></details>
+      <p class="hint">Save settings, then view learning and respond to prompts in Energy → Heater health. Phone notifications use your existing mode notification target; prompts also appear in Home Assistant.</p>
+    </details>`;
   }
 
   _energyTotalCard(label, energyKey, costKey) {
@@ -35209,6 +35332,7 @@ const rigSteps = [
                 </div>
               ` : `<p class="hint">${optionalMapped ? `${optionalMapped} optional energy field${optionalMapped === 1 ? "" : "s"} mapped.` : "No optional energy fields mapped yet."}</p>`}
             </section>
+            ${this._heaterMonitorSettings(id, item)}
             <section class="mapping-card entity-card wavemaker-safety-card">
               <div class="mapping-head">
                 <div>
@@ -36678,6 +36802,14 @@ ${parts.buttons}
         .eyebrow, .muted, .hint, small, .topbar p, .section-head p, .row span { color: #8da2ba; }
         .eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
         .actions, .button-row, .quick-add, .wizard-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+        .panel.heater-health-card { display: grid; gap: 12px; align-content: start; color: #e5edf5; }
+        .heater-health-card p, .heater-health-settings p { line-height: 1.45; }
+        .heater-health-card .notice { margin: 0; color: #e5edf5; }
+        .heater-health-card .notice p { margin-top: 6px; }
+        .heater-health-card .energy-metrics { margin: 0; }
+        .heater-health-card .mapping-card { display: grid; gap: 10px; }
+        .heater-health-card details > :not(summary), .heater-health-settings > :not(summary) { margin-top: 12px; }
+        .heater-health-card summary, .heater-health-settings summary { cursor: pointer; color: #cbd5e1; line-height: 1.5; }
         .coral-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-top: 10px; border: 1px solid var(--openreef-border, rgba(127, 184, 216, .2)); border-radius: 12px; }
         .coral-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
         .coral-row-main strong { font-size: .95rem; }
