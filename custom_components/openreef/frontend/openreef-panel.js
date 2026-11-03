@@ -8472,6 +8472,10 @@ class OpenReefPanel extends HTMLElement {
       this._feedingDetailsOpen ||= {};
       this._feedingDetailsOpen[detail.dataset.feedingDetails] = detail.open;
     }
+    for (const detail of this.shadowRoot?.querySelectorAll?.("[data-heater-details]") || []) {
+      this._heaterDetailsOpen ||= {};
+      this._heaterDetailsOpen[detail.dataset.heaterDetails] = detail.open;
+    }
     if (!this._config) {
       this._renderLoading();
       return;
@@ -29921,6 +29925,12 @@ const rigSteps = [
     }
   }
 
+  _heaterDetailsAttributes(id, section, expanded = false) {
+    const key = JSON.stringify([id, section]);
+    const open = this._heaterDetailsOpen?.[key] ?? expanded;
+    return `data-heater-details="${this._escape(key)}"${open ? " open" : ""}`;
+  }
+
   _heaterHealthCards() {
     const equipment = this._heaterMonitoredEquipment();
     if (!equipment.length) return `<article class="panel"><h3>Heater health</h3><p>Learn normal heating behaviour and get notified when a check is needed. Supports heaters and shared thermostat supplies.</p><button class="secondary" data-action="tab" data-id="settings">Set up in Equipment</button></article>`;
@@ -29946,13 +29956,13 @@ const rigSteps = [
             <div><span>Active power vs reference</span><strong>${item.powerPercent == null ? "—" : `${e(item.powerPercent)}%`}</strong></div>
             <div><span>Heating time / observed time</span><strong>${item.heatingLoadPercent == null ? "—" : `${e(item.heatingLoadPercent)}%`}</strong></div>
           </div>
-          <details><summary>Learning and energy details</summary>
+          <details ${this._heaterDetailsAttributes(id, "learning")}><summary>Learning and energy details</summary>
           <p class="hint">${item.baselineReady ? "Reference established" : `${e(item.cycles)} complete reference cycles · needs at least ${e(item.cyclesNeeded)} across ${e(item.minimumDays)} days`}. Power percentage is a comparison, not efficiency or remaining life.</p>
           <p class="hint">Past 24 hours: ${e(item.coverageHours)} hours observed · estimated heating ${e(item.heatingWhEstimate)} Wh${item.mode !== "heater" ? ` · estimated cooling ${e(item.coolingWhEstimate)} Wh` : ""}${item.unassignedWhEstimate ? ` · unassigned ${e(item.unassignedWhEstimate)} Wh` : ""}. Gaps are excluded.</p>
           ${item.mode !== "heater" && !item.coolingObserved ? `<p class="hint">Cooling: waiting for normal use or identification. Heater learning continues independently.</p>` : ""}
           </details>
           ${loads.map((load) => `<div class="mapping-card"><p><strong>What uses about ${e(load.watts)} W on this supply?</strong></p><div class="button-row">${[["heating", "Heater"], ["cooling", "Cooling equipment"], ["idle", "Controller standby"]].map(([role, label]) => `<button class="secondary compact-button" ${disabled} data-action="heater-respond" data-response="identify" data-id="${e(id)}" data-load="${e(load.id)}" data-role="${role}">${label}</button>`).join("")}</div><p class="hint">Choose only if you recognise it. Unassigned readings stay out of the reference.</p></div>`).join("")}
-          <details><summary>Equipment or settings changed?</summary><div class="button-row">
+          <details ${this._heaterDetailsAttributes(id, "changes")}><summary>Equipment or settings changed?</summary><div class="button-row">
             <button class="secondary compact-button" ${disabled} data-action="heater-reset" data-response="replaced" data-id="${e(id)}">Heater replaced</button>
             <button class="secondary compact-button" ${disabled} data-action="heater-reset" data-response="settings_changed" data-id="${e(id)}">Thermostat / probe changed</button>
             ${item.issue ? `<button class="secondary compact-button" ${disabled} data-action="heater-respond" data-response="acknowledge" data-id="${e(id)}">Nothing changed — keep monitoring</button>` : ""}
@@ -29966,13 +29976,13 @@ const rigSteps = [
     const cfg = item.heaterMonitor || {};
     const e = (value) => this._escape(String(value ?? ""));
     const open = (cfg.mode && cfg.mode !== "off") || item.type === "heater" || /heater|inkbird|thermostat/i.test(item.label || "");
-    return `<details class="mapping-card entity-card heater-health-settings" ${open ? "open" : ""}><summary>Heater health monitoring</summary>
+    return `<details class="mapping-card entity-card heater-health-settings" ${this._heaterDetailsAttributes(id, "setup", open)}><summary>Heater health monitoring</summary>
       <p class="muted">Choose what this power monitor measures once. OpenReef learns in the background and notifies you when input is needed.</p>
       <label>This power monitor measures<select data-scope="heater-monitor" data-id="${e(id)}" data-field="mode">
         ${[["off", "Monitoring off"], ["heater", "Heater only (with or without a thermostat)"], ["shared_fan", "Thermostat + heater + cooling fan"], ["shared_chiller", "Thermostat + heater + chiller"]].map(([value, label]) => `<option value="${value}" ${(cfg.mode || "off") === value ? "selected" : ""}>${label}</option>`).join("")}
       </select></label>
       <p class="hint">Uses this equipment’s Power mapping and the tank and room temperature sensors in Settings. A shared plug must supply only the thermostat and its heating/cooling equipment. Arming is not required.</p>
-      <details><summary>Connected thermostat (optional)</summary><label>Home Assistant climate entity<input data-scope="heater-monitor" data-id="${e(id)}" data-field="climateEntity" value="${e(cfg.climateEntity || "")}" placeholder="climate.aquarium"></label><p class="hint">If it reports its heating/cooling action, OpenReef can identify loads automatically. Otherwise you may be asked to identify a power pattern once.</p></details>
+      <details ${this._heaterDetailsAttributes(id, "thermostat")}><summary>Connected thermostat (optional)</summary><label>Home Assistant climate entity<input data-scope="heater-monitor" data-id="${e(id)}" data-field="climateEntity" value="${e(cfg.climateEntity || "")}" placeholder="climate.aquarium"></label><p class="hint">If it reports its heating/cooling action, OpenReef can identify loads automatically. Otherwise you may be asked to identify a power pattern once.</p></details>
       <p class="hint">Save settings, then view learning and respond to prompts in Energy → Heater health. Phone notifications use your existing mode notification target; prompts also appear in Home Assistant.</p>
     </details>`;
   }

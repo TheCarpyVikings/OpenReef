@@ -94,4 +94,70 @@ test("failed network fetch is throttled instead of looping on render", async () 
   assertEqual(panel._heaterHealth.error, "Offline");
 });
 
+// Exercise the real full-page render and refresh paths with a minimal DOM. A
+// replacement innerHTML creates new disclosure nodes, as it does in a browser.
+function renderable(panel, content) {
+  let html = "", details = [];
+  const decode = (value) => value.replaceAll("&quot;", '"').replaceAll("&#39;", "'").replaceAll("&amp;", "&");
+  panel.shadowRoot = {
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "[data-heater-details]" ? details.filter((d) => d.dataset.heaterDetails) : [],
+    get innerHTML() { return html; },
+    set innerHTML(value) {
+      html = value;
+      details = [...value.matchAll(/<details\b([^>]*)><summary>([^<]*)<\/summary>/g)].map(([, attrs, title]) => ({
+        title, open: /(?:^|\s)open(?:\s|$)/.test(attrs),
+        dataset: { heaterDetails: decode(attrs.match(/data-heater-details="([^"]*)"/)?.[1] || "") },
+      }));
+    },
+  };
+  panel._config.tank = {};
+  for (const method of ["_styles", "_messages", "_tabs", "_subNav"]) panel[method] = () => "";
+  for (const method of ["_culturesRestoreFormDrafts", "_stopPulseDiagramMotion", "_keepActiveTabInView", "_mountBetaFab"]) panel[method] = () => {};
+  panel._pulseEnabled = () => false;
+  panel._activeContent = content;
+  delete panel._render;
+  panel._render();
+  return (title, index = 0) => details.filter((d) => d.title === title)[index];
+}
+
+test("refresh preserves each heater disclosure independently and respects closing it again", async () => {
+  const panel = await prep();
+  panel._config.equipment = { ...equipment, backup: { ...equipment.heat, label: "Backup" } };
+  const data = { equipment: { heat: snapshot({ cycles: 4 }), backup: snapshot({ label: "Backup" }) } };
+  panel._heaterHealth.status = structuredClone(data);
+  const detail = renderable(panel, () => panel._heaterHealthCards());
+  detail("Learning and energy details").open = true;
+  detail("Equipment or settings changed?", 1).open = true;
+  panel._hass = {};
+  panel._callWS = async () => structuredClone(data);
+  await panel._loadHeaterHealth(true);
+  assert(detail("Learning and energy details").open);
+  assert(!detail("Learning and energy details", 1).open);
+  assert(!detail("Equipment or settings changed?").open);
+  assert(detail("Equipment or settings changed?", 1).open);
+  assert(panel.shadowRoot.innerHTML.includes("4 complete reference cycles"));
+  detail("Learning and energy details").open = false;
+  await panel._heaterRespond("heat", "acknowledge");
+  assert(!detail("Learning and energy details").open);
+  assert(detail("Equipment or settings changed?", 1).open);
+});
+
+test("settings disclosures retain explicit open and closed choices across renders and navigation", async () => {
+  const panel = await prep();
+  const settings = () => panel._heaterMonitorSettings("heat", equipment.heat);
+  const detail = renderable(panel, settings);
+  assert(detail("Heater health monitoring").open);
+  detail("Connected thermostat (optional)").open = true;
+  panel._render();
+  assert(detail("Connected thermostat (optional)").open);
+  detail("Heater health monitoring").open = false;
+  panel._activeContent = () => panel._heaterHealthCards();
+  panel._render();
+  panel._activeContent = settings;
+  panel._render();
+  assert(!detail("Heater health monitoring").open);
+  assert(detail("Connected thermostat (optional)").open);
+});
+
 await runTests();
