@@ -38,6 +38,15 @@ test("confirmed correction sends exact observed timestamps and refreshes saved r
   assert(panel._config.corrected && refreshes === 1 && !panel._npsHatchCorrectionPending, "saved state and fresh forecast");
 });
 
+test("an opened correction remains usable when the live panel rebuilds", async () => {
+  const panel = await makePanel();
+  panel._feedingDetailsOpen = {"hatchery-correction": true};
+  const html = panel._npsHatchCorrectionForm(hatchery());
+  assert(/<details[^>]* open>/.test(html), "keep the correction disclosure open after refresh");
+  assert(html.includes("data-feeding-details=\"hatchery-correction\""), "participate in the panel's disclosure persistence");
+  assert(html.includes("Correct latest harvest"), "keep the correction action available");
+});
+
 test("cancel, demo, unsaved edits and duplicate clicks cannot send a correction", async () => {
   for (const reason of ["cancel", "demo", "dirty", "pending"]) {
     const panel = await makePanel();

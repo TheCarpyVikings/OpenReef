@@ -11765,15 +11765,14 @@ class OpenReefPanel extends HTMLElement {
     const source = vessels.find((v) => v.id === latest?.vesselId);
     const targets = vessels.filter((v) => v.id !== source?.id && v.startedAt);
     if (!source || latest.enriched || !targets.length) return "";
-    return `<details class="nps-hatch-correction">
-      <summary>Logged the latest harvest against the wrong hatchery?</summary>
+    return this._feedingDetails("hatchery-correction", "Logged the latest harvest against the wrong hatchery?", `
       <p>Correct the harvest logged for ${this._escape(source.name)} at ${this._escape(this._formatActivityTime(latest.harvestedAt))}.</p>
       <p>This restores ${this._escape(source.name)}'s previous batch and moves its replacement hatch to the selected hatchery. Food volumes and water use stay unchanged.</p>
       <label>Actual harvested hatchery<select data-nps-hatch-correction-target>
         ${targets.map((v) => `<option value="${this._escape(v.id)}">${this._escape(v.name)}</option>`).join("")}
       </select></label>
       <button class="secondary compact-button" data-action="nps-hatch-correct-vessel"${this._npsHatchCorrectionPending ? " disabled" : ""}>${this._npsHatchCorrectionPending ? "Saving…" : "Correct latest harvest"}</button>
-    </details>`;
+    `);
   }
 
   async _npsHatchCorrectVessel() {
