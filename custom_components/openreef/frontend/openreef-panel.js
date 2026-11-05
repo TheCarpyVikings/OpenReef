@@ -2077,6 +2077,7 @@ class OpenReefPanel extends HTMLElement {
         id ? { type: "openreef/nps_hatch_start", vessel_id: id } : { type: "openreef/nps_hatch_start" },
         "Hatch started — the incubation clock is running.");
       if (action === "nps-hatch-start-earlier") this._npsHatchStartEarlier(id);
+      if (action === "nps-hatch-correct-vessel") this._npsHatchCorrectVessel();
       if (action === "nps-hatch-cancel") this._npsCall(
         id ? { type: "openreef/nps_hatch_cancel", vessel_id: id } : { type: "openreef/nps_hatch_cancel" },
         "Hatch cancelled — the hatcher stands down.");
@@ -11758,6 +11759,60 @@ class OpenReefPanel extends HTMLElement {
     this._npsLoadSummary(true);
   }
 
+  _npsHatchCorrectionForm(hatch) {
+    const latest = hatch.history?.[0];
+    const vessels = Array.isArray(hatch.vessels) ? hatch.vessels : [];
+    const source = vessels.find((v) => v.id === latest?.vesselId);
+    const targets = vessels.filter((v) => v.id !== source?.id && v.startedAt);
+    if (!source || latest.enriched || !targets.length) return "";
+    return `<details class="nps-hatch-correction">
+      <summary>Logged the latest harvest against the wrong hatchery?</summary>
+      <p>Correct the harvest logged for ${this._escape(source.name)} at ${this._escape(this._formatActivityTime(latest.harvestedAt))}.</p>
+      <p>This restores ${this._escape(source.name)}'s previous batch and moves its replacement hatch to the selected hatchery. Food volumes and water use stay unchanged.</p>
+      <label>Actual harvested hatchery<select data-nps-hatch-correction-target>
+        ${targets.map((v) => `<option value="${this._escape(v.id)}">${this._escape(v.name)}</option>`).join("")}
+      </select></label>
+      <button class="secondary compact-button" data-action="nps-hatch-correct-vessel"${this._npsHatchCorrectionPending ? " disabled" : ""}>${this._npsHatchCorrectionPending ? "Saving…" : "Correct latest harvest"}</button>
+    </details>`;
+  }
+
+  async _npsHatchCorrectVessel() {
+    if (this._npsHatchCorrectionPending) return;
+    if (this._nps.demo || this._configDirty) {
+      this._nps.error = this._nps.demo ? "Exit the demo to correct a real batch." : "Save or discard your settings edits before correcting a batch.";
+      this._render();
+      return;
+    }
+    const hatch = this._nps.summary?.hatchery || {};
+    const latest = hatch.history?.[0];
+    const source = hatch.vessels?.find((v) => v.id === latest?.vesselId);
+    const targetId = this.shadowRoot.querySelector("[data-nps-hatch-correction-target]")?.value;
+    const target = hatch.vessels?.find((v) => v.id === targetId);
+    if (!source || !target || target.id === source.id || !target.startedAt) return;
+    const request = {
+      type: "openreef/nps_hatch_correct_vessel", source_vessel_id: source.id, target_vessel_id: target.id,
+      harvested_at: latest.harvestedAt, harvest_started_at: latest.startedAt,
+      source_started_at: source.startedAt || "", target_started_at: target.startedAt,
+    };
+    if (!window.confirm(`Correct the latest harvest from ${source.name} to ${target.name}?\n\n`
+      + `Restore ${source.name}'s batch started ${this._formatActivityTime(latest.startedAt)}.\n`
+      + (source.startedAt ? `Move the replacement start (${this._formatActivityTime(source.startedAt)}) to ${target.name}.\n` : `${target.name} will become idle.\n`)
+      + "The journal duration and reminders will be corrected. No food or water will be added.")) return;
+    this._npsHatchCorrectionPending = true;
+    this._render();
+    try {
+      const result = await this._callWS(request);
+      if (result?.config) this._config = result.config;
+      this._nps.message = `Corrected: ${source.name}'s previous batch is restored; the latest harvest and replacement hatch belong to ${target.name}.`;
+      this._nps.error = "";
+    } catch (err) {
+      this._nps.error = err?.message || "Could not correct the hatchery records. Refresh and try again.";
+    } finally {
+      this._npsHatchCorrectionPending = false;
+    }
+    await this._npsLoadSummary(true);
+  }
+
   async _npsCall(msg, okMessage) {
     if (this._nps.demo) {
       this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
@@ -17397,6 +17452,7 @@ const rigSteps = [
             </tbody>
           </table>
         </div>
+        ${this._npsHatchCorrectionForm(hatch)}
         ${(Array.isArray(hatch.vessels) && hatch.vessels.some((v) => v.learned)
           ? hatch.vessels.filter((v) => v.learned?.available)
               .map((v) => ({ learned: v.learned, name: v.name, egg: (this._npsEggTypes().find((e) => e.id === v.eggType) || {}).name || "cysts" }))

@@ -17894,6 +17894,119 @@ async def websocket_nps_hatch_start(
     _awc_send(connection, msg, hass, config)
 
 
+def _nps_hatch_correct_vessel_apply(
+    config: dict[str, Any], msg: dict[str, Any], now: datetime,
+) -> tuple[str, str] | None:
+    """Reassign the latest misfiled harvest and its replacement hatch together.
+
+    Restore the source's harvested batch, harvest the target's saved batch, and
+    move the source's replacement start to the target. This corrects records;
+    it must never load food, debit water, or operate equipment.
+    """
+    hatchery = config["nps"]["hatchery"]
+    vessels = hatchery["vessels"]
+    source_id, target_id = msg["source_vessel_id"], msg["target_vessel_id"]
+    if source_id == target_id or source_id not in vessels or target_id not in vessels:
+        return "invalid_vessel", "Choose a different existing hatchery."
+    history = hatchery["history"]
+    source, target = vessels[source_id], vessels[target_id]
+    source_state, target_state = source["state"], target["state"]
+    if (not history or history[0]["vesselId"] != source_id
+            or history[0]["harvestedAt"] != msg["harvested_at"]
+            or history[0]["startedAt"] != msg["harvest_started_at"]
+            or source_state["hatchStartedAt"] != msg["source_started_at"]
+            or target_state["hatchStartedAt"] != msg["target_started_at"]):
+        return "hatch_changed", "The batches or latest harvest changed. Refresh before correcting them."
+    row = history[0]
+    old_start = _parse_datetime(row["startedAt"])
+    harvested = _parse_datetime(row["harvestedAt"])
+    target_start = _parse_datetime(target_state["hatchStartedAt"])
+    replacement_start = _parse_datetime(source_state["hatchStartedAt"])
+    if (old_start is None or harvested is None or target_start is None
+            or not old_start <= harvested <= now or target_start > harvested
+            or (source_state["hatchStartedAt"] and (replacement_start is None
+                or not max(old_start, target_start) < replacement_start <= now))):
+        return "invalid_hatch_order", "These batch dates cannot be corrected as a wrong-hatchery harvest."
+    if row.get("enriched") or hatchery["enrichment"]["state"]["startedAt"]:
+        return "enrichment_active", "This correction is available for a plain harvest with no enrichment running."
+
+    replacement = deepcopy(source_state)
+    restored = {"hatchStartedAt": row["startedAt"], "eggType": row["eggType"],
+                "hatchHours": row["plannedHours"], "readyNotifiedAt": ""}
+    row.update({"vesselId": target_id, "startedAt": target_state["hatchStartedAt"],
+                "eggType": target_state["eggType"], "plannedHours": target_state["hatchHours"],
+                "actualHours": round((harvested - target_start).total_seconds() / 3600, 1)})
+    source["state"] = restored
+    replacement["readyNotifiedAt"] = ""
+    target["state"] = replacement
+
+    # Move only the affected chore records; older completions stay with their
+    # physical hatchery. Their timestamps may predate logging after an outage.
+    maintenance = config.get("maintenance") or {}
+    completions = maintenance.setdefault("completions", {})
+    source_tasks = _nps_hatch_task_ids(source_id)
+    target_tasks = _nps_hatch_task_ids(target_id)
+    for old_id, new_id, at in ((source_tasks[0], target_tasks[0], msg["source_started_at"]),
+                               (source_tasks[1], target_tasks[1], msg["harvested_at"])):
+        rows = completions.get(old_id, [])
+        moved = [r for r in rows if at and r.get("source") == MAINTENANCE_SOURCE_HATCHERY
+                 and _parse_datetime(r.get("timestamp")) == _parse_datetime(at)]
+        if moved:
+            completions[old_id] = [r for r in rows if r not in moved]
+            for completion in moved:
+                completion["notes"] = f"Corrected hatchery assignment to {target['name']}"
+                completion["id"] = f"{new_id}:hatch:{completion['timestamp']}"
+                if not any(r.get("timestamp") == completion.get("timestamp") for r in completions.get(new_id, [])):
+                    completions.setdefault(new_id, []).append(completion)
+            completions[new_id].sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+            del completions[new_id][MAINTENANCE_COMPLETIONS_MAX:]
+    for vid in (source_id, target_id):
+        state = vessels[vid]["state"]
+        start_id, _ = _nps_hatch_task_ids(vid)
+        start_task = (maintenance.get("tasks") or {}).get(start_id)
+        if isinstance(start_task, dict):
+            start_task["snoozedUntil"] = None
+            if state["hatchStartedAt"] and not any(
+                    _parse_datetime(r.get("timestamp")) == _parse_datetime(state["hatchStartedAt"])
+                    for r in completions.get(start_id, [])):
+                _nps_hatch_log_completion(maintenance, start_id,
+                    _parse_datetime(state["hatchStartedAt"]), "Restored by hatchery record correction")
+        _nps_hatch_retime_reminders(config, state["hatchHours"], now, vid)
+    _append_activity(config,
+        f"Corrected latest brine harvest from {source['name']} to {target['name']}; "
+        f"restored {source['name']}'s batch and moved its replacement start to {target['name']}", "control")
+    return None
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_hatch_correct_vessel",
+    vol.Required("source_vessel_id"): str,
+    vol.Required("target_vessel_id"): str,
+    vol.Required("harvested_at"): str,
+    vol.Required("harvest_started_at"): str,
+    vol.Required("source_started_at"): str,
+    vol.Required("target_started_at"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_nps_hatch_correct_vessel(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    _nps_hatchery_v2(config)
+    error = _nps_hatch_correct_vessel_apply(config, msg, datetime.now(timezone.utc))
+    if error is not None:
+        connection.send_error(msg["id"], error[0], error[1])
+        return
+    config = await _async_save_config(hass, entry, config)
+    _awc_send(connection, msg, hass, config)
+
+
 @websocket_api.websocket_command({
     vol.Required("type"): "openreef/nps_hatch_clock",
     vol.Optional("hours"): vol.Coerce(float),
@@ -23350,7 +23463,7 @@ async def websocket_nps_summary(
         vessels_payload.append({
             "id": vid, "name": vessel["name"], "volumeL": vessel["volumeL"],
             "eggType": vessel["eggType"], "hatchHours": vessel["hatchHours"],
-            "state": hatch_st,
+            "state": hatch_st, "startedAt": v_state["hatchStartedAt"],
             "guide": nps_engine.cyst_dose_guide(vessel["volumeL"]),
             "cysts": _nps_cysts_payload(vessel, now_utc),
             "learned": nps_engine.learned_hatch_hours(hatchery_cfg["history"], vessel["eggType"], vid),
@@ -28750,6 +28863,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_feeding_food_save)
     websocket_api.async_register_command(hass, websocket_feeding_rotation_save)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
+    websocket_api.async_register_command(hass, websocket_nps_hatch_correct_vessel)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
     websocket_api.async_register_command(hass, websocket_nps_hatch_clock)
     websocket_api.async_register_command(hass, websocket_nps_reservoir_discard)
