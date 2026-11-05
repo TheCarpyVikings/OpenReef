@@ -10,7 +10,7 @@ import traceback
 from datetime import timedelta
 
 from test_cultures import (NOW, REAL, CONF_SETTINGS, _jar, _entry, _config,
-                           _cultures, _iso, cultures, integration,
+                           _cultures, _iso, _culture_light_clock, cultures, integration,
                            FakeConnection, FakeHass, run)
 
 
@@ -336,14 +336,15 @@ def test_phyto_split_refusals_leave_no_ledger_behind():
         integration._mixing_hatchery_debit = real
 
 
+@_culture_light_clock()
 def test_light_tick_only_ever_touches_the_lamp_and_a_refused_refresh_writes_nothing():
     """0.7.208: the plug tick names ONE entity — the lamp's — never the air, never
     a plug in sun mode; a refused refresh leaves every ledger as it found it."""
     from test_cultures import _phyto_jar, _phyto_entry, _cultures
     from _fake_ha import FakeState
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
-    jar = _phyto_jar(started_ago_days=6, lastTint="green")
+    from datetime import timezone
+    now = integration.datetime.now(timezone.utc)
+    jar = _phyto_jar(started_ago_days=6, now=now, lastTint="green")
     jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": ""}
     entry = _phyto_entry(jars={"c1": jar})
     sun = {"next_rising": _iso(now + timedelta(hours=9)), "next_setting": _iso(now + timedelta(hours=23))}
@@ -361,9 +362,9 @@ def test_light_tick_only_ever_touches_the_lamp_and_a_refused_refresh_writes_noth
     run(integration._async_cultures_light_tick(hass, entry, now + timedelta(minutes=200)))
     assert [c for c in hass.services.calls if c.domain == "switch"] == before, "sun mode never switches a plug the keeper turned on"
     # A refused refresh: B is not a backup, then A is not ready — nothing moves.
-    b = _phyto_jar(started_ago_days=20, lastTint="green", workingL=1.0)
+    b = _phyto_jar(started_ago_days=20, now=now, lastTint="green", workingL=1.0)
     b["name"], b["volumeL"] = "Nanno B", 1.0
-    entry = _phyto_entry(jars={"c1": _phyto_jar(started_ago_days=20, lastTint="pale", lastHarvestAt=_iso(REAL - timedelta(days=1))), "c2": b})
+    entry = _phyto_entry(jars={"c1": _phyto_jar(started_ago_days=20, now=now, lastTint="pale", lastHarvestAt=_iso(now - timedelta(days=1))), "c2": b})
     hass = FakeHass(entries=[entry])
     conn = FakeConnection()
     snapshot = copy.deepcopy((_config(entry)["nps"]["cultures"]["jars"], _config(entry)["consumables"]["products"]))

@@ -18,7 +18,9 @@ from __future__ import annotations
 import copy
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -2147,6 +2149,22 @@ def _local(h, m=0, day=21):
     return datetime(2026, 9, day, h, m, tzinfo=_TZ1)
 
 
+@contextmanager
+def _culture_light_clock():
+    """Keep evening lamp scenarios before latestOff, whatever the host clock/zone."""
+    now = _local(19)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+
+    with patch.object(integration, "datetime", Clock), patch.object(
+        integration.dt_util, "as_local", lambda stamp: stamp.astimezone(_TZ1)
+    ):
+        yield
+
+
 def test_sun_day_reads_the_two_future_stamps_by_day_and_by_night():
     day = cultures.sun_day(_sun(_local(14)), _local(14))
     assert day["available"] and day["isDay"] and day["daylightH"] == 12.4
@@ -2328,12 +2346,13 @@ def test_risk_line_carries_the_light_the_f2_the_cycles_the_backup_and_the_starte
     assert p["lightOn"] is False and p["lightWatch"] and p["backup"] and p["refreshHot"]
 
 
+@_culture_light_clock()
 def test_light_tick_runs_the_plug_from_sunset_banks_the_hours_and_writes_the_day_row():
-    now = datetime.now(timezone.utc)
+    now = integration.datetime.now(timezone.utc)
     now_local = integration.dt_util.as_local(now)
     # Sunset an hour ago, 14 h of sun today → 2 h of lamp: the window is open now.
     sun = {"state": "below_horizon", "next_rising": _iso(now + timedelta(hours=9)), "next_setting": _iso(now + timedelta(hours=23))}
-    jar = _phyto_jar(started_ago_days=5, lastTint="green")
+    jar = _phyto_jar(started_ago_days=5, now=now, lastTint="green")
     jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": ""}
     entry = _phyto_entry(jars={"c1": jar})
     hass = FakeHass(states={"switch.lamp": "off", "sun.sun": FakeState("below_horizon", {"next_rising": sun["next_rising"], "next_setting": sun["next_setting"]})},
@@ -2518,9 +2537,10 @@ def test_ws_apply_learned_moves_the_split_interval_and_switches_to_daily():
     assert conn.errors[-1].code == "unknown_field"
 
 
+@_culture_light_clock()
 def test_ws_summary_reads_the_vessel_sensor_the_sun_and_the_lamp():
-    now = datetime.now(timezone.utc)
-    jar = _phyto_jar(started_ago_days=12, lastTint="green")
+    now = integration.datetime.now(timezone.utc)
+    jar = _phyto_jar(started_ago_days=12, now=now, lastTint="green")
     jar["light"] = {"mode": "sun+lamp", "switchEntity": "switch.lamp", "onAt": "07:00", "latestOff": "00:00", "tempEntity": "sensor.nanno_water"}
     entry = _phyto_entry(jars={"c1": jar}, maintenance={"tasks": {}, "completions": {}, "reminders": {"enabled": True, "notifyTarget": "mobile_app_phone"}})
     cfg = _config(entry)
