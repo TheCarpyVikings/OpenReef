@@ -981,6 +981,22 @@ test("the hand-fed brine container joins the diagram with no pipework", async ()
   } finally { restore(); }
 });
 
+test("fresh brine can be discarded and harvest recovery appears on the container card", async () => {
+  const panel = await npsPanel();
+  panel._nps.summary.hatchery = v2HatcherySummary({
+    reservoir: {volumeMl: 750, remainingMl: 250, mixedAt: NOW, freshness: {status: "fresh", hoursLeft: 24}},
+    history: [{vesselId: "v1", startedAt: NOW, harvestedAt: NOW}],
+    harvestRepair: {canUndo: false, canCorrectEmpty: true, mixedAt: NOW, undoReason: "Earlier records unavailable."},
+  });
+  let html = panel._hatcheryTab();
+  assert(html.includes("I emptied it — discard remaining brine"), "discard is available before staleness");
+  assert(html.includes("Only log this after physically emptying"), "explain what the discard records");
+  assert(html.includes("Correct or undo latest harvest") && html.includes("I emptied the container before this harvest"), "current-record correction is discoverable");
+  panel._nps.summary.hatchery.reservoir.remainingMl = 0;
+  html = panel._hatcheryTab();
+  assert(!html.includes("I emptied it — discard remaining brine"), "no discard for an empty container");
+});
+
 test("settings carry the vessel editor with the researched presets", async () => {
   const restore = freezeTime(NOW);
   try {

@@ -2073,6 +2073,9 @@ class OpenReefPanel extends HTMLElement {
       if (action === "nps-log-event") { this._nps.logOpen = this._nps.logOpen === id ? "" : id; this._render(); }
       if (action === "nps-refresh") this._npsLoadSummary(true);
       if (action === "nps-hatch-loaded") this._npsHatchLoaded(id);
+      if (action === "nps-hatch-repair-review") this._npsHarvestRepairBegin(id);
+      if (action === "nps-hatch-repair-cancel") { this._npsHarvestRepairReview = ""; this._render(); }
+      if (action === "nps-hatch-repair-save") this._npsHarvestRepair(id);
       if (action === "nps-hatch-start") this._npsCall(
         id ? { type: "openreef/nps_hatch_start", vessel_id: id } : { type: "openreef/nps_hatch_start" },
         "Hatch started — the incubation clock is running.");
@@ -11759,6 +11762,72 @@ class OpenReefPanel extends HTMLElement {
     this._npsLoadSummary(true);
   }
 
+  _npsHarvestRepairBegin(action) {
+    const hatch = this._nps.summary?.hatchery || {};
+    this._npsHarvestRepairReview = {action, latest: {...hatch.history?.[0]}, mixedAt: hatch.harvestRepair?.mixedAt};
+    this._render();
+  }
+
+  _npsHarvestRepairForm(hatch) {
+    const latest = hatch.history?.[0];
+    const repair = hatch.harvestRepair;
+    if (!latest || !repair) return "";
+    const name = hatch.vessels?.find((v) => v.id === latest.vesselId)?.name || latest.vesselId;
+    const at = this._formatActivityTime(latest.harvestedAt);
+    const review = this._npsHarvestRepairReview;
+    const pending = this._npsHarvestRepairPending;
+    const empty = review?.action === "emptied";
+    const available = (empty ? repair.canCorrectEmpty : repair.canUndo)
+      && review?.latest?.harvestedAt === latest.harvestedAt && review?.latest?.startedAt === latest.startedAt
+      && review?.latest?.vesselId === latest.vesselId && review?.mixedAt === repair.mixedAt;
+    const confirmation = review && available ? `
+      <p>${empty
+        ? `Confirm that you physically emptied the old brine before harvesting ${this._escape(name)}. The handling clock will start from ${this._escape(at)}, when that harvest was logged. Recorded volume and water use stay unchanged.`
+        : `Undo the harvest from ${this._escape(name)} at ${this._escape(at)}? This restores its previous batch, container contents and water accounting. You can then log a discard and harvest again.`}</p>
+      <div class="button-row"><button class="secondary compact-button" data-action="nps-hatch-repair-save" data-id="${empty ? "emptied" : "undo"}"${pending ? " disabled" : ""}>${pending ? "Saving…" : empty ? "Yes, I emptied it — correct the clock" : "Yes, undo this harvest"}</button>
+      <button class="secondary compact-button" data-action="nps-hatch-repair-cancel"${pending ? " disabled" : ""}>Cancel</button></div>` : `
+      <p>Latest harvest: ${this._escape(name)} · ${this._escape(at)}.</p>
+      ${repair.canCorrectEmpty ? '<button class="secondary compact-button" data-action="nps-hatch-repair-review" data-id="emptied">I emptied the container before this harvest</button>' : ""}
+      ${repair.canUndo ? '<button class="secondary compact-button" data-action="nps-hatch-repair-review" data-id="undo">Undo latest harvest</button>' : `<small class="muted">${this._escape(repair.undoReason || "Undo is unavailable for this harvest.")}</small>`}`;
+    return this._feedingDetails("hatchery-harvest-repair", "Correct or undo latest harvest", confirmation);
+  }
+
+  async _npsHarvestRepair(action) {
+    if (this._npsHarvestRepairPending) return;
+    if (this._nps.demo || this._configDirty) {
+      this._nps.error = this._nps.demo ? "Exit the demo to correct a real harvest." : "Save or discard your settings edits before correcting a harvest.";
+      this._render();
+      return;
+    }
+    const hatch = this._nps.summary?.hatchery || {};
+    const latest = hatch.history?.[0];
+    const repair = hatch.harvestRepair || {};
+    const review = this._npsHarvestRepairReview;
+    if (!latest || review?.action !== action
+        || review.latest.harvestedAt !== latest.harvestedAt || review.latest.startedAt !== latest.startedAt
+        || review.latest.vesselId !== latest.vesselId || review.mixedAt !== repair.mixedAt
+        || !(action === "emptied" ? repair.canCorrectEmpty : action === "undo" && repair.canUndo)) return;
+    this._npsHarvestRepairPending = true;
+    this._render();
+    try {
+      const result = await this._callWS({type: "openreef/nps_harvest_repair", action,
+        vessel_id: latest.vesselId, harvested_at: latest.harvestedAt,
+        started_at: latest.startedAt, mixed_at: repair.mixedAt || ""});
+      if (result?.config) this._config = result.config;
+      this._nps.message = action === "emptied"
+        ? "Corrected — the container clock now starts at the logged harvest time."
+        : "Harvest undone — the previous batch and container records are restored. Log the discard before harvesting again.";
+      this._nps.error = "";
+      this._npsHarvestRepairReview = "";
+      if (this._feedingUi) { this._feedingUi.at = 0; this._feedingLoad(true); }
+    } catch (err) {
+      this._nps.error = err?.message || "Could not correct the harvest. Refresh and try again.";
+    } finally {
+      this._npsHarvestRepairPending = false;
+    }
+    await this._npsLoadSummary(true);
+  }
+
   _npsHatchCorrectionForm(hatch) {
     const latest = hatch.history?.[0];
     const vessels = Array.isArray(hatch.vessels) ? hatch.vessels : [];
@@ -12528,8 +12597,7 @@ class OpenReefPanel extends HTMLElement {
   async _npsHatchLoaded(vesselId) {
     // Works with or without a linked pump — hand-dosers still get the
     // freshness/prime clocks from the hatchery's own container stamp.
-    // ORDER MATTERS: the harvested cancel runs FIRST so the stale hard gate
-    // can refuse before any freshness clock is touched.
+    // The server owns freshness, including retaining the older age on top-up.
     const cid = this._config?.nps?.feedExchange?.channelId;
     if (this._nps.demo) {
       this._nps.message = "Demo view — the buttons are for show. Exit the demo to run the real thing.";
@@ -12540,12 +12608,11 @@ class OpenReefPanel extends HTMLElement {
       const call = { type: "openreef/nps_hatch_cancel", harvested: true };
       if (vesselId) call.vessel_id = vesselId;
       await this._callWS(call);
-      if (cid) await this._callWS({ type: "openreef/dosing_mark_refreshed", channel_id: cid });
       const join = this._nps.summary?.hatchery?.enrichment?.join || {};
       this._nps.message = join.active
         ? "Hatch loaded into the running soak — the older portion keeps its clock, the newest nauplii get the soak that remains; the hatcher stands down."
         : cid
-          ? "Hatch loaded — freshness and prime clocks restarted; the hatcher stands down."
+          ? "Hatch loaded — the container ledger is updated; any older brine keeps its clock."
           : "Hatch loaded — the freshness clock is running; hand-dose from the container and it keeps count.";
       this._nps.error = "";
     } catch (err) {
@@ -14514,6 +14581,8 @@ class OpenReefPanel extends HTMLElement {
       ${staleGateLine ? `<div class="feeding-alerts"><small>${staleGateLine}</small></div>` : ""}
       ${this._feedingActions(hatchButtons, ["nps-hand-feed"])}
       ${this._feedingDetails("hatchery-container-care", "Refrigerate, enrich & batch details", `<small>${hatchReservoirLine}</small>${enrichedShelfLine ? `<small>${enrichedShelfLine}</small>` : ""}<div class="button-row">${fridgeButton}</div>${this._feedingActions(hatchButtons, ["nps-enrich"])}`)}
+      ${!containerStale && Number(reservoirSum.remainingMl) > 0 ? this._feedingDetails("hatchery-discard", "Discard remaining brine", '<p>Only log this after physically emptying the container. This clears its recorded contents and handling clock.</p><button class="secondary compact-button" data-action="nps-discard-brine">I emptied it — discard remaining brine</button>') : ""}
+      ${this._npsHarvestRepairForm(hatch)}
     </article>`;
     return `
       <section class="feeding-section feeding-page">

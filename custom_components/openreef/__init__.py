@@ -8,6 +8,8 @@ import binascii
 import logging
 import math
 import functools
+import hashlib
+import json
 import re
 import uuid
 from collections.abc import Iterable
@@ -1484,6 +1486,28 @@ def _normalise_cultures(raw: Any) -> dict[str, Any]:
     }
 
 
+def _normalise_harvest_undo(raw: Any) -> dict[str, Any]:
+    """One bounded, server-owned checkpoint; never nest previous checkpoints."""
+    if not isinstance(raw, dict) or raw.get("version") != 1:
+        return {}
+    if not isinstance(raw.get("before"), dict) or not re.fullmatch(r"[0-9a-f]{64}", str(raw.get("after") or "")):
+        return {}
+    before = raw["before"]
+    if (not all(isinstance(before.get(key), dict) for key in ("state", "reservoir", "container"))
+            or not isinstance(before.get("history"), list)):
+        return {}
+    try:
+        if len(json.dumps(raw)) > 64000:
+            return {}
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    return {"version": 1, "vesselId": _awc_str(raw.get("vesselId"), 24),
+            "harvestedAt": _awc_str(raw.get("harvestedAt"), 40),
+            "after": str(raw["after"]),
+            "before": {key: deepcopy(before.get(key)) for key in
+                       ("state", "reservoir", "container", "history", "mixingLitres")}}
+
+
 def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, Any]:
     """Hatchery v2 (doc §9): vessels with per-BATCH egg/hours stamps, the brine
     dosing-container ledger, hatch history, hand-feed defaults, temp sensor.
@@ -1648,6 +1672,7 @@ def _normalise_hatchery(raw: Any, default_enabled: bool = False) -> dict[str, An
         "fridgeBottle": fridge_bottle,
         "enrichment": enrichment,
         "history": history,
+        "harvestUndo": _normalise_harvest_undo(raw.get("harvestUndo")),
         "handFeed": {
             "defaultDoseMl": _awc_num(raw_hand.get("defaultDoseMl"), 30, 1, 1000),
             "feedsPerDay": _awc_num(raw_hand.get("feedsPerDay"), 2, 1, 24),
@@ -9278,6 +9303,7 @@ def _nps_preserve_runtime(stored: Any, incoming: dict[str, Any]) -> None:
                         dst_enrich["state"] = deepcopy(src_enrich["state"])
                     if isinstance(src_hatchery.get("history"), list):
                         dst_hatchery["history"] = deepcopy(src_hatchery["history"])
+                    dst_hatchery["harvestUndo"] = deepcopy(src_hatchery.get("harvestUndo") or {})
 
             # Live cultures: per-jar state stamps + history and the bottle's
             # level/stamp are written only by the cultures WS actions. Names,
@@ -17628,6 +17654,8 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
     right then). ``harvested``: 'Hatched & loaded' — the harvest chore is done,
     log it. ``cancelled``: the batch was abandoned — drop a harvest snooze that
     now points at a hatch that will never come ripe.
+    ``corrected``: recompute an idle vessel's next start after fixing the
+    container clock, without logging another harvest completion.
 
     Only touches tasks the user has actually added (the 'Add hatchery
     reminders' button); config-only, callers save.
@@ -17658,8 +17686,8 @@ def _nps_hatch_sync_reminders(config: dict[str, Any], now: datetime, event: str,
         if isinstance(harvest_task, dict):
             harvest_task["snoozedUntil"] = (
                 ready_at.isoformat() if ready_at is not None and ready_at > now else None)
-    elif event == "harvested":
-        if isinstance(harvest_task, dict):
+    elif event in ("harvested", "corrected"):
+        if event == "harvested" and isinstance(harvest_task, dict):
             _nps_hatch_log_completion(
                 maintenance, harvest_id, now,
                 f"Logged automatically — 'Hatched & loaded' for {vessel_name} on the NPS tab",
@@ -18134,6 +18162,147 @@ async def websocket_nps_hatch_cancel(
         connection.send_error(msg["id"], error[0], error[1])
         return
     config = await _async_save_config(hass, entry, config)
+    _async_kick_dosing_sync(hass, entry)
+    _awc_send(connection, msg, hass, config)
+
+
+_NPS_CONTAINER_RUNTIME = ("remainingMl", "mixedAt", "lastLoadEnriched", "enrichedAt", "fridgeSavedH")
+
+
+def _nps_harvest_guard(config: dict[str, Any], vessel_id: str) -> str:
+    """Fingerprint the ledgers an undo must not overwrite after another action."""
+    hatch = config["nps"]["hatchery"]
+    mixing = {"mixingStation": deepcopy(_mixing_cfg(config))}
+    _normalise_mixing_config(mixing)
+    maintenance = config.get("maintenance") or {}
+    task_ids = _nps_hatch_task_ids(vessel_id)
+    payload = {
+        "vessel": hatch["vessels"].get(vessel_id),
+        "container": _nps_canonical_reservoir(config),
+        "channel": (config["nps"].get("feedExchange") or {}).get("channelId"),
+        "mixing": mixing["mixingStation"],
+        "reminders": {key: {tid: (maintenance.get(key) or {}).get(tid) for tid in task_ids}
+                      for key in ("tasks", "completions")},
+        **{key: hatch[key] for key in ("reservoir", "fridgeBottle", "enrichment", "handFeeds", "history")},
+    }
+    # JSON's 36 vs 36.0 must not invalidate a checkpoint after HA saves it.
+    def canonical(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: canonical(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [canonical(item) for item in value]
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else value
+    return hashlib.sha256(json.dumps(canonical(payload), sort_keys=True).encode()).hexdigest()
+
+
+def _nps_harvest_repair_status(config: dict[str, Any], now: datetime) -> dict[str, Any]:
+    hatch = config["nps"]["hatchery"]
+    latest = next(iter(hatch["history"]), {})
+    undo = hatch.get("harvestUndo") or {}
+    reservoir = _nps_canonical_reservoir(config)
+    loaded = _parse_datetime(reservoir.get("mixedAt"))
+    harvested = _parse_datetime(latest.get("harvestedAt"))
+    chilled = _parse_datetime(hatch["fridgeBottle"].get("refrigeratedAt"))
+    can_correct = bool(harvested and loaded and loaded < harvested <= now
+                       and _awc_num(reservoir.get("remainingMl"), 0, 0) > 0
+                       and not latest.get("enriched")
+                       and not hatch["reservoir"].get("lastLoadEnriched")
+                       and not hatch["enrichment"]["state"].get("startedAt")
+                       and not (chilled and chilled >= harvested))
+    can_undo = bool(undo and undo["harvestedAt"] == latest.get("harvestedAt")
+                    and undo["vesselId"] == latest.get("vesselId")
+                    and undo["after"] == _nps_harvest_guard(config, undo["vesselId"]))
+    return {"canUndo": can_undo, "canCorrectEmpty": can_correct,
+            "mixedAt": str(reservoir.get("mixedAt") or ""),
+            "undoReason": "" if can_undo else (
+                "The batch or stock has changed since this harvest; undo would overwrite later records."
+                if undo else "The earlier records needed to undo this harvest are unavailable.")}
+
+
+def _nps_harvest_repair_apply(config: dict[str, Any], msg: dict[str, Any], now: datetime) -> tuple[str, str] | None:
+    """Correct a missed discard, or restore the checkpoint of a mistaken tap."""
+    hatch = config["nps"]["hatchery"]
+    latest = next(iter(hatch["history"]), {})
+    if (not latest or latest.get("harvestedAt") != msg.get("harvested_at")
+            or latest.get("startedAt") != msg.get("started_at")
+            or latest.get("vesselId") != msg.get("vessel_id")):
+        return "harvest_changed", "The latest harvest changed. Refresh before correcting it."
+    status = _nps_harvest_repair_status(config, now)
+    vid = latest["vesselId"]
+    reservoir = _nps_canonical_reservoir(config)
+    if msg.get("action") == "emptied":
+        if not status["canCorrectEmpty"] or msg.get("mixed_at") != status["mixedAt"]:
+            return "container_changed", "This older container clock can no longer be corrected from that harvest. Refresh and check the batch details."
+        # The keeper confirms the old brine was physically discarded. Anchor
+        # on the actual logged harvest, never on the time of this correction.
+        reservoir["mixedAt"] = latest["harvestedAt"]
+        hatch["reservoir"].update({"mixedAt": latest["harvestedAt"], "fridgeSavedH": 0,
+                                    "lastLoadEnriched": False, "enrichedAt": ""})
+        hatch["harvestUndo"] = {}
+        if vid in hatch["vessels"] and not hatch["vessels"][vid]["state"]["hatchStartedAt"]:
+            _nps_hatch_sync_reminders(config, now, "corrected", vid)
+        _append_activity(config, "Corrected brine container: old brine was discarded before "
+            f"the harvest at {latest['harvestedAt']}; handling clock now follows that harvest", "control")
+    elif msg.get("action") == "undo":
+        if not status["canUndo"]:
+            return "undo_unavailable", status["undoReason"]
+        before = hatch["harvestUndo"]["before"]
+        # Re-normalise the saved values, also bounding checkpoint data from an
+        # admin backup import. Restore only the fields this harvest changed.
+        saved = _normalise_hatchery({"vessels": {vid: {"state": before.get("state")}},
+                                    "reservoir": before.get("reservoir"), "history": before.get("history")})
+        hatch["vessels"][vid]["state"] = saved["vessels"][vid]["state"]
+        hatch["history"] = saved["history"]
+        container = before.get("container") or {}
+        reservoir["remainingMl"] = _awc_num(container.get("remainingMl"), 0, 0, _awc_num(reservoir.get("volumeMl"), 50000, 0) or 50000)
+        reservoir["mixedAt"] = _awc_str(container.get("mixedAt"), 40)
+        for key in _NPS_CONTAINER_RUNTIME:
+            hatch["reservoir"][key] = saved["reservoir"][key]
+        if before.get("mixingLitres") is not None:
+            _mixing_cfg(config)["vessels"]["mix"]["estimatedLitres"] = _awc_num(before["mixingLitres"], 0, 0, MIXING_VESSEL_MAX_L)
+        hatch["harvestUndo"] = {}
+        maintenance = config.get("maintenance") or {}
+        start_id, harvest_id = _nps_hatch_task_ids(vid)
+        completions = maintenance.get("completions") or {}
+        if harvest_id in completions:
+            completions[harvest_id] = [row for row in completions[harvest_id]
+                if not (row.get("source") == MAINTENANCE_SOURCE_HATCHERY
+                        and row.get("timestamp") == latest["harvestedAt"])]
+        task = (maintenance.get("tasks") or {}).get(start_id)
+        if isinstance(task, dict):
+            task["snoozedUntil"] = None
+        _nps_hatch_retime_reminders(config, hatch["vessels"][vid]["state"]["hatchHours"], now, vid)
+        _append_activity(config, f"Undid latest brine harvest from {hatch['vessels'][vid]['name']}; "
+                         "restored the batch and its previous container and water records", "control")
+    else:
+        return "invalid_action", "Choose a harvest correction."
+    return None
+
+
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/nps_harvest_repair",
+    vol.Required("action"): vol.In(("undo", "emptied")),
+    vol.Required("vessel_id"): str,
+    vol.Required("harvested_at"): str,
+    vol.Required("started_at"): str,
+    vol.Optional("mixed_at"): str,
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+@_automation_stock_transaction
+async def websocket_nps_harvest_repair(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
+                                      msg: dict[str, Any]) -> None:
+    entry = _first_entry(hass)
+    if entry is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    config = _config_from_entry(entry)
+    error = _nps_harvest_repair_apply(config, msg, datetime.now(timezone.utc))
+    if error:
+        connection.send_error(msg["id"], *error)
+        return
+    config = await _async_save_config(hass, entry, config)
+    _async_kick_dosing_sync(hass, entry)
     _awc_send(connection, msg, hass, config)
 
 
@@ -18162,6 +18331,14 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
         # A running soak is joined, not a wall (0.7.169): read the verdict
         # BEFORE the load, from the helper the gate and the summary share.
         join = _nps_soak_join(hatchery, now)
+        mix = _mixing_cfg(config)
+        mix_litres = (mix.get("vessels") or {}).get("mix", {}).get("estimatedLitres")
+        mix_state = (mix.get("batch") or {}).get("state")
+        before = {"state": deepcopy(vessels.get(target_id, {}).get("state") or {}),
+                  "reservoir": deepcopy(hatchery["reservoir"]),
+                  "container": {key: _nps_canonical_reservoir(config).get(key)
+                                for key in ("remainingMl", "mixedAt")},
+                  "history": deepcopy(hatchery["history"]), "mixingLitres": mix_litres}
         before_ml = _awc_num(_nps_canonical_reservoir(config).get("remainingMl"), 0, 0, 1e9)
         error = _nps_container_load(config, hatchery, now, enriched=False)
         if error is not None:
@@ -18205,6 +18382,13 @@ def _nps_hatch_cancel_apply(hass: HomeAssistant, config: dict[str, Any], request
                 f"get ~{join['hoursLeft']:g} h of it", "control")
         else:
             _append_activity(config, f"Brine harvested from {name} — container loaded", "control")
+        # Undo never resurrects an exhausted mixing batch or unwinds a soak.
+        hatchery["harvestUndo"] = {}
+        if (target_id and before["state"].get("hatchStartedAt") and not join["active"]
+                and mix_state == (_mixing_cfg(config).get("batch") or {}).get("state")):
+            hatchery["harvestUndo"] = {"version": 1, "vesselId": target_id,
+                "harvestedAt": now.isoformat(), "before": before,
+                "after": _nps_harvest_guard(config, target_id)}
     return None
 
 
@@ -23624,6 +23808,7 @@ async def websocket_nps_summary(
             "hatchHours": primary_hours,
             "eggTypes": [dict(e) for e in nps_engine.EGG_TYPES],
             "history": [dict(item) for item in hatchery_cfg["history"][:10]],
+            "harvestRepair": _nps_harvest_repair_status(config, now_utc),
             "vessels": vessels_payload,
             "idleVessel": idle_vessel,
             "primaryVessel": primary_vessel,
@@ -28864,6 +29049,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_feeding_rotation_save)
     websocket_api.async_register_command(hass, websocket_nps_hatch_start)
     websocket_api.async_register_command(hass, websocket_nps_hatch_correct_vessel)
+    websocket_api.async_register_command(hass, websocket_nps_harvest_repair)
     websocket_api.async_register_command(hass, websocket_nps_hatch_cancel)
     websocket_api.async_register_command(hass, websocket_nps_hatch_clock)
     websocket_api.async_register_command(hass, websocket_nps_reservoir_discard)
