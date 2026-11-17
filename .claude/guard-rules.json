@@ -1,0 +1,26 @@
+{
+  "_about": "Read by ~/.claude/hooks/factory-guard.py on Reece's machine. Agents never touch live reef hardware or production. See AGENTS.md.",
+  "rules": [
+    {"commands": ["esphome"], "pattern": "\\b(run|upload)\\b", "decision": "deny",
+     "reason": "Agents never flash or OTA-upload firmware. Use `esphome config` or `esphome compile` only."},
+    {"commands": ["esptool", "esptool.py"], "pattern": "(write|erase)[-_](flash|region)|write[-_]mem", "decision": "deny",
+     "reason": "Agents never write to device flash."},
+    {"commands": ["pio", "platformio"], "pattern": "(-t|--target)[ =]?(upload|uploadfs)|\\bupload\\b", "decision": "deny",
+     "reason": "Agents never upload firmware."},
+    {"commands": ["idf.py"], "pattern": "\\bflash\\b", "decision": "deny", "reason": "Agents never flash devices."},
+    {"commands": ["arduino-cli"], "pattern": "\\bupload\\b", "decision": "deny", "reason": "Agents never upload firmware."},
+    {"commands": ["mosquitto_pub"], "decision": "deny",
+     "reason": "Agents never publish MQTT messages; they can drive real equipment."},
+    {"commands": ["curl", "wget", "http", "https", "xh", "httpie"], "pattern": "/api/(services|webhook|events)/", "decision": "deny",
+     "reason": "Agents never call Home Assistant services, webhooks or events."},
+    {"commands": ["python", "python3", "node", "deno", "bun"], "pattern": "(^|\\s)-(c|e|-eval)\\b.*(/api/(services|webhook|events)/|call_service)", "decision": "deny",
+     "reason": "Inline code that calls Home Assistant services is blocked. Write a test with the fakes instead."},
+    {"commands": ["hass-cli"], "pattern": "\\bservice\\b", "decision": "deny", "reason": "Agents never call Home Assistant services."},
+    {"commands": ["supabase"], "pattern": "\\b(db\\s+push|db\\s+reset\\s+.*--linked|functions\\s+deploy|link|secrets\\s+(set|unset)|projects?\\s+delete|migration\\s+repair)\\b", "decision": "deny",
+     "reason": "Production Supabase changes are made by Reece."},
+    {"commands": ["vercel"], "pattern": "--prod|\\b(deploy|promote|rollback|alias)\\b|\\benv\\s+(add|rm|pull)\\b", "decision": "deny",
+     "reason": "Vercel deploys and env changes are made by Reece."},
+    {"commands": ["gh"], "pattern": "^release\\s+(create|edit|delete|upload)", "decision": "ask",
+     "reason": "A GitHub release ships to HACS beta testers. Only Reece cuts releases."}
+  ]
+}
