@@ -1,5 +1,9 @@
 # Dosing node — Node 1 of the multi-node topology (ESP32-S3 Zero)
 
+**Start here:** [interactive NPS build guide](nps-build-guide.html) — short steps,
+saved progress and separate wiring, flashing and bench-test checkpoints. This
+document supplies its pin map and detailed commissioning reference.
+
 **This document is the pin and contract authority for Node 1** — the 4-channel
 dosing station: 3× Kamoer KPHM100 brushed heads (AWC drain, AWC fill, live food)
 on D4184 MOSFET trigger modules, plus the KPHM100-STB10 stepper on a BTT
@@ -40,26 +44,27 @@ pin feeds TMC2209 VIO. TMC2209 at UART address 0x00, R_SENSE 0.11 Ω.
 
 **Hard consequence of GP43/44:** UART0's default pins drive the stepper, so the
 logger must run on native USB — `logger: hardware_uart: USB_CDC` (arduino
-framework; `USB_SERIAL_JTAG` under esp-idf). Without that line the boot log
-corrupts the TMC2209.
+framework; `USB_SERIAL_JTAG` under esp-idf). This keeps application logs off
+the driver UART. ROM boot output is separate; see the physical check below.
 
 ## 2. Bench gates — pass these before wiring is called done
 
 1. **D4184 floating-TRIG check (fail-OFF gate).** With 12 V applied and the TRIG
    wire disconnected, the pump must NOT run. Most D4184 modules carry their own
    gate pull-down; verify this one does — if the pump twitches or runs with TRIG
-   floating, **add a 10 kΩ resistor from TRIG to GND** on that module. This is
-   what preserves pumps-stay-off through an ESP crash, reboot or brownout; the
-   discrete-MOSFET spec provided it with the mandatory 10 kΩ gate pull-down, and
-   a module build must not silently lose it.
-2. **ROM boot output on GP43 — known and harmless, never chase it.** The S3's
-   boot ROM prints its own output on GP43 at every reset, before any firmware
-   runs, regardless of logger configuration. The TMC2209's UART protocol is
-   CRC-guarded, so it ignores the noise. If you sniff the UART lines during
-   bring-up you WILL see it; it is not a fault.
-3. **Flyback diodes.** 1N5819 leaded Schottky soldered directly across each
-   brushed motor's tabs (functional equivalent of the spec'd SS34), banded end
-   to +12 V.
+   floating, **add a 10 kΩ resistor from TRIG to GND** on that module and
+   repeat the check. This supplies a floating-input pull-down; the actual
+   crash, reset and power-interruption checks still need to pass.
+2. **ROM boot output on GP43 is expected; prove no motion at boot.** The S3's
+   boot ROM can transmit on GP43 before application firmware runs, independently
+   of the logger setting. CRC checking is not a physical fail-OFF guarantee.
+   Verify ENN keeps the driver disabled and that cold boot, reset and power
+   interruption cause no uncommanded movement, with outlets in catch containers.
+3. **Flyback diodes.** Fit suitable diodes directly across each brushed motor's
+   tabs, banded end to motor positive. A 1N5819 is rated 1 A; an SS34 is rated
+   3 A, so they are not interchangeable by assumption. Check the actual motor
+   current, switching transients and diode thermal ratings before accepting
+   the installed part.
 
 ## 3. Entity contracts — pointers, not copies
 
@@ -110,17 +115,26 @@ sensor node and nothing here changes when it does.
 
 **Residual risk:** a shorted MOSFET or shorted TMC2209 on this node runs until
 12 V is pulled — no GPIO and no software latch can stop it. Mitigations: the
-fused motor rail, dose lines ending **in air above the waterline** (no siphon
-path), and reservoir sizing — never plumb more water than the tank can absorb.
+fused motor rail, dose outlets ending **in air above the tank waterline**, and
+limited source and waste volumes. An outlet air gap prevents tank back-siphoning
+but does not stop an elevated source siphoning forward. Test every line with
+power off at its actual heights; do not rely on pump tubing as a guaranteed
+siphon stop. Limit both possible addition and removal to what the tank can tolerate.
 The single-node topology's master fail-OFF relay + hardware coil float remain
 available by building the reefnode instead; Node 1 trades them for simplicity
 knowingly.
 
-## 5. Checked build and commissioning — 2026-10-25
+<a id="5-checked-build-and-commissioning--2026-10-25"></a>
 
-The reference was **validated and compiled with ESPHome 2026.10.0**, Arduino
-on ESP-IDF 5.5.6, for a 4 MB ESP32-S3. No physical board was flashed during the
-review. The compile used a temporary copy with dummy Wi-Fi values.
+## 5. Checked build and commissioning — rechecked 2026-10-31
+
+The **current workspace source**, including its API/OTA encryption changes,
+was validated and compiled with **ESPHome 2026.10.0**, Arduino on ESP-IDF
+5.5.6, for a 4 MB ESP32-S3: configuration hash `0x40a91e4a`, RAM 32.4%,
+flash 49.6%. This is a source snapshot, not a claim that v0.7.228 contains
+these later changes. No physical board was flashed. The build used dummy
+credentials in a temporary copy; compile your own configuration. Confirm the
+actual board/clone flash size and motor rating before using these defaults.
 
 The slimcdk component is pinned at
 `b5f0e44ae8732f68b9bbeaed9e962ca052d04cdb`. Driver setup belongs under
@@ -147,7 +161,10 @@ Use the GPIO table in §1, not the older reefnode pin map.
   **GP44 → the same PDN_UART**, **3V3 → VIO**, common GND. Set UART address
   **0** (MS1/MS2 low). Identify the two motor coil pairs before connecting
   A1/A2 and B1/B2; don't rely on wire colour. Keep STEP/DIR unused in this
-  UART + INDEX design. Check the BTT board's UART solder configuration.
+  UART + INDEX design. On the documented BTT V1.3 board, factory PDN_UART
+  routing uses J1 pin 4; its solder option can reroute it to pin 5. Identify
+  the actual PDN_UART connection and solder state on your board, using its
+  manufacturer diagram; do not assume every clone has the same routing.
 - The reference initially requests **0.6 A RMS**. Confirm the motor's current
   rating before energising it; this value and driver temperature need a bench
   check. Fit the driver heatsink without bridging pins. Never unplug its motor
@@ -164,9 +181,11 @@ parts. When USB flashing, disconnect the external buck/12 V supply first.
 1. Use ESPHome Device Builder **2026.10.0** and copy
    `dosingnode-s3zero-reference.yaml` into a new device configuration. Also copy
    this directory's `esphome_components` folder next to the YAML. Preserve
-   the entity names, GPIOs and pinned external-component ref. Enter Wi-Fi in
-   your own ESPHome secrets; the file already references `wifi_ssid` and
-   `wifi_password`. Keep any API encryption/OTA credentials local.
+   the entity names, GPIOs and pinned external-component ref. In your local
+   ESPHome secrets, provide `wifi_ssid`, `wifi_password` and a unique
+   `openreef_dosing_encryption_key` (32 random bytes, base64 encoded). The
+   current YAML requires that API key and its OTA encryption inherits it.
+   Keep these values local; do not paste them into the guide, logs or repository.
 2. Validate, then compile. From an ESPHome shell the equivalent commands are:
    `esphome config dosingnode-s3zero-reference.yaml` and
    `esphome compile dosingnode-s3zero-reference.yaml`.
@@ -184,11 +203,20 @@ parts. When USB flashing, disconnect the external buck/12 V supply first.
 
 1. In **Settings → Devices & services**, add the discovered **ESPHome** device
    `OpenReef Dosing`. If discovery misses it, add ESPHome with the device's IP.
-2. Keep channel enables and schedules **off** while commissioning.
-3. The brushed channel uses the **ESPHome brushed** driver and **Live food**
-   chemical. Auto-bind must show **22/22**, then **Save**.
-4. The phyto stepper uses **ESPHome stepper** and **Food**. Auto-bind must show
-   **25/25**. Its device entities still say **Kalk**; don't rename them. Save.
+2. Keep individual channel enables and schedules **off** during setup and
+   calibration. In OpenReef, **Settings → Dosing → Show the Dosing tab** is
+   also the dosing master control; it must be on for the later dose tests.
+3. In **Settings → Dosing channels**, use **+ Live food doser** for the
+   brushed food head. This preset selects **Live food** and the brushed
+   driver; rename the channel for rotifers if needed. Auto-bind **22/22**,
+   then **Save**. **+ Live brine pump** in NPS settings is the same preset.
+4. In **Settings → Automated NPS system**, use **+ Phyto pump**. This selects
+   **Food** and the stepper driver. Configure it in **Settings → Dosing
+   channels**, auto-bind **25/25**, then Save. Its device entities still say
+   **Kalk**; do not rename them. There is no separate driver-type selector.
+   If multiple devices match, select the correct entity overrides. Counts
+   alone do not prove readiness: check availability, successful sync and
+   actual pump identity during the cup tests.
 5. Pick **AWC Drain Pump** and **AWC Fill Pump** explicitly in Water Change
    setup. Calibrate those from that page later; they do not use the food
    channel's calibration button.
@@ -198,32 +226,41 @@ parts. When USB flashing, disconnect the external buck/12 V supply first.
 
 ### 4. Prove one food pump at a time with water into a jug
 
-1. Place both ends away from the aquarium. Power the assembled node and pass
-   the floating-trigger/boot checks in §2. All motor outputs must be stopped.
-2. Prime using bounded test runs until the outlet is bubble-free. Confirm flow
+1. Place both ends away from the aquarium. Leave the real food-shelf bottle
+   unlinked while testing with water, so test doses do not debit actual food
+   stock. Power the assembled node and pass the floating-trigger/boot checks
+   in §2. All motor outputs must be stopped.
+2. Use **Prime once (~5 s)** until the outlet is bubble-free. Confirm flow
    direction and the actual delivered water; the UI alone cannot confirm flow.
 3. **Brushed:** run the **30 s burst**, measure its output, enter that volume
    and **Save calibration**. **Stepper:** run **100 revolutions**, collect all
-   output, enter it and save. At the default 400 steps/s, this takes about
-   **13 min 20 s**, not 30 seconds. Wait for the motor to stop.
+   output, enter it and save. The reference requests **320,000 microsteps**:
+   100 revolutions assumes a 200-full-step motor at 16 microsteps. At the
+   default 400 steps/s this takes **800 s (13 min 20 s)**. Confirm the motor
+   specification and wait for it to stop before measuring.
 4. Reboot with schedules off; confirm calibration survives and neither pump
    starts. Check sync is successful and all bound entities are available.
 5. With water still going to the jug, give the channel a small test schedule,
-   sufficient daily cap and fresh reservoir record; enable/save. Deliver a
-   measured test dose and compare with the command, then disable/save. Tiny
+   sufficient daily cap and fresh reservoir record. Turn on **Channel enabled**
+   and **Scheduled dosing**, set a positive daily amount, Save and verify
+   **synced**. Manual **Dose now** still needs the firmware enable, calibration,
+   freshness and guards; it is not a bypass. Deliver a measured test dose and compare with the command, then disable/save. Tiny
    phyto pulses belong on the stepper; verify many pulses together because a
    household jug cannot resolve 0.1 ml. Brushed runs must be under 60 s.
 6. Check disable/suspend and daily-cap refusal. For a **lost INDEX** test,
-   power off, disconnect INDEX, power up and use the stepper's 5 s test into
-   the jug. It should trip after roughly 2–3 s without INDEX progress and refuse
+   power off, disconnect INDEX, power up and use the ESPHome device's **Kalk Prime / Test (run 5s)** button in HA,
+   with the outlet in the jug. It should trip after roughly 2–3 s without INDEX progress and refuse
    another motion.
    Power off, restore INDEX, reboot and clear the lock before retesting.
 7. Disconnect Wi-Fi/API during a food test; verify motion stops. Stop Home
-   Assistant while keeping the device online; verify dosing cannot continue
-   beyond its 180 s lease. Check it stays stopped after a tripped-node reboot.
-8. Run the AWC drain/fill timed calibration separately into containers and
-   prove their 180 s watchdog before relying on water exchange. OpenReef
-   refuses any normal leg longer than 170 s before starting the drain; choose
+   Assistant while keeping the device online; verify the firmware dosing-enable switches turn OFF within 180 s and
+   no subsequent scheduled motion occurs. A tiny dose that has already
+   finished cannot prove this; keep a separate ESPHome network log viewer
+   connected to observe the device while HA is stopped. Check it stays stopped after a tripped-node reboot.
+8. In Water Change → **Pumps & calibration**, run drain and fill separately
+   into containers using **Run 30 s**, **Run 60 s** and **Save fit**. Prove
+   their 180 s watchdog with a bounded water supply/catch container before
+   relying on water exchange. OpenReef refuses any normal leg longer than 170 s before starting the drain; choose
    smaller, more frequent changes if the calibrated pumps need longer. Restart HA
    during a water change: both pumps must stop and a fault must require you to
    reconcile levels. It must never automatically fill based on downtime.
@@ -234,19 +271,34 @@ parts. When USB flashing, disconnect the external buck/12 V supply first.
   check **The bottle IS the reservoir**. If you decant into a separate jar,
   leave it unchecked and log each refill instead. Set the actual container
   volume and choose **Refrigerated** only when physically chilled.
-- Record a fresh load/refill, prime into a cup and check the outlet above the
-  tank's waterline. Set the daily amount deliberately; this review does not
-  prescribe a new feeding dose. Use the current measured daily amount as the
+- For a decanted jar, **Refilled — reset ledger** records its volume and
+  transfer; **Refreshed today** records its food age. Standing **Loaded today**
+  can combine freshness and the linked transfer. Only record food actually
+  added. A refrigerated bottle keeps the shelf's opened date and shelf life;
+  a Refreshed tap does not make an old bottle fresh.
+- Check freshness explicitly: ordinary **Food** channels default to shelf life
+  0 (tracking off). A refrigerated linked bottle uses its shelf clock. For
+  the intended room-temperature phyto drip, **Standing density (phyto drip)**
+  exposes freshness controls and starts with a day clock. Inspect its preview:
+  if measured bottle density is supplied, standing mode can derive ml/day.
+  Do not treat an unmeasured density as a dose prescription.
+- Prime into a cup and check the outlet above the tank's waterline, then prove
+  power-off behaviour with the actual source heights. Set the daily amount
+  deliberately; this review does not prescribe a new feeding dose. Use the current measured daily amount as the
   starting point, spread over the day, then verify the preview and daily cap.
 - Enable the channel and schedule, save, and check **synced**. Watch the first
   doses and compare measured output with the bottle ledger after its update.
   The ESPHome counters estimate commanded volume; no flow sensor proves food
   reached the tank. Observed counter changes and their matched-drain debt are
   saved together; an interrupted dose must not report its full target as delivered.
-- Add feed exchange/AWC only after the drain/fill calibration and checks pass.
-  Check salinity and total added liquid when feeding live-food suspension.
-  Run the acceptance checks in `../OPENREEF_DOSING_SMOKE_TEST.md` §11b/§12
-  before unattended use.
+- Leave **Matched drain on** off until the AWC bucket checks pass. Link only
+  live-food suspension whose **measured salinity matches the tank**: a rinsed
+  crop resuspended in tank-strength saltwater, not 27 ppt culture water or
+  unmatched phyto. Check total added liquid and salinity during supervised runs.
+- Follow the [interactive build checkpoints](nps-build-guide.html) and the
+  [current audit's hardware acceptance](../AWC_NPS_SAFETY_AUDIT.md#hardware-acceptance-still-required).
+  The older dosing smoke test §11b/§12 is superseded for this Node 1 build;
+  its chaser and outage instructions do not match the current firmware.
 
 **Limits of this review:** direction, actual flow, clone GPIO/power details,
 thermal behaviour and physical fail-OFF remain bench checks. Automatic rinse

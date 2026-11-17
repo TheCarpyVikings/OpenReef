@@ -1,5 +1,14 @@
 # OpenReef Dosing Smoke Test
 
+> **Node 1 NPS build: these commissioning instructions are superseded.**
+> The ESP32-S3 Zero build with phyto stepper and brushed AWC/live-food heads
+> must use the [current interactive guide](manual/nps-build-guide.html),
+> [dosingnode reference](manual/dosingnode-s3zero-design.md) and
+> [safety audit](AWC_NPS_SAFETY_AUDIT.md#hardware-acceptance-still-required).
+> Historical chaser, HA-outage and reservoir-empty statements below do not
+> describe current Node 1 firmware. This file remains historical test context
+> for older and alternative builds, not current Node 1 acceptance approval.
+
 Use this after installing or updating OpenReef Core in a real Home Assistant instance. It walks every acceptance criterion of the dosing feature. Sections 1–6 need **no hardware**; sections 7–10 need a doser flashed with the reference firmware ([`docs/manual/kalk-doser-esphome-design.md`](manual/kalk-doser-esphome-design.md)).
 
 Safety first: dose into a **measuring cylinder or bucket**, never the tank, until section 9 passes. Kalkwasser is high-pH — the guard checks below exist because a stuck doser is a crashed tank.
@@ -114,6 +123,10 @@ above still applies, plus:
 
 ## 11b. Dosing Node (S3 Zero, multi-node Node 1) Variant
 
+> **Superseded for the current Node 1 NPS build (2026-10-31). Do not run this
+> historical checklist.** Automatic rinse is disabled; the reservoir ledger
+> is an estimate, not an empty cutoff. Follow the [current checkpoints](manual/nps-build-guide.html).
+
 Running Node 1 (`docs/manual/dosingnode-s3zero-reference.yaml` — pumps only, no
 physical sensors, no master relay)? §1–§10 apply unchanged, §11's relay and
 float lines do NOT. Instead:
@@ -140,6 +153,12 @@ float lines do NOT. Instead:
       GP2) and still skips when a water change owns that pump.
 
 ## 12. 48-Hour Full-Arc Soak (Stage F — one node, everything on)
+
+> **Superseded for current Node 1: do not use this soak recipe or its HA-outage
+> expectations.** Current food enables expire without verified renewal,
+> automatic rinse is disabled, and hardware acceptance cannot be inferred
+> from software tests. Use the [current guide](manual/nps-build-guide.html)
+> and [hardware acceptance requirements](AWC_NPS_SAFETY_AUDIT.md#hardware-acceptance-still-required).
 
 The arc's exit test: hourly micro-changes + source alternation + kalk + live
 food + 2-part spacing running TOGETHER on one node for two days. Run it after

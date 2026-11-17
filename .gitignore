@@ -60,3 +60,6 @@ __pycache__/
 
 # Region-capture full-page shots: useful locally, never referenced by the site
 site/public/demos/*/full.png
+
+# agent release-check scratch output
+work/
