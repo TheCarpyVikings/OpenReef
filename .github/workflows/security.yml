@@ -46,6 +46,10 @@ jobs:
         run: |
           npm install -g pnpm@${{ matrix.pnpm }}
           pnpm install --frozen-lockfile --ignore-scripts
+      # GHSA-fc5q-39xc-vjpf (picomatch ReDoS) is ignored via pnpm.auditConfig in the root and
+      # site package.json: no patched picomatch exists (checked 2026-11-17) and it is reachable
+      # only through dev tooling (eslint-config-next, @gltf-transform/cli). Drop the ignore once
+      # a fixed release ships.
       - name: Known dependency vulnerabilities (including development tools)
         run: pnpm audit --audit-level=low
       - name: Type check

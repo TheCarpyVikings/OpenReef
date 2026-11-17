@@ -51,7 +51,9 @@ def main():
     try:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            ready = subprocess.run(["docker", "exec", container, "pg_isready", "-U", "postgres"], capture_output=True)
+            # Probe over TCP: the image's temporary init server listens on the Unix
+            # socket only, then shuts down. Only the final server answers on 127.0.0.1.
+            ready = subprocess.run(["docker", "exec", container, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], capture_output=True)
             if ready.returncode == 0:
                 break
             time.sleep(0.2)

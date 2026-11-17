@@ -14,11 +14,11 @@
     "chart.js": "^4.6.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
-    "googleapis": "^171.4.0",
+    "googleapis": "^190.0.0",
     "hls.js": "^1.7.3",
     "home-assistant-js-websocket": "^9.7.1",
     "lucide-react": "^0.577.0",
-    "next": "16.4.3",
+    "next": "16.4.6",
     "react": "19.2.9",
     "react-chartjs-2": "^5.3.1",
     "react-dom": "19.2.9",
@@ -33,10 +33,17 @@
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.2",
     "eslint": "^9.39.5",
-    "eslint-config-next": "16.4.3",
+    "eslint-config-next": "16.4.6",
     "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=22.23.4 <23"
+  },
+  "pnpm": {
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-fc5q-39xc-vjpf"
+      ]
+    }
   }
 }
