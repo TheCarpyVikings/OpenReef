@@ -5,7 +5,7 @@ import { getHAConfig } from '../ha-config';
 // Used by the snapshot/download feature in CameraScreen.
 export async function GET(request: NextRequest) {
     const entityId = request.nextUrl.searchParams.get('entity');
-    if (!entityId || !/^[a-z0-9_.]+$/.test(entityId)) {
+    if (!entityId || !/^camera\.[a-z0-9_]+$/.test(entityId)) {
         return NextResponse.json(
             { error: 'Missing or invalid entity parameter' },
             { status: 400 },
@@ -21,18 +21,20 @@ export async function GET(request: NextRequest) {
     try {
         haRes = await fetch(`${ha.url}/api/camera_proxy/${entityId}`, {
             headers: { Authorization: `Bearer ${ha.token}` },
+            cache: 'no-store',
+            redirect: 'error',
+            signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]),
         });
-    } catch (err) {
+    } catch {
         return NextResponse.json(
-            { error: `Could not reach HA: ${err}` },
+            { error: 'Could not load camera snapshot' },
             { status: 502 },
         );
     }
 
     if (!haRes.ok) {
-        const body = await haRes.text().catch(() => '');
         return NextResponse.json(
-            { error: `HA returned ${haRes.status}: ${body}` },
+            { error: 'Camera snapshot unavailable' },
             { status: haRes.status },
         );
     }

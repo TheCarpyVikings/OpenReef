@@ -1,0 +1,79 @@
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "41 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  javascript:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - directory: .
+            pnpm: 9.15.9
+            build: pnpm build --webpack
+          - directory: portal
+            pnpm: 10.34.9
+            build: pnpm build --webpack
+          - directory: site
+            pnpm: 10.34.9
+            build: pnpm build
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      # Build-only placeholders; these jobs never need deployment credentials.
+      NEXT_PUBLIC_SUPABASE_URL: https://synthetic-test.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: synthetic-public-build-only
+      SUPABASE_SERVICE_ROLE_KEY: synthetic-private-build-only
+      OWNER_EMAILS: owner@example.invalid
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22.23.4"
+      - name: Install locked dependencies without lifecycle scripts
+        run: |
+          npm install -g pnpm@${{ matrix.pnpm }}
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Known dependency vulnerabilities (including development tools)
+        run: pnpm audit --audit-level=low
+      - name: Type check
+        run: pnpm exec tsc --noEmit --incremental false
+      - name: Production build
+        run: ${{ matrix.build }}
+      - name: Legacy dashboard security regressions
+        if: matrix.directory == '.'
+        run: node --test tests/security/test_legacy_security.mjs
+      - name: Portal security regressions
+        if: matrix.directory == 'portal'
+        run: node --test tests/security.test.cjs
+
+  portal-database:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: PostgreSQL migrations, permissions and concurrent redemption
+        run: python3 portal/tests/test_security_sql.py
+
+  home-assistant-authorization:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.14"
+      - name: Install the supported HA framework for real authorization checks
+        run: python -m pip install homeassistant==2026.10.4
+      - name: Real service registry, HTTP middleware and signed media checks
+        run: python tests/ha_runtime/security_checks.py

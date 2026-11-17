@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { validateContentType, safeErrorResponse } from '@/lib/validation';
+import { readJsonBody, validateContentType, safeErrorResponse } from '@/lib/validation';
 import { rateLimit } from '@/lib/rate-limit';
 
 const ALLOWED_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const;
@@ -20,7 +20,9 @@ export async function POST(req: NextRequest) {
     if (ctError) return ctError;
 
     try {
-        const body = await req.json();
+        const bodyResult = await readJsonBody(req);
+        if (bodyResult.error) return bodyResult.error;
+        const body = bodyResult.data;
         const parsed = TTSSchema.safeParse(body);
 
         if (!parsed.success) {

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { validateContentType, validateBodySize, safeErrorResponse, hasPrototypePollutionKeys } from '@/lib/validation';
+import { readJsonBody, validateContentType, validateBodySize, safeErrorResponse, hasPrototypePollutionKeys } from '@/lib/validation';
 import { readOpenReefSettings, writeOpenReefSettings } from '@/lib/server/openreef-config';
 import type { AppSettings } from '@/context/SettingsContext';
 
@@ -30,7 +30,9 @@ export async function POST(req: NextRequest) {
     if (sizeError) return sizeError;
 
     try {
-        const body = await req.json();
+        const bodyResult = await readJsonBody(req);
+        if (bodyResult.error) return bodyResult.error;
+        const body = bodyResult.data;
         const parsed = SettingsSchema.safeParse(body);
         if (!parsed.success) {
             return NextResponse.json({ error: 'Invalid input', details: parsed.error.flatten() }, { status: 400 });

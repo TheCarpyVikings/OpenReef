@@ -38,12 +38,16 @@ export function withIngressPath(path: string): string {
 }
 
 export async function apiFetch(url: string, options: RequestInit = {}): Promise<Response> {
-    return fetch(withIngressPath(url), { ...options, credentials: 'same-origin' });
+    const response = await fetch(withIngressPath(url), { ...options, credentials: 'same-origin' });
+    if (response.status === 401 && typeof window !== 'undefined' && !url.startsWith('/api/auth/')) {
+        window.location.assign(withIngressPath('/login'));
+    }
+    return response;
 }
 
 /**
  * Initializes the API session by setting the auth cookie.
- * Call this once when the app boots (e.g. in a top-level useEffect).
+ * Call only after the user explicitly enters their access secret.
  * The secret is passed as a one-time POST body, NOT stored in the JS bundle.
  */
 export async function initApiSession(secret: string): Promise<boolean> {

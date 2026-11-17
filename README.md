@@ -49,3 +49,23 @@ HA_TOKEN=...
 ```
 
 Do not expose Home Assistant tokens to browser-side `NEXT_PUBLIC_*` variables.
+
+The preserved dashboard also requires a server-only `API_SECRET` (a random value
+of at least 32 characters, up to 256). Visit `/login` and enter that value; the
+browser receives a signed, HttpOnly session valid for 12 hours, not the secret.
+Changing `API_SECRET` invalidates existing sessions. API clients may use
+`Authorization: Bearer <API_SECRET>`. Without a configured secret the dashboard
+fails closed, including when `HA_ADDON_MODE=true`; that flag does not prove a
+request came through authenticated HA Ingress.
+
+Use HTTPS for a production dashboard: its session cookie is Secure. Behind a
+reverse proxy, set `OPENREEF_PUBLIC_ORIGIN` to the exact external origin (for
+example, `https://reef.example`) if it differs from the request URL seen by Next.
+Cookie-authenticated writes must have that Origin. The login endpoint limits
+attempts in each process; an internet-facing proxy needs its own shared rate
+limit when multiple workers or instances serve the dashboard.
+
+Run the isolated dashboard security regressions with
+`node --test tests/security/test_legacy_security.mjs`, and the native panel
+security regressions with `node tests/test_panel_security.mjs`. These use fake
+credentials and mocked Home Assistant calls, never a connected tank.

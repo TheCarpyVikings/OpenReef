@@ -581,6 +581,7 @@ const mailtoFallback = (email: string, interests: string) =>
 
 export function Cta() {
   const [email, setEmail] = useState("");
+  const [website, setWebsite] = useState("");
   const [wants, setWants] = useState({ manual: true, beta: true, kits: false });
   // Screening — asked only when a beta seat is requested, so a manual-only
   // signup stays a one-field form. These are what let beta invitations be
@@ -603,6 +604,7 @@ export function Cta() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email,
+          website,
           source: "site",
           note: interests,
           ...(wants.beta
@@ -635,6 +637,13 @@ export function Cta() {
           <p className="callout">Cheers — you're on the list. Go feed your fish. 🐟</p>
         ) : (
           <form onSubmit={submit} className="cta-form">
+            <div hidden aria-hidden="true">
+              <label>
+                Website
+                <input name="website" type="text" autoComplete="off" tabIndex={-1}
+                  value={website} onChange={(e) => setWebsite(e.target.value)} />
+              </label>
+            </div>
             <input
               type="email"
               required

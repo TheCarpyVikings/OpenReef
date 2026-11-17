@@ -300,6 +300,8 @@ class OpenReefPanel extends HTMLElement {
   }
 
   disconnectedCallback() {
+    if (this._captureRefreshTimer) clearTimeout(this._captureRefreshTimer);
+    this._captureRefreshTimer = null;
     this._stopCameraWebRTC();
     this._stopTimelapse();
     this._stopFeedPlayer();
@@ -7368,11 +7370,14 @@ class OpenReefPanel extends HTMLElement {
     return `<!doctype html><html><head><meta charset="utf-8"><title>${this._escape(title)}</title><style>${css}</style></head><body><h1>${this._escape(title)}</h1><p class="muted">Compiled ${this._escape(this._formatActivityTime(r?.generatedAt))} by OpenReef.</p>${body}<script>window.addEventListener("load", () => setTimeout(() => window.print(), 150));</script></body></html>`;
   }
 
-  _reportPrint() {
+  async _reportPrint() {
     const r = this._report?.data;
     if (!r) return;
     const win = window.open("", "_blank");
     if (!win) { this._reportNote("Allow pop-ups for this page to print the report."); return; }
+    // Prime capture signatures before creating a separate print document.
+    this._reportPrintDocument(r);
+    if (this._captureSigning) await this._captureSigning;
     win.document.open();
     win.document.write(this._reportPrintDocument(r));
     win.document.close();
@@ -17540,7 +17545,7 @@ const rigSteps = [
     const reminderRows = reminderTasks.map(([id, label]) => {
       const state = this._maintenanceDueState(id);
       return `<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;">
-        <small>${label}</small><span class="pill ${state.status}">${this._escape(state.label)}</span>
+        <small>${this._escape(label)}</small><span class="pill ${state.status}">${this._escape(state.label)}</span>
       </div>`;
     });
     const reminders = `
@@ -23474,7 +23479,7 @@ const rigSteps = [
       if (st.cadenceReason === "arrival") chips.push(`<span class="coral-chip">new arrival · every ${st.cadenceDays} d</span>`);
       if (c.npsId) chips.push(this._coralNpsCoverageChip(c));
     }
-    const photo = c.photoUrl ? `<img class="coral-card-photo" src="${this._escape(c.photoUrl)}" alt="">` : `<div class="coral-card-glyph">${this._coralGlyphSvg(c, 56)}</div>`;
+    const photo = c.photoUrl ? `<img class="coral-card-photo" src="${this._escape(this._photoUrl(c.photoUrl))}" alt="">` : `<div class="coral-card-glyph">${this._coralGlyphSvg(c, 56)}</div>`;
     const top = st.insights.find((i) => i.status === "critical") || st.insights.find((i) => i.status === "warning") || null;
     return `
       <article class="coral-card ${this._escape(st.word)} ${st.status !== "active" ? "gone" : ""}" data-coral-card="${this._escape(cid)}">
@@ -23626,7 +23631,7 @@ const rigSteps = [
             <span class="coral-pill ${preview.score < 60 ? "needs" : preview.score < 75 ? "watch" : "fine"}">${preview.score} · ${this._coralGrade(preview.score)}</span>
           </div>
           <div class="coral-checkin-photo">
-            ${hero ? `<img src="${this._escape(hero)}" alt="">` : `<div class="coral-card-glyph big">${this._coralGlyphSvg(c, 96)}</div>`}
+            ${hero ? `<img src="${this._escape(this._photoUrl(hero))}" alt="">` : `<div class="coral-card-glyph big">${this._coralGlyphSvg(c, 96)}</div>`}
             <label class="coral-upload secondary compact-button">📷 ${d.photoUrl ? "Replace this photo" : "Photo for this look"}
               <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" data-coral-upload="${this._escape(cid)}" data-checkin hidden>
             </label>
@@ -23739,12 +23744,12 @@ const rigSteps = [
           </div>
           <div class="coral-diary-top">
             <div class="coral-diary-hero">
-              ${c.photoUrl ? `<img src="${this._escape(c.photoUrl)}" alt="">` : `<div class="coral-card-glyph big">${this._coralGlyphSvg(c, 120)}</div>`}
+              ${c.photoUrl ? `<img src="${this._escape(this._photoUrl(c.photoUrl))}" alt="">` : `<div class="coral-card-glyph big">${this._coralGlyphSvg(c, 120)}</div>`}
               <label class="coral-upload secondary compact-button">📷 ${c.photoUrl ? "Add a photo" : "Upload a photo"}
                 <input type="file" accept="image/jpeg,image/png,image/webp,image/heic" data-coral-upload="${this._escape(cid)}" hidden>
               </label>
               ${this._coralUploadState === "uploading" ? `<small class="muted">Uploading…</small>` : this._coralUploadState ? `<small class="muted">⚠ ${this._escape(this._coralUploadState)}</small>` : ""}
-              ${photos.length > 1 ? `<div class="coral-photo-strip">${photos.slice(0, 12).map((p) => `<img src="${this._escape(p.url)}" title="${this._escape(this._formatActivityTime(p.at))}${p.note ? ` · ${this._escape(p.note)}` : ""}" alt="">`).join("")}</div>` : ""}
+              ${photos.length > 1 ? `<div class="coral-photo-strip">${photos.slice(0, 12).map((p) => `<img src="${this._escape(this._photoUrl(p.url))}" title="${this._escape(this._formatActivityTime(p.at))}${p.note ? ` · ${this._escape(p.note)}` : ""}" alt="">`).join("")}</div>` : ""}
             </div>
             <div class="coral-diary-why">
               <p class="eyebrow">Why it reads ${this._escape(st.score == null ? "unchecked" : `${st.score}`)}</p>
@@ -23792,7 +23797,7 @@ const rigSteps = [
             return `<div class="coral-tl-row ${r.undoneAt ? "undone" : ""}">
               <span class="coral-pill ${scored.score < 60 ? "needs" : scored.score < 75 ? "watch" : "fine"}">${scored.score}</span>
               <div><strong>${this._escape(this._formatActivityTime(r.at))}</strong> <small class="muted">${this._escape(bits)}</small>${r.note ? `<p class="muted">${this._escape(r.note)}</p>` : ""}</div>
-              ${r.photoUrl ? `<img src="${this._escape(r.photoUrl)}" alt="">` : ""}
+              ${r.photoUrl ? `<img src="${this._escape(this._photoUrl(r.photoUrl))}" alt="">` : ""}
               ${!r.undoneAt && undoable(r.at) ? `<button class="secondary compact-button" data-action="coral-undo-checkin" data-id="${this._escape(cid)}|${this._escape(r.at)}">Undo</button>` : r.undoneAt ? `<small class="muted">taken back</small>` : ""}
             </div>`;
           }).join("")}</div>` : `<p class="muted">No check-ins yet.</p>`}
@@ -24878,7 +24883,7 @@ const rigSteps = [
               <p class="muted">${this._escape(c.colour)}${age ? ` · ${this._escape(age)}` : ""}. ${this._escape(this._coralZoneText(c.species))}</p>
             </div>
           </div>
-          ${c.photoUrl ? `<img class="coral-photo" src="${this._escape(c.photoUrl)}" alt="${this._escape(c.name || "coral photo")}">` : ""}
+          ${c.photoUrl ? `<img class="coral-photo" src="${this._escape(this._photoUrl(c.photoUrl))}" alt="${this._escape(c.name || "coral photo")}">` : ""}
           <label class="coral-notes-label">Notes
             <textarea class="coral-notes" data-coral-notes="${this._escape(cid)}" rows="3" maxlength="500" placeholder="Frag from Dave · moved off the sand 12 Aug · loves the extra flow…">${this._escape(c.notes || "")}</textarea>
           </label>
@@ -27676,7 +27681,108 @@ const rigSteps = [
   // --- Recordings (event-triggered capture) ------------------------------
 
   _captureUrl(name) {
-    return name ? `/openreef_captures/${name}` : "";
+    const path = this._capturePath(name);
+    if (!path) return "";
+    this._captureUrls ||= new Map();
+    this._captureSources ||= new Map();
+    this._capturePending ||= new Set();
+    this._scheduleCaptureRefresh();
+    const entry = this._captureUrls.get(path);
+    if (entry?.expires > Date.now() + 60000) return entry.url;
+    // A local transparent placeholder avoids issuing unauthenticated requests.
+    // Its fragment lets the signing reply patch existing media nodes in place,
+    // preserving video playback, focus and timelapse animations.
+    const placeholder = `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==#${encodeURIComponent(path)}`;
+    this._captureSources.set(placeholder, path);
+    if (!(entry?.retryAfter > Date.now())) {
+      this._capturePending.add(path);
+      if (!this._captureSigning) {
+        this._captureSigning = Promise.resolve().then(() => this._signCaptureUrls());
+      }
+    }
+    return entry?.url && entry.expires > Date.now() ? entry.url : placeholder;
+  }
+
+  _capturePath(name) {
+    if (typeof name !== "string" || !name || name.length > 512) return "";
+    const path = name.startsWith("/openreef_captures/") ? name.slice(19).split("?", 1)[0] : name;
+    return path.split("/").every((part) => /^[a-zA-Z0-9_-][a-zA-Z0-9_.-]*$/.test(part)) ? path : "";
+  }
+
+  _photoUrl(value) {
+    if (typeof value !== "string") return "";
+    if (value.startsWith("/openreef_captures/")) return this._captureUrl(value);
+    // Explicit external photos remain supported; imported javascript/data URLs
+    // and protocol-relative URLs are never used as image sources.
+    return /^https?:\/\//i.test(value) || /^\/(?!\/)/.test(value) ? value : "";
+  }
+
+  async _signCaptureUrls() {
+    try {
+      while (this._capturePending?.size) {
+        const paths = [...this._capturePending].slice(0, 100);
+        paths.forEach((path) => this._capturePending.delete(path));
+        try {
+          const result = await this._callWS({ type: "openreef/sign_capture_urls", paths });
+          const expires = Date.parse(result?.expiresAt || "");
+          for (const path of paths) {
+            const url = result?.urls?.[path];
+            const expectedPath = `/openreef_captures/${path.split("/").map(encodeURIComponent).join("/")}`;
+            let valid = false;
+            try {
+              const parsed = new URL(url, "https://openreef.invalid");
+              valid = typeof url === "string" && url.startsWith(`${expectedPath}?`)
+                && parsed.origin === "https://openreef.invalid" && parsed.pathname === expectedPath
+                && parsed.searchParams.has("authSig") && expires > Date.now() + 60000;
+            } catch { /* rejected response */ }
+            if (valid) {
+              this._captureUrls.set(path, { url, expires });
+              this._captureSources.set(url, path);
+            } else {
+              this._captureUrls.set(path, { retryAfter: Date.now() + 30000 });
+            }
+          }
+          this._patchCaptureUrls();
+        } catch {
+          // No unsigned fallback: an expired login or old backend must fail closed.
+          for (const path of paths) this._captureUrls.set(path, { retryAfter: Date.now() + 30000 });
+        }
+      }
+    } finally {
+      this._captureSigning = null;
+      this._scheduleCaptureRefresh();
+    }
+  }
+
+  _scheduleCaptureRefresh() {
+    if (!this.isConnected || this._captureRefreshTimer) return;
+    this._captureRefreshTimer = setTimeout(() => {
+      this._captureRefreshTimer = null;
+      this._patchCaptureUrls(true);
+      this._scheduleCaptureRefresh();
+    }, 60000);
+  }
+
+  _patchCaptureUrls(refresh = false) {
+    for (const node of this.shadowRoot?.querySelectorAll?.("[src], [poster], [href]") || []) {
+      for (const attr of ["src", "poster", "href"]) {
+        const previous = node.getAttribute(attr);
+        const path = this._captureSources?.get(previous);
+        if (!path) continue;
+        const url = refresh ? this._captureUrl(path) : this._captureUrls?.get(path)?.url;
+        if (url && url !== previous) node.setAttribute(attr, url);
+      }
+    }
+    // Bound transient URL bookkeeping during long-running timelapse sessions.
+    if (this._captureUrls?.size > 2000) {
+      for (const [path, entry] of this._captureUrls) {
+        if (!(entry.expires > Date.now())) this._captureUrls.delete(path);
+      }
+    }
+    if (this._captureSources?.size > 6000) {
+      const keep = new Set([...this._captureUrls.values()].map((entry) => entry.url));
+      for (const url of this._captureSources.keys()) if (!keep.has(url)) this._captureSources.delete(url);
+    }
   }
 
   _recordingsList() {

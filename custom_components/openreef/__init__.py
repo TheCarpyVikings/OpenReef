@@ -39,6 +39,8 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt as dt_util
 
+from .media_paths import capture_path, capture_relative, safe_media_id
+
 from .const import (
     CAPTURE_DEFAULT_COOLDOWN,
     CAPTURE_DEFAULT_DURATION,
@@ -3078,7 +3080,7 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
         config["cameras"] = {}
     else:
         for camera_id, camera_config in list(cameras.items()):
-            if not isinstance(camera_config, dict):
+            if not safe_media_id(camera_id) or not isinstance(camera_config, dict):
                 cameras.pop(camera_id)
                 continue
             label = camera_config.get("label")
@@ -3208,7 +3210,9 @@ def _normalise_core_config(settings: Any) -> dict[str, Any]:
     feed_sessions = config.get("feedSessions")
     if not isinstance(feed_sessions, list):
         feed_sessions = []
-    config["feedSessions"] = [s for s in feed_sessions if isinstance(s, dict)][
+    config["feedSessions"] = [
+        s for s in feed_sessions if isinstance(s, dict) and safe_media_id(s.get("id"))
+    ][
         : feedwatch["retentionSessions"]
     ]
 
@@ -11549,7 +11553,7 @@ async def websocket_coral_photo_upload(
         connection.send_error(msg["id"], "bad_image", "Only JPEG or PNG photos are supported")
         return
     await _async_register_captures_path(hass)
-    corals_dir = _captures_dir(hass) / "corals"
+    corals_dir = capture_path(_captures_dir(hass), "corals")
     # 0.7.192: a photo TIMELINE per coral — stamped filenames, newest first,
     # the keeper's cap (livestock.settings.photoCap) evicting the oldest
     # file. photoUrl stays the hero (the latest). Only files this handler
@@ -11566,12 +11570,13 @@ async def websocket_coral_photo_upload(
             stale_files.append(base)
 
     def _write() -> None:
+        capture_path(_captures_dir(hass), "corals")
         corals_dir.mkdir(parents=True, exist_ok=True)
-        (corals_dir / filename).write_bytes(blob)
+        capture_path(_captures_dir(hass), f"corals/{filename}").write_bytes(blob)
         for base in stale_files:
             try:
-                (corals_dir / base).unlink()
-            except OSError:
+                capture_path(_captures_dir(hass), f"corals/{base}").unlink()
+            except (OSError, ValueError):
                 pass
 
     await hass.async_add_executor_job(_write)
@@ -25976,7 +25981,7 @@ def _captures_dir(hass: HomeAssistant) -> Path:
 
 
 async def _async_register_captures_path(hass: HomeAssistant) -> None:
-    """Create + serve the captures directory once, same-origin to the panel.
+    """Create private capture storage and register its authenticated media view.
 
     We add our own subdirectory to ``allowlist_external_dirs`` in memory so the stable
     ``camera.record`` service can write clips here without the tester editing
@@ -25986,22 +25991,16 @@ async def _async_register_captures_path(hass: HomeAssistant) -> None:
     if data.get(CAPTURES_PATH_REGISTERED):
         return
     captures_dir = _captures_dir(hass)
-    await hass.async_add_executor_job(
-        lambda: captures_dir.mkdir(parents=True, exist_ok=True)
-    )
+    def _create() -> None:
+        capture_path(captures_dir).mkdir(parents=True, exist_ok=True)
+    await hass.async_add_executor_job(_create)
     try:
         hass.config.allowlist_external_dirs.add(str(captures_dir))
     except Exception:  # noqa: BLE001 - non-fatal; snapshot fallback still works
         _LOGGER.debug("Could not extend allowlist_external_dirs for captures", exc_info=True)
-    await hass.http.async_register_static_paths(
-        [
-            StaticPathConfig(
-                CAPTURES_STATIC_URL,
-                str(captures_dir),
-                cache_headers=False,
-            )
-        ]
-    )
+    from .media import OpenReefMediaView
+
+    hass.http.register_view(OpenReefMediaView(hass, captures_dir))
     data[CAPTURES_PATH_REGISTERED] = True
 
 
@@ -26015,6 +26014,8 @@ def _resolve_capture_camera(
     cameras = config.get("cameras", {})
     if not isinstance(cameras, dict) or not cameras:
         return None
+    if override and (not safe_media_id(override) or override not in cameras):
+        return None
     if override and override in cameras:
         candidate_ids = [override]
     else:
@@ -26022,6 +26023,8 @@ def _resolve_capture_camera(
         selected = [cid for cid in selected if cid in cameras] if isinstance(selected, list) else []
         candidate_ids = selected or list(cameras.keys())
     for cid in candidate_ids:
+        if not safe_media_id(cid):
+            continue
         cam = cameras.get(cid)
         if not isinstance(cam, dict):
             continue
@@ -26040,25 +26043,26 @@ async def _async_delete_capture_files(
 ) -> None:
     """Best-effort delete of the clip + thumbnail files for pruned/removed records."""
     captures_dir = _captures_dir(hass)
-    paths: list[Path] = []
+    names: list[str] = []
     for record in records:
         if not isinstance(record, dict):
             continue
         for key in ("video", "thumbnail"):
             name = record.get(key)
-            if isinstance(name, str) and name:
-                paths.append(captures_dir / name)
-    if not paths:
+            if safe_media_id(name):
+                names.append(name)
+    if not names:
         return
 
     def _remove() -> None:
-        for path in paths:
+        for name in names:
             try:
+                path = capture_path(captures_dir, name)
                 path.unlink()
             except FileNotFoundError:
                 pass
-            except OSError:
-                _LOGGER.debug("Could not delete capture file %s", path, exc_info=True)
+            except (OSError, ValueError):
+                _LOGGER.debug("Could not delete managed capture file", exc_info=True)
 
     await hass.async_add_executor_job(_remove)
 
@@ -26075,6 +26079,7 @@ async def _async_record_clip(
         _LOGGER.debug("OpenReef clip skipped for %s: camera is already busy", camera_entity_id)
         return False
     try:
+        await hass.async_add_executor_job(capture_relative, _captures_dir(hass), video_path)
         data: dict[str, Any] = {
             ATTR_ENTITY_ID: camera_entity_id,
             "filename": str(video_path),
@@ -26115,7 +26120,10 @@ async def _async_write_snapshot(hass: HomeAssistant, entity_id: str, path: Path)
         from homeassistant.components import camera as camera_component
 
         image = await camera_component.async_get_image(hass, entity_id, timeout=10)
-        await hass.async_add_executor_job(path.write_bytes, image.content)
+        def _write() -> None:
+            capture_relative(_captures_dir(hass), path)
+            path.write_bytes(image.content)
+        await hass.async_add_executor_job(_write)
         return True
     except Exception:  # noqa: BLE001 - snapshot is best-effort
         _LOGGER.warning("OpenReef snapshot failed for %s", entity_id, exc_info=True)
@@ -26136,9 +26144,11 @@ async def _async_perform_capture(
     """Take a snapshot (always) + a clip (best-effort) and return a capture record."""
     captures_dir = _captures_dir(hass)
     await hass.async_add_executor_job(
-        lambda: captures_dir.mkdir(parents=True, exist_ok=True)
+        lambda: capture_path(captures_dir).mkdir(parents=True, exist_ok=True)
     )
     event_type = event_meta.get("eventType", "event")
+    if not safe_media_id(event_type):
+        raise ValueError("Invalid capture event type")
     base = f"{event_type}_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     duration = max(
         CAPTURE_MIN_DURATION,
@@ -26273,7 +26283,9 @@ def _dispatch_capture(
 
 def _timelapse_dir(hass: HomeAssistant, camera_id: str) -> Path:
     """Per-camera subdir of the captures dir holding (and serving) timelapse frames."""
-    return _captures_dir(hass) / TIMELAPSE_SUBDIR / camera_id
+    if not safe_media_id(camera_id):
+        raise ValueError("Invalid camera identifier")
+    return capture_path(_captures_dir(hass), f"{TIMELAPSE_SUBDIR}/{camera_id}")
 
 
 _TIMELAPSE_FRAME_RE = re.compile(r"^(\d{8}_\d{6})\.jpg$")
@@ -26353,9 +26365,11 @@ async def _async_prune_timelapse(
     frame_dir = _timelapse_dir(hass, camera_id)
 
     def _list() -> list[str]:
+        capture_relative(_captures_dir(hass), frame_dir)
         if not frame_dir.is_dir():
             return []
-        return [p.name for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg"]
+        return [p.name for p in frame_dir.iterdir()
+                if not p.is_symlink() and p.is_file() and p.suffix == ".jpg"]
 
     names = await hass.async_add_executor_job(_list)
     ts_by_name = {name: _timelapse_frame_timestamp(name) for name in names}
@@ -26371,10 +26385,12 @@ async def _async_prune_timelapse(
     def _remove() -> None:
         for name in to_delete:
             try:
-                (frame_dir / name).unlink()
+                path = frame_dir / name
+                capture_relative(_captures_dir(hass), path)
+                path.unlink()
             except FileNotFoundError:
                 pass
-            except OSError:
+            except (OSError, ValueError):
                 _LOGGER.debug("Could not delete timelapse frame %s", name, exc_info=True)
 
     await hass.async_add_executor_job(_remove)
@@ -26415,20 +26431,22 @@ async def _async_capture_timelapse_frame(
 
 def _feeds_dir(hass: HomeAssistant, session_id: str) -> Path:
     """Per-session subdir of the captures dir holding (and serving) feed-watch frames."""
-    return _captures_dir(hass) / FEEDS_SUBDIR / session_id
+    if not safe_media_id(session_id):
+        raise ValueError("Invalid feed session identifier")
+    return capture_path(_captures_dir(hass), f"{FEEDS_SUBDIR}/{session_id}")
 
 
 async def _async_delete_feed_dir(hass: HomeAssistant, session_id: str) -> None:
     """Best-effort remove of a feed session's frame directory."""
-    directory = _feeds_dir(hass, session_id)
-
     def _remove() -> None:
+        directory = _feeds_dir(hass, session_id)
         if not directory.is_dir():
             return
         for child in directory.iterdir():
             try:
+                capture_relative(_captures_dir(hass), child)
                 child.unlink()
-            except OSError:
+            except (OSError, ValueError):
                 pass
         try:
             directory.rmdir()
@@ -26442,7 +26460,8 @@ def _feed_session_frame_count(directory: Path) -> int:
     """Count a feed session's frames on disk — runs in the executor."""
     if not directory.is_dir():
         return 0
-    return sum(1 for p in directory.iterdir() if p.is_file() and p.suffix == ".jpg")
+    return sum(1 for p in directory.iterdir()
+               if not p.is_symlink() and p.is_file() and p.suffix == ".jpg")
 
 
 async def _async_stop_feed_watch(hass: HomeAssistant, entry: OpenReefConfigEntry) -> None:
@@ -26624,6 +26643,31 @@ async def websocket_list_recordings(
     connection.send_result(msg["id"], {"captures": captures, "baseUrl": CAPTURES_STATIC_URL})
 
 
+@websocket_api.websocket_command({
+    vol.Required("type"): "openreef/sign_capture_urls",
+    vol.Required("paths"): vol.All([str], vol.Length(max=100)),
+})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def websocket_sign_capture_urls(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Give the panel short-lived, session-bound URLs for private image/video tags."""
+    if _first_entry(hass) is None:
+        connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
+        return
+    from .media import async_sign_capture_paths
+
+    try:
+        result = await async_sign_capture_paths(
+            hass, _captures_dir(hass), msg["paths"], connection.refresh_token_id,
+        )
+    except ValueError as err:
+        connection.send_error(msg["id"], "invalid_media_request", str(err))
+        return
+    connection.send_result(msg["id"], result)
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "openreef/delete_recording",
@@ -26726,13 +26770,21 @@ async def websocket_list_timelapse_frames(
 
     frames: list[dict[str, str]] = []
     if camera_id:
-        frame_dir = _timelapse_dir(hass, camera_id)
+        try:
+            if not isinstance(cameras, dict) or camera_id not in cameras:
+                raise ValueError("Unknown camera")
+            frame_dir = _timelapse_dir(hass, camera_id)
+        except ValueError:
+            connection.send_error(msg["id"], "invalid_camera", "Unknown or unsafe camera identifier")
+            return
 
         def _list() -> list[str]:
+            capture_relative(_captures_dir(hass), frame_dir)
             if not frame_dir.is_dir():
                 return []
             return sorted(
-                p.name for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg"
+                p.name for p in frame_dir.iterdir()
+                if not p.is_symlink() and p.is_file() and p.suffix == ".jpg"
             )
 
         for name in await hass.async_add_executor_job(_list):
@@ -26807,16 +26859,24 @@ async def websocket_clear_timelapse(
         resolved = _resolve_capture_camera(hass, config, {})
         camera_id = resolved[0] if resolved else ""
     if camera_id:
-        frame_dir = _timelapse_dir(hass, camera_id)
+        try:
+            if camera_id not in (config.get("cameras") or {}):
+                raise ValueError("Unknown camera")
+            frame_dir = _timelapse_dir(hass, camera_id)
+        except ValueError:
+            connection.send_error(msg["id"], "invalid_camera", "Unknown or unsafe camera identifier")
+            return
 
         def _wipe() -> None:
+            capture_relative(_captures_dir(hass), frame_dir)
             if not frame_dir.is_dir():
                 return
             for p in frame_dir.iterdir():
-                if p.is_file() and p.suffix == ".jpg":
+                if not p.is_symlink() and p.is_file() and p.suffix == ".jpg":
                     try:
+                        capture_relative(_captures_dir(hass), p)
                         p.unlink()
-                    except OSError:
+                    except (OSError, ValueError):
                         _LOGGER.debug("Could not delete timelapse frame %s", p, exc_info=True)
 
         await hass.async_add_executor_job(_wipe)
@@ -26825,9 +26885,10 @@ async def websocket_clear_timelapse(
 
 def _feed_first_frame(directory: Path) -> str:
     """First (earliest) frame filename in a feed session dir, or '' — runs in executor."""
-    if not directory.is_dir():
+    if directory.is_symlink() or not directory.is_dir():
         return ""
-    names = sorted(p.name for p in directory.iterdir() if p.is_file() and p.suffix == ".jpg")
+    names = sorted(p.name for p in directory.iterdir()
+                   if not p.is_symlink() and p.is_file() and p.suffix == ".jpg")
     return names[0] if names else ""
 
 
@@ -26851,7 +26912,11 @@ async def websocket_list_feed_sessions(
         if not isinstance(session, dict) or not session.get("id"):
             continue
         session_id = session["id"]
-        first = await hass.async_add_executor_job(_feed_first_frame, _feeds_dir(hass, session_id))
+        try:
+            directory = _feeds_dir(hass, session_id)
+        except ValueError:
+            continue
+        first = await hass.async_add_executor_job(_feed_first_frame, directory)
         item = dict(session)
         item["thumbnail"] = f"{FEEDS_SUBDIR}/{session_id}/{first}" if first else ""
         enriched.append(item)
@@ -26875,12 +26940,21 @@ async def websocket_list_feed_frames(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     session_id = msg["session_id"]
-    frame_dir = _feeds_dir(hass, session_id)
+    config = _config_from_entry(entry)
+    try:
+        if not any(s.get("id") == session_id for s in config.get("feedSessions", [])):
+            raise ValueError("Unknown session")
+        frame_dir = _feeds_dir(hass, session_id)
+    except ValueError:
+        connection.send_error(msg["id"], "invalid_session", "Unknown or unsafe feed session identifier")
+        return
 
     def _list() -> list[str]:
+        capture_relative(_captures_dir(hass), frame_dir)
         if not frame_dir.is_dir():
             return []
-        return sorted(p.name for p in frame_dir.iterdir() if p.is_file() and p.suffix == ".jpg")
+        return sorted(p.name for p in frame_dir.iterdir()
+                      if not p.is_symlink() and p.is_file() and p.suffix == ".jpg")
 
     frames = [
         {"file": f"{FEEDS_SUBDIR}/{session_id}/{name}"}
@@ -26908,9 +26982,16 @@ async def websocket_delete_feed_session(
         connection.send_error(msg["id"], "not_configured", "OpenReef is not configured")
         return
     session_id = msg["session_id"]
-    await _async_delete_feed_dir(hass, session_id)
     config = _config_from_entry(entry)
     sessions = config.get("feedSessions")
+    try:
+        if not isinstance(sessions, list) or not any(s.get("id") == session_id for s in sessions):
+            raise ValueError("Unknown session")
+        _feeds_dir(hass, session_id)
+    except ValueError:
+        connection.send_error(msg["id"], "invalid_session", "Unknown or unsafe feed session identifier")
+        return
+    await _async_delete_feed_dir(hass, session_id)
     if isinstance(sessions, list):
         config["feedSessions"] = [
             s for s in sessions if not (isinstance(s, dict) and s.get("id") == session_id)
@@ -28979,6 +29060,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_apply_mode)
     websocket_api.async_register_command(hass, websocket_toggle_equipment)
     websocket_api.async_register_command(hass, websocket_list_recordings)
+    websocket_api.async_register_command(hass, websocket_sign_capture_urls)
     websocket_api.async_register_command(hass, websocket_delete_recording)
     websocket_api.async_register_command(hass, websocket_capture_now)
     websocket_api.async_register_command(hass, websocket_list_timelapse_frames)
@@ -29095,60 +29177,24 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, websocket_dosing_delete_channel)
     beta_feedback.async_register_ws(hass)  # BETA-FEEDBACK: remove after beta
 
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_APPLY_MODE,
-        _handle_apply_mode,
-        schema=APPLY_MODE_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RECORD_MANUAL_READING,
-        _handle_record_manual_reading,
-        schema=RECORD_MANUAL_READING_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_RECORD_TASK_COMPLETION,
-        _handle_record_task_completion,
-        schema=RECORD_TASK_COMPLETION_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_ARM_EQUIPMENT,
-        _handle_arm_equipment_service,
-        schema=EQUIPMENT_ARM_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_DISARM_EQUIPMENT,
-        _handle_disarm_equipment_service,
-        schema=EQUIPMENT_ARM_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_ACKNOWLEDGE_ALERT,
-        _handle_acknowledge_alert,
-        schema=ACKNOWLEDGE_ALERT_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_TEST_NOTIFICATION,
-        _handle_test_notification,
-        schema=TEST_NOTIFICATION_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_REFRESH_TRUST_CHECK,
-        _handle_refresh_trust_check,
-        schema=EMPTY_SERVICE_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_HEARTBEAT,
-        _handle_heartbeat,
-        schema=EMPTY_SERVICE_SCHEMA,
-    )
+    from homeassistant.helpers.service import async_register_admin_service
+
+    # Match the admin-only WebSocket actions. The HA helper still permits
+    # automations/system calls with no user context and denies non-admin users.
+    for service, handler, schema in (
+        (SERVICE_APPLY_MODE, _handle_apply_mode, APPLY_MODE_SCHEMA),
+        (SERVICE_RECORD_MANUAL_READING, _handle_record_manual_reading, RECORD_MANUAL_READING_SCHEMA),
+        (SERVICE_RECORD_TASK_COMPLETION, _handle_record_task_completion, RECORD_TASK_COMPLETION_SCHEMA),
+        (SERVICE_ARM_EQUIPMENT, _handle_arm_equipment_service, EQUIPMENT_ARM_SCHEMA),
+        (SERVICE_DISARM_EQUIPMENT, _handle_disarm_equipment_service, EQUIPMENT_ARM_SCHEMA),
+        (SERVICE_ACKNOWLEDGE_ALERT, _handle_acknowledge_alert, ACKNOWLEDGE_ALERT_SCHEMA),
+        (SERVICE_TEST_NOTIFICATION, _handle_test_notification, TEST_NOTIFICATION_SCHEMA),
+        (SERVICE_REFRESH_TRUST_CHECK, _handle_refresh_trust_check, EMPTY_SERVICE_SCHEMA),
+        (SERVICE_HEARTBEAT, _handle_heartbeat, EMPTY_SERVICE_SCHEMA),
+    ):
+        async_register_admin_service(
+            hass, DOMAIN, service, functools.partial(handler, hass), schema=schema,
+        )
 
     return True
 

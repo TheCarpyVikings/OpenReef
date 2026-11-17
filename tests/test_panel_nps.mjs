@@ -1872,7 +1872,7 @@ test("every hatchery gets its own pair of reminders on its own clock (0.7.147)",
     // The tab lists both pairs, named.
     panel._nps.summary.hatchery = v2HatcherySummary();
     const tab = panel._hatcheryTab();
-    assert(tab.includes("Start the next hatch — Port cone") && tab.includes("Harvest, rinse & load — Right cone"), "the tab names each hatchery's chores");
+    assert(tab.includes("Start the next hatch — Port cone") && tab.includes("Harvest, rinse &amp; load — Right cone"), "the tab names each hatchery's chores as escaped text");
     // Removing a hatchery takes its reminders with it (and the seeder prunes strays).
     delete panel._config.nps.hatchery.vessels.v2;
     panel._npsSeedHatchReminders();

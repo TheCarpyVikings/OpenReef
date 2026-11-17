@@ -19,7 +19,7 @@ export function validateContentType(
     expected: string = 'application/json'
 ): NextResponse | null {
     const contentType = req.headers.get('content-type');
-    if (!contentType || !contentType.includes(expected)) {
+    if (!contentType || contentType.split(';', 1)[0].trim().toLowerCase() !== expected) {
         return NextResponse.json(
             { error: `Unsupported Content-Type. Expected ${expected}` },
             { status: 415 }
@@ -100,4 +100,40 @@ export function validateBodySize(
         );
     }
     return null;
+}
+
+/** Bound bytes as they arrive, including chunked requests without Content-Length. */
+export async function readJsonBody(req: Request, maxBytes = 102400): Promise<
+    { data: unknown; error?: never } | { data?: never; error: NextResponse }
+> {
+    const contentLength = Number(req.headers.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+        return { error: NextResponse.json({ error: 'Request body too large' }, { status: 413 }) };
+    }
+    if (!req.body) return { error: NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) };
+    const reader = req.body.getReader();
+    const decoder = new TextDecoder();
+    let size = 0;
+    let text = '';
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; void reader.cancel().catch(() => {}); }, 10000);
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            if (timedOut) return { error: NextResponse.json({ error: 'Request body timed out' }, { status: 408 }) };
+            if (done) break;
+            size += value.byteLength;
+            if (size > maxBytes) {
+                void reader.cancel().catch(() => {});
+                return { error: NextResponse.json({ error: 'Request body too large' }, { status: 413 }) };
+            }
+            text += decoder.decode(value, { stream: true });
+        }
+        return { data: JSON.parse(text + decoder.decode()) };
+    } catch {
+        return { error: NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 }) };
+    } finally {
+        clearTimeout(timer);
+        reader.releaseLock();
+    }
 }

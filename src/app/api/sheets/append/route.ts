@@ -3,7 +3,7 @@ import { oauth2Client, TOKEN_PATH, type GoogleCredentials } from '@/lib/google-t
 import { appendToSheet } from '@/lib/google-sheets';
 import fs from 'fs';
 import { z } from 'zod';
-import { validateContentType, safeErrorResponse, isValidSheetRange, getErrorMessage } from '@/lib/validation';
+import { readJsonBody, validateContentType, safeErrorResponse, isValidSheetRange, getErrorMessage } from '@/lib/validation';
 import { rateLimit } from '@/lib/rate-limit';
 
 // Cell values can only be strings, numbers, booleans, or null — no objects/arrays
@@ -30,7 +30,9 @@ export async function POST(req: NextRequest) {
     if (ctError) return ctError;
 
     try {
-        const body = await req.json();
+        const bodyResult = await readJsonBody(req);
+        if (bodyResult.error) return bodyResult.error;
+        const body = bodyResult.data;
         const parsed = AppendSchema.safeParse(body);
         if (!parsed.success) {
             return NextResponse.json({ error: 'Invalid input', details: parsed.error.flatten() }, { status: 400 });

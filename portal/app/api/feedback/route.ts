@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { authenticate, clip, jsonError, overRateLimit, readJson } from "@/lib/api";
+import { authenticate, clip, jsonError, readJson } from "@/lib/api";
+import { limitRequest, takeRateLimit } from "@/lib/rate-limit";
 import { serviceClient } from "@/lib/supabase";
 import { KINDS, SEVERITIES, type Kind, type Severity } from "@/lib/types";
 
@@ -25,14 +26,18 @@ function asSeverity(value: unknown, kind: Kind): Severity {
  * immediately and quote it later.
  */
 export async function POST(request: Request) {
+  const limited = await limitRequest(request, "feedback");
+  if (limited) return limited;
   const auth = await authenticate(request);
   if ("error" in auth) return auth.error;
 
-  const body = await readJson(request);
+  const quota = await takeRateLimit(`feedback:tester:${auth.tester.id}`, 30);
+  if (quota) return quota;
+  const parsed = await readJson(request, 256 * 1024);
+  if ("error" in parsed) return parsed.error;
+  const body = parsed.body;
   const text = clip(body.body, 4000);
   if (!text) return jsonError("empty_body", 400);
-
-  if (await overRateLimit(auth.tester.id)) return jsonError("rate_limited", 429);
 
   const kind = asKind(body.kind);
   const supabase = serviceClient();

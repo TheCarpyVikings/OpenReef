@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import http from 'http';
 import https from 'https';
+import { Readable } from 'stream';
 import { getHAConfig } from '../ha-config';
 
 // Never cache this route.
@@ -11,7 +12,7 @@ export const dynamic = 'force-dynamic';
 // compression so frames are forwarded to the browser as they arrive from HA.
 export async function GET(request: NextRequest) {
     const entityId = request.nextUrl.searchParams.get('entity');
-    if (!entityId || !/^[a-z0-9_.]+$/.test(entityId)) {
+    if (!entityId || !/^camera\.[a-z0-9_]+$/.test(entityId)) {
         return NextResponse.json(
             { error: 'Missing or invalid entity parameter' },
             { status: 400 },
@@ -56,18 +57,7 @@ export async function GET(request: NextRequest) {
                 // Pipe HA bytes directly to the browser as a ReadableStream.
                 // Node.js emits chunks as they arrive from the TCP socket —
                 // no buffering, no compression.
-                const stream = new ReadableStream<Uint8Array>({
-                    start(controller) {
-                        res.on('data', (chunk: Buffer) =>
-                            controller.enqueue(new Uint8Array(chunk)),
-                        );
-                        res.on('end', () => controller.close());
-                        res.on('error', (err) => controller.error(err));
-                    },
-                    cancel() {
-                        req.destroy();
-                    },
-                });
+                const stream = Readable.toWeb(res) as ReadableStream<Uint8Array>;
 
                 resolve(
                     new Response(stream, {
@@ -82,10 +72,10 @@ export async function GET(request: NextRequest) {
             },
         );
 
-        req.on('error', (err) => {
+        req.on('error', () => {
             resolve(
                 NextResponse.json(
-                    { error: `Could not reach HA: ${err}` },
+                    { error: 'Could not load camera stream' },
                     { status: 502 },
                 ),
             );
@@ -93,6 +83,8 @@ export async function GET(request: NextRequest) {
 
         // Cancel the HA request when the browser disconnects.
         request.signal.addEventListener('abort', () => req.destroy());
+        req.setTimeout(15000, () => req.destroy(new Error('Camera stream timed out')));
+        if (request.signal.aborted) req.destroy();
 
         req.end();
     });

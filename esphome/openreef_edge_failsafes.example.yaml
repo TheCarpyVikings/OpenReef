@@ -18,6 +18,7 @@ substitutions:
   ato_max_run: 20s
 
 esphome:
+  min_version: 2026.10.0
   name: ${name}
   friendly_name: ${friendly_name}
 
@@ -26,10 +27,14 @@ esp32:
 
 logger:
 
+# API and OTA share a unique per-device key. See docs/manual/firmware-encryption.md.
 api:
+  encryption:
+    key: !secret openreef_edge_encryption_key
 
 ota:
   - platform: esphome
+    encryption:
 
 wifi:
   ssid: !secret wifi_ssid
@@ -99,7 +104,8 @@ switch:
       - if:
           condition:
             lambda: |-
-              return !isnan(id(tank_temp).state) && id(tank_temp).state <= ${heater_enable_below_c};
+              return id(leak_sensor).has_state() && !id(leak_sensor).state &&
+                     std::isfinite(id(tank_temp).state) && id(tank_temp).state <= ${heater_enable_below_c};
           then:
             - switch.turn_on: heater_relay
           else:
@@ -140,7 +146,7 @@ switch:
 
 script:
   - id: ato_timed_run
-    mode: restart
+    mode: single
     then:
       - switch.turn_on: ato_pump_relay
       - delay: ${ato_max_run}
@@ -152,7 +158,8 @@ interval:
       - if:
           condition:
             lambda: |-
-              return isnan(id(tank_temp).state) || id(tank_temp).state >= ${heater_cutoff_c};
+              return !id(leak_sensor).has_state() || id(leak_sensor).state ||
+                     !std::isfinite(id(tank_temp).state) || id(tank_temp).state >= ${heater_cutoff_c};
           then:
             - switch.turn_off: heater_relay
       - if:

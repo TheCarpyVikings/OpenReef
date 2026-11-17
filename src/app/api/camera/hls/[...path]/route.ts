@@ -17,6 +17,13 @@ export async function GET(
     { params }: { params: Promise<{ path: string[] }> },
 ) {
     const { path } = await params;
+    // Next decodes route segments: reject embedded slashes, dot segments and
+    // query/fragment characters before constructing an upstream URL.
+    if (!Array.isArray(path) || path.length < 2 || path.length > 6 ||
+        path.some((part) => !/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,199}$/.test(part)) ||
+        !/\.(m3u8|m4s|mp4|ts)$/.test(path[path.length - 1])) {
+        return NextResponse.json({ error: 'Invalid HLS path' }, { status: 400 });
+    }
     const haPath = path.join('/');
 
     const ha = await getHAConfig();
@@ -28,16 +35,18 @@ export async function GET(
     try {
         haRes = await fetch(`${ha.url}/api/hls/${haPath}`, {
             cache: 'no-store',
+            redirect: 'error',
+            signal: AbortSignal.timeout(15000),
         });
-    } catch (err) {
+    } catch {
         return NextResponse.json(
-            { error: `Could not reach HA: ${err}` },
+            { error: 'Could not load camera stream' },
             { status: 502 },
         );
     }
 
     if (!haRes.ok) {
-        return new Response(haRes.body, { status: haRes.status });
+        return NextResponse.json({ error: 'Camera stream unavailable' }, { status: haRes.status });
     }
 
     const contentType = haRes.headers.get('Content-Type') || 'application/octet-stream';

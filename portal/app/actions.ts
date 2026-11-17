@@ -3,9 +3,9 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireOwner } from "@/lib/auth";
-import { newInviteCode } from "@/lib/api";
+import { hashToken, newInviteCode } from "@/lib/api";
 import { serviceClient, sessionClient } from "@/lib/supabase";
-import { CLOSED_STATUSES, STATUSES, TESTER_STATUSES, type Status, type TesterStatus } from "@/lib/types";
+import { CLOSED_STATUSES, STATUSES, TESTER_STATUSES, type InviteState, type Status, type TesterStatus } from "@/lib/types";
 
 /*
  * Every mutation in the portal.
@@ -94,37 +94,51 @@ export async function saveOwnerNote(form: FormData) {
 
 /* --- testers -------------------------------------------------------------- */
 
-/** Create an invited tester and mint their code. Retries once on the
- *  astronomically unlikely code collision rather than showing an error. */
-export async function createTester(form: FormData) {
+/** Returned once to the owner's action response, never saved as plaintext or
+ * placed in a URL/cookie. Seven days gives the tester time to install HA. */
+async function invitation() {
+  const code = newInviteCode();
+  const expiresAt = new Date(Date.now() + 7 * 86_400_000).toISOString();
+  return { code, expiresAt, hash: await hashToken(code) };
+}
+
+export async function createTester(_previous: InviteState, form: FormData): Promise<InviteState> {
   await requireOwner();
   const name = text(form, "name", 120);
-  if (!name) return;
+  if (!name) return { error: "Enter the tester's name." };
   const email = text(form, "email", 320).toLowerCase();
   const supabase = serviceClient();
-
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const { error } = await supabase
-      .from("beta_testers")
-      .insert({ name, email: email || null, code: newInviteCode() });
-    if (!error) break;
-  }
+  const invite = await invitation();
+  const { data, error } = await supabase.from("beta_testers").insert({
+    name, email: email || null, invite_hash: invite.hash, invite_expires_at: invite.expiresAt,
+  }).select("id").single();
+  if (error || !data) return { error: "Could not create the invitation. Check the portal database migration and try again." };
 
   // If they came from the waiting list, link the signup so the funnel stays
   // legible: how many asked, how many were invited, how many actually enrolled.
   const signupId = text(form, "signup_id", 64);
   if (signupId && email) {
-    const { data } = await supabase
-      .from("beta_testers")
-      .select("id")
-      .eq("email", email)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (data) await supabase.from("beta_signups").update({ tester_id: data.id }).eq("id", signupId);
+    await supabase.from("beta_signups").update({ tester_id: data.id }).eq("id", signupId).eq("email", email);
   }
 
-  revalidatePath("/testers");
+  // Keep the form mounted until the owner has copied its one-time result.
+  // Revalidating here would remove a promoted waiting-list row and its code.
+  return { code: invite.code, expiresAt: invite.expiresAt, testerName: name };
+}
+
+/** Fresh recovery invitation. The current install keeps its token until the
+ * new invitation is redeemed; issuing one never resumes a paused account. */
+export async function reissueInvite(_previous: InviteState, form: FormData): Promise<InviteState> {
+  await requireOwner();
+  const id = text(form, "id", 64);
+  if (!id) return { error: "Choose a tester." };
+  const invite = await invitation();
+  const { data, error } = await serviceClient().from("beta_testers")
+    .update({ invite_hash: invite.hash, invite_expires_at: invite.expiresAt })
+    .eq("id", id).in("status", ["invited", "active"])
+    .select("name").maybeSingle();
+  if (error || !data) return { error: "Could not issue a code. Resume or restore the tester first, then try again." };
+  return { code: invite.code, expiresAt: invite.expiresAt, testerName: data.name };
 }
 
 /**
@@ -142,7 +156,11 @@ export async function setTesterStatus(form: FormData) {
 
   await serviceClient()
     .from("beta_testers")
-    .update({ status: next, ...(next === "revoked" ? { token_hash: null } : {}) })
+    .update({
+      status: next,
+      ...(next === "paused" || next === "revoked" ? { invite_hash: null, invite_expires_at: null } : {}),
+      ...(next === "revoked" ? { token_hash: null } : {}),
+    })
     .eq("id", id);
   revalidatePath("/testers");
 }

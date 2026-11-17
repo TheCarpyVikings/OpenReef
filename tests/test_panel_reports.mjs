@@ -145,12 +145,18 @@ test("test_dialog_renders_every_section_and_links_rows_to_tasks", async () => {
     { id: "y", timestamp: new Date(2026, 8, 20, 12).toISOString(), label: "Later", thumbnail: "thumbs/y.jpg" },
   ] });
   panel._report = { open: true, loading: false, error: "", data: fixtureReport(), at: Date.now(), period: "week", which: "previous" };
+  panel._callWS = async ({ paths }) => ({
+    urls: Object.fromEntries(paths.map((path) => [path, `/openreef_captures/${path}?authSig=test`])),
+    expiresAt: new Date(Date.now() + 600000).toISOString(),
+  });
+  panel._reportDialog();
+  await panel._captureSigning;
   const html = panel._reportDialog();
   assert(html.includes('class="wizard trend-dialog report-dialog"'), "a distinctive dialog class (scroll restore)");
   assert(html.includes("7–13 September 2026") && html.includes("80<span>/100</span>") && html.includes("up 9 on the period before"));
   assert(html.includes("6 chores ticked off, 80 % on time, water steady."));
   assert(html.includes("Stamped on 3 of 7 days — 4 days the panel stayed closed."));
-  assert(html.includes('src="/openreef_captures/thumbs/x.jpg"') && !html.includes("thumbs/y.jpg"), "the photo of the week is from the week");
+  assert(html.includes('src="/openreef_captures/thumbs/x.jpg?authSig=test"') && !html.includes("thumbs/y.jpg"), "the authenticated photo of the week is from the week");
   for (const heading of ["What you did", "Water", "Living reef", "What happened", "Next week", "Notes"]) assert(html.includes(heading), heading);
   assert(html.includes('data-action="report-task" data-id="water"') && html.includes('data-action="report-task" data-id="brine_hatch_start"'));
   assert(html.includes("(no longer tracked)"));
@@ -308,7 +314,7 @@ test("test_month_dialog_renders_the_monthly_sections", async () => {
   assert(html.includes("Triton") && html.includes("1 flagged") && html.includes("against Triton · 2026-07-10") && html.includes("Iodine") && html.includes("-33 %") && html.includes("+7 %"));
   assert(html.includes('data-action="report-task" data-id="replace_carbon"') && html.includes("73 d") && html.includes(">overdue<") && html.includes(">never logged<") && html.includes("Sediment · 105 %"));
   assert(html.includes("New this period: Goniopora"));
-  assert(html.includes("First of the month") && html.includes("Last of the month") && html.includes("thumbs/a.jpg") && html.includes("thumbs/c.jpg") && !html.includes("thumbs/b.jpg"), "first and last capture of the month");
+  assert(html.includes("First of the month") && html.includes("Last of the month") && html.includes("thumbs%2Fa.jpg") && html.includes("thumbs%2Fc.jpg") && !html.includes("thumbs%2Fb.jpg"), "first and last capture of the month wait for authenticated media URLs");
   data.month.icp = { any: true, inPeriod: false, daysSinceLast: 140, latest: { lab: "ATI", date: "2026-04-14" }, previous: null, movers: [] };
   data.month.goals = { from: null, items: [], cleared: 0, open: 0 };
   data.recommendations = { size: "big", calm: true, snoozed: [], raised: [], items: [{ id: "keep_rhythm", size: "big", title: "Keep the rhythm", evidence: "Nothing in this month asked for a change.", effort: "none", effect: "The reef likes it this way.", actions: [] }] };
