@@ -1,13 +1,15 @@
 # Hardware manual handover brief
 
-Attach this file **plus the four sources listed below** when asking another assistant to
+Attach this file **plus the current sources listed below** when asking another assistant to
 write or rewrite the hardware half of the DIY manual. It exists because this repo carries
 several older pin tables that are still useful prose but wrong copper — the single most
 likely way to end up with a confidently-written manual that miswires a build.
 
-Regenerated 2026-08-03 after the **multi-node pivot** (`MULTINODE_PIVOT_BRIEF.md`,
-repo v0.6.6). If the dosingnode design doc and this file ever disagree, the design doc
-wins and this file is stale.
+Rechecked 2026-10-31 for the **multi-node Node 1 NPS build**: stepper for
+phyto, brushed heads for AWC drain/fill and live food. Start with the
+[interactive build guide](nps-build-guide.html). If the dosingnode design doc
+and this file disagree, the design doc wins. The current workspace firmware
+includes changes after v0.7.228; use the matching YAML and local component folder.
 
 ---
 
@@ -16,9 +18,13 @@ wins and this file is stale.
 | File | Why |
 |---|---|
 | `docs/manual/dosingnode-s3zero-design.md` | **THE pin/contract authority for Node 1** — the dosing station actually being built. Every GPIO number comes from here. |
-| `docs/manual/dosingnode-s3zero-reference.yaml` | **THE flashable node.** The entity `name:` values in it are an API, not labels. |
-| `docs/HARDWARE_BUILD_BRIEF.md` | Topology + bench state, electrical decisions (D4184 modules, 1N5819 flybacks), ESPHome gotchas, entity-contract rules. |
-| `docs/OPENREEF_DOSING_SMOKE_TEST.md` | §7–§10 bring-up, **§11b is Node 1's variant**, §12 soak with its per-topology posture. |
+| `docs/manual/dosingnode-s3zero-reference.yaml` and adjacent `esphome_components/` | **The matching firmware source and required local driver.** Preserve entity names, GPIOs and pinned dependencies. |
+| `docs/manual/nps-build-guide.html` | Interactive sequence, progress and bench checkpoints. No hardware control. |
+| `docs/AWC_NPS_SAFETY_AUDIT.md` | Current fault model, hardware acceptance and remaining limits. |
+| `docs/HARDWARE_BUILD_BRIEF.md` | Historical topology/bench context only. Later dosingnode corrections take precedence. |
+
+`docs/OPENREEF_DOSING_SMOKE_TEST.md` §11b/§12 is **superseded for this Node 1
+build**. Its chaser, empty-guard and outage statements are not current acceptance criteria.
 
 Optional, for prose and diagrams only — **their pin tables are superseded for Node 1**:
 
@@ -64,28 +70,41 @@ Board facts: header pins GP1–GP13 + GP43/44 only; GP14–18 are bottom pads (u
 ## 4. Facts the manual must state (Node 1)
 
 - **Logger runs on native USB** — `logger: hardware_uart: USB_CDC` (arduino). UART0's
-  pins drive the stepper; without this line the boot log corrupts the TMC2209. First
+  pins drive the stepper; application logs must not share that UART. First
   flash: hold BOOT while connecting USB-C; USB-CDC logs appear only after enumeration.
-- **The S3 ROM prints boot output on GP43 at every reset**, before firmware, regardless
-  of logger config. Harmless — the TMC2209 UART is CRC-guarded. Document it so nobody
-  ever chases it as a fault.
+- **ROM boot output on GP43 is expected before application firmware.** CRC checking
+  is not proof of fail-OFF behaviour. Verify ENN and no uncommanded motion through
+  cold boot, reset and power interruption with outlets in catch containers.
 - **Bench gate: D4184 TRIG must sit LOW when floating** (pump must not run with TRIG
-  disconnected). If it does, add 10 kΩ from TRIG to GND on that module. This preserves
-  pumps-stay-off through crashes and brownouts — it replaces the discrete build's
-  mandatory 10 kΩ gate pull-down.
-- **1N5819** leaded Schottky flybacks directly across each brushed motor's tabs
-  (functional equivalent of the spec'd SS34), banded end to +12 V.
+  disconnected). If it does, add 10 kΩ from TRIG to GND on that module and repeat
+  the test. That pull-down does not replace the actual boot/reset and power-loss
+  checks with the motor rail present.
+- **Flyback diodes** go directly across each brushed motor's tabs, banded end to
+  motor positive. A 1 A 1N5819 is not automatically equivalent to a 3 A SS34; verify
+  the actual motor current, transient and thermal requirements.
+- **BTT V1.3 PDN_UART routing** is factory J1 pin 4, with a solder option for pin 5.
+  Verify the actual board and solder state; clone routing may differ.
+- The current YAML needs local `wifi_ssid`, `wifi_password` and
+  `openreef_dosing_encryption_key` secrets (32 random bytes, base64 encoded).
+  OTA encryption inherits the API key. The 2026-10-31 workspace compile used
+  ESPHome 2026.10.0 and dummy credentials; never flash that dummy build.
 - **No master relay, no leak float, no tank floats on this node.** The reservoir-low
   entities exist but are template stubs reading permanently clear — OpenReef's software
-  ledger is the empty-guard. Honest residual risk: a shorted MOSFET or TMC2209 runs
-  until 12 V is pulled; mitigations are the fuse, dose lines ending **in air above the
-  waterline**, and reservoir sizing (never plumb more water than the tank can absorb).
+  ledger estimates stock and warns; it is not a physical empty cutoff. A shorted
+  MOSFET or TMC2209 runs until 12 V is pulled. Limit source/waste volumes and prove
+  power-off flow at actual heights. An outlet air gap prevents tank back-siphoning
+  but does not prevent an elevated source siphoning forward. A fuse protects
+  wiring, not dosing volume.
 - The AWC panel permits running with no safety sensors bound; from 0.6.7 it asks for a
   one-click **flood-failsafe acknowledgement** first. The manual should present that as
   informed consent, not a nag.
-- Kalk chemistry safety is unchanged: dose above the waterline with a siphon break; pH
-  guard (via a future sensor node) is the primary chemical safety; never dose cloudy
-  slurry.
+- For this NPS build, the stepper contains **phyto**, uses OpenReef **Food**, and
+  retains **Kalk** entity names. Brushed live food uses **Live food**. Create these
+  through **+ Phyto pump** / **+ Live food doser**; the reference design gives the
+  current binding, calibration and freshness steps.
+- Food enable leases expire after 180 s without verified renewal; API loss stops
+  food motion. Automatic chaser/rinse is disabled. Do not promise dosing through
+  an HA outage. These are software limits, not independent physical cutoffs.
 
 ## 5. The entity-name contract — do not paraphrase this away
 
@@ -101,11 +120,11 @@ The panel auto-binds a doser by **slugified entity-id suffix**, and
 4. The kalk pH guard subscribes to the fixed HA-side id
    `sensor.openreef_kalk_ph_mirror` — published by the integration, node-agnostic; the
    probe simply lives on a future sensor node.
-5. Frozen skip-reason vocabulary: `disabled · ha_suspend · reservoir_low ·
-   not_calibrated · out_of_window · ph_guard · daily_cap · spacing · ok HH:MM`.
+5. Read skip reasons from the matching YAML; current firmware also reports lease,
+   lock and interrupted-run conditions. Do not copy an older vocabulary as exhaustive.
 6. Auto-bind expects **kalk 25/25** (rev 3) and **live-food 22/22**; the stubbed floats
-   keep both counts whole. One auto-bindable channel family per HA instance — extra
-   nodes bind via the per-role overrides.
+   keep both counts whole. Multiple matching nodes are ambiguous; select explicit
+   per-role overrides and verify each physical pump identity into a cup.
 
 ## 6. Known gaps, as of the pivot
 
@@ -127,6 +146,7 @@ The panel auto-binds a doser by **slugified entity-id suffix**, and
 > different, optional topology; present it as such or not at all). Do not invent part
 > numbers, pin assignments or entity names. Where the attached sources are silent, say
 > so plainly rather than filling the gap. Keep the entity-name contract verbatim.
-> Include the bench gates (D4184 floating-TRIG check; GP43 ROM boot chatter is
-> harmless) and the honest residual-risk paragraph. End with the bring-up order:
-> smoke test §7–§10, then §11b, then §12 under its Node 1 posture.
+> Include the bench gates (D4184 floating-TRIG check; ENN and no motion through
+> boot/reset; suitable flyback ratings; power-off siphon checks) and the residual
+> risks. Follow the current interactive build guide and dosingnode commissioning
+> sequence. Do not use the superseded smoke-test §11b/§12 as acceptance authority.
