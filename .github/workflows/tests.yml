@@ -18,14 +18,9 @@ on:
       - "esphome/**"
       - "docs/manual/esphome_components/**"
       - ".github/workflows/tests.yml"
+  # No path filter on PRs: `checks` is a required status on main, so a PR that
+  # skipped this workflow (docs or config only) could never be merged.
   pull_request:
-    paths:
-      - "custom_components/openreef/**"
-      - "tests/**"
-      - "docs/manual/*reference.yaml"
-      - "esphome/**"
-      - "docs/manual/esphome_components/**"
-      - ".github/workflows/tests.yml"
 
 permissions:
   contents: read
