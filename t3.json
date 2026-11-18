@@ -1,0 +1,22 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "defaultThreadEnvMode": "worktree",
+  "scripts": [
+    {
+      "name": "Demo HA",
+      "command": "bash scripts/demo-ha/up.sh",
+      "icon": "play"
+    },
+    {
+      "name": "Demo HA: remove",
+      "command": "bash scripts/demo-ha/down.sh",
+      "icon": "configure",
+      "runOnSettle": true
+    },
+    {
+      "name": "Checks",
+      "command": "python3 -m py_compile custom_components/openreef/*.py && node --check custom_components/openreef/frontend/openreef-panel.js && for s in tests/test_*.py; do python3 \"$s\" || exit 1; done && for s in tests/test_*.mjs; do node \"$s\" || exit 1; done && echo ALL CHECKS PASSED",
+      "icon": "test"
+    }
+  ]
+}
