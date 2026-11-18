@@ -34,7 +34,7 @@
     "@types/ws": "^8.18.2",
     "eslint": "^9.39.5",
     "eslint-config-next": "16.4.6",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   },
   "engines": {
     "node": ">=22.23.4 <23"
