@@ -1,21 +1,45 @@
+# One grouped PR per app per week for minor/patch updates; no major-version PRs.
+# Majors become deliberate tickets. Dependabot *security* updates are separate and
+# still open individually when an advisory applies.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    groups:
+      dashboard-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: npm
     directory: /portal
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    groups:
+      portal-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: npm
     directory: /site
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    groups:
+      site-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
