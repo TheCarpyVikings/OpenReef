@@ -5,7 +5,7 @@ import type { GoogleCredentials } from '@/lib/google-tasks';
 import type { tasks_v1 } from 'googleapis';
 import fs from 'fs';
 import { z } from 'zod';
-import { validateContentType, safeErrorResponse, getErrorMessage } from '@/lib/validation';
+import { readJsonBody, validateContentType, safeErrorResponse, getErrorMessage } from '@/lib/validation';
 import { rateLimit } from '@/lib/rate-limit';
 import type { ReefTask, TaskPriority } from '@/types/reef';
 
@@ -144,7 +144,9 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-        const body = await req.json();
+        const bodyResult = await readJsonBody(req);
+        if (bodyResult.error) return bodyResult.error;
+        const body = bodyResult.data;
         const parsed = TaskActionSchema.safeParse(body);
         if (!parsed.success) {
             return NextResponse.json({ error: 'Invalid input', details: parsed.error.flatten() }, { status: 400 });

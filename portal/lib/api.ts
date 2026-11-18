@@ -14,7 +14,7 @@ import type { Tester } from "./types";
  */
 
 export function jsonError(error: string, status: number) {
-  return NextResponse.json({ error }, { status });
+  return NextResponse.json({ error }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
 /** Tokens are 32 random bytes, hex. Stored only as a SHA-256 digest. */
@@ -28,13 +28,11 @@ export async function hashToken(token: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** Invite codes: uppercase, no vowels and no 0/1/I/O — unambiguous read aloud
- *  and impossible to accidentally spell a word with. */
+/** 128 random bits; 37 characters fits the existing HA client's 64-char limit.
+ * Only a digest is stored. Copy/paste is preferable to reading this aloud. */
 export function newInviteCode(): string {
-  const alphabet = "BCDFGHJKLMNPQRSTVWXYZ23456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  const pick = (index: number) => alphabet[bytes[index] % alphabet.length];
-  return `REEF-${pick(0)}${pick(1)}${pick(2)}${pick(3)}`;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return `REEF-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 }
 
 export function bearer(request: Request): string {
@@ -47,13 +45,44 @@ export function clip(value: unknown, max: number): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
-/** Body parse that never throws — an empty or non-JSON body becomes {}. */
-export async function readJson(request: Request): Promise<Record<string, unknown>> {
+/** Bound bytes while reading, including chunked bodies without Content-Length.
+ * Field clipping alone happens too late to protect JSON parsing/memory. */
+export async function readJson(
+  request: Request,
+  maxBytes = 8192,
+): Promise<{ body: Record<string, unknown> } | { error: NextResponse }> {
+  if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") {
+    return { error: jsonError("json_required", 415) };
+  }
+  const length = request.headers.get("content-length");
+  if (length && Number(length) > maxBytes) return { error: jsonError("body_too_large", 413) };
+  const reader = request.body?.getReader();
+  if (!reader) return { error: jsonError("invalid_json", 400) };
+  let size = 0;
+  const chunks: Uint8Array[] = [];
   try {
-    const parsed = await request.json();
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        void reader.cancel().catch(() => undefined);
+        return { error: jsonError("body_too_large", 413) };
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: jsonError("invalid_json", 400) };
+    }
+    return { body: parsed as Record<string, unknown> };
   } catch {
-    return {};
+    return { error: jsonError("invalid_json", 400) };
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -71,6 +100,7 @@ export async function authenticate(
 ): Promise<{ tester: AuthedTester } | { error: NextResponse }> {
   const token = bearer(request);
   if (!token) return { error: jsonError("missing_token", 401) };
+  if (!/^[a-f0-9]{64}$/.test(token)) return { error: jsonError("invalid_token", 401) };
 
   const supabase = serviceClient();
   const { data, error } = await supabase
@@ -84,24 +114,4 @@ export async function authenticate(
   if (data.status === "revoked") return { error: jsonError("revoked", 403) };
   if (data.status !== "active") return { error: jsonError("inactive", 403) };
   return { tester: data as AuthedTester };
-}
-
-/**
- * Crude per-tester submission cap.
- *
- * Not a security control — it exists so a broken install stuck in a retry loop
- * cannot bury a day's real feedback under ten thousand identical rows. A
- * genuine tester will never come close to it, and it counts rows rather than
- * keeping state, so it survives serverless cold starts.
- */
-export async function overRateLimit(testerId: string): Promise<boolean> {
-  const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const supabase = serviceClient();
-  const { count, error } = await supabase
-    .from("beta_feedback")
-    .select("id", { count: "exact", head: true })
-    .eq("tester_id", testerId)
-    .gte("created_at", since);
-  if (error) return false; // a failed check must not block real feedback
-  return (count ?? 0) >= 30;
 }

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticate, clip, readJson } from "@/lib/api";
+import { limitRequest, takeRateLimit } from "@/lib/rate-limit";
 import { serviceClient } from "@/lib/supabase";
 
 /** Non-negative integer or null. Anything else the client sends is discarded
@@ -64,10 +65,16 @@ export const dynamic = "force-dynamic";
  * not select it.
  */
 export async function POST(request: Request) {
+  const limited = await limitRequest(request, "sync");
+  if (limited) return limited;
   const auth = await authenticate(request);
   if ("error" in auth) return auth.error;
 
-  const body = await readJson(request);
+  const quota = await takeRateLimit(`sync:tester:${auth.tester.id}`, 120);
+  if (quota) return quota;
+  const parsed = await readJson(request);
+  if ("error" in parsed) return parsed.error;
+  const body = parsed.body;
   const supabase = serviceClient();
 
   const [items, announcements] = await Promise.all([

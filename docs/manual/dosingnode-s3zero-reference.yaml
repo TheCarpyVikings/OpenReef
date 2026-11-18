@@ -132,9 +132,14 @@ external_components:
 
 # Local watchdogs do not depend on HA. Scheduled food delivery additionally
 # requires a verified enable heartbeat from OpenReef at least every 180 s.
+# API and OTA share a unique per-device key. See docs/manual/firmware-encryption.md.
 api:
+  encryption:
+    key: !secret openreef_dosing_encryption_key
+
 ota:
   - platform: esphome
+    encryption:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password

@@ -85,7 +85,7 @@ export type FeedbackDetail = InboxRow & {
 
 export type Tester = {
   id: string;
-  code: string;
+  invite_expires_at: string | null;
   name: string;
   email: string | null;
   status: TesterStatus;
@@ -113,6 +113,14 @@ export type Tester = {
   sensors_mapped: number | null;
   equipment_mapped: number | null;
   equipment_armed: number | null;
+};
+
+/** Owner-only one-time action response. Never persisted or included in links. */
+export type InviteState = {
+  error?: string;
+  code?: string;
+  expiresAt?: string;
+  testerName?: string;
 };
 
 export type Announcement = {

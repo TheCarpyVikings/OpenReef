@@ -1,67 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { validateContentType } from '@/lib/validation';
+import { readJsonBody, validateContentType } from '@/lib/validation';
+import { rateLimit } from '@/lib/rate-limit';
+import { constantTimeEqual, createSession, sameOriginRequest, SESSION_COOKIE, SESSION_MAX_AGE, validApiSecret } from '@/lib/session';
 
-const SessionSchema = z.object({
-    secret: z.string().min(1).max(256),
-});
+const SessionSchema = z.object({ secret: z.string().min(1).max(256) });
 
-/**
- * POST /api/auth/session
- *
- * Sets the API secret as an httpOnly session cookie.
- * This replaces the NEXT_PUBLIC_API_SECRET approach — the secret
- * is sent once from the client and stored as a secure cookie,
- * keeping it out of the JS bundle.
- */
 export async function POST(req: NextRequest) {
+    if (!sameOriginRequest(req)) {
+        return NextResponse.json({ error: 'Cross-origin request denied' }, { status: 403 });
+    }
     const ctError = validateContentType(req);
     if (ctError) return ctError;
-
-    try {
-        const body = await req.json();
-        const parsed = SessionSchema.safeParse(body);
-        if (!parsed.success) {
-            return NextResponse.json(
-                { error: 'Invalid input' },
-                { status: 400 }
-            );
-        }
-
-        const { secret } = parsed.data;
-
-        // Verify the secret matches the configured API_SECRET
-        const apiSecret = process.env.API_SECRET;
-        if (!apiSecret) {
-            // No API_SECRET configured — development mode, no cookie needed
-            return NextResponse.json({ success: true, mode: 'development' });
-        }
-
-        // Timing-safe comparison
-        if (secret.length !== apiSecret.length) {
-            return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
-        }
-        const bufA = new TextEncoder().encode(secret);
-        const bufB = new TextEncoder().encode(apiSecret);
-        let mismatch = 0;
-        for (let i = 0; i < bufA.length; i++) {
-            mismatch |= bufA[i] ^ bufB[i];
-        }
-        if (mismatch !== 0) {
-            return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
-        }
-
-        const response = NextResponse.json({ success: true });
-        response.cookies.set('api_session', secret, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'strict',
-            path: '/',
-            maxAge: 60 * 60 * 24 * 30, // 30 days
-        });
-
-        return response;
-    } catch {
-        return NextResponse.json({ error: 'Session initialization failed' }, { status: 500 });
+    const limitError = rateLimit('session-login', 10);
+    if (limitError) return limitError;
+    const apiSecret = process.env.API_SECRET;
+    if (!validApiSecret(apiSecret)) {
+        return NextResponse.json({ error: 'Dashboard authentication is not configured' }, { status: 503 });
     }
+    const body = await readJsonBody(req, 2048);
+    if (body.error) return body.error;
+    const parsed = SessionSchema.safeParse(body.data);
+    if (!parsed.success) return NextResponse.json({ error: 'Invalid input' }, { status: 400 });
+    if (!constantTimeEqual(parsed.data.secret, apiSecret)) {
+        return NextResponse.json({ error: 'Invalid secret' }, { status: 401 });
+    }
+
+    const response = NextResponse.json({ success: true });
+    response.headers.set('Cache-Control', 'no-store');
+    response.cookies.set(SESSION_COOKIE, await createSession(apiSecret), {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        path: '/',
+        maxAge: SESSION_MAX_AGE,
+    });
+    return response;
+}
+
+export async function DELETE(req: NextRequest) {
+    if (!sameOriginRequest(req)) {
+        return NextResponse.json({ error: 'Cross-origin request denied' }, { status: 403 });
+    }
+    const response = NextResponse.json({ success: true });
+    response.cookies.delete(SESSION_COOKIE);
+    return response;
 }

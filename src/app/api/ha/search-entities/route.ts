@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { HAApiError, haWebSocketCommand } from '@/lib/server/ha-api';
-import { validateContentType } from '@/lib/validation';
+import { readJsonBody, validateContentType } from '@/lib/validation';
 import type { OpenReefEntitySearchResponse } from '@/types/reef';
 
 export const dynamic = 'force-dynamic';
@@ -29,7 +29,9 @@ export async function POST(req: NextRequest) {
     if (ctError) return ctError;
 
     try {
-        const parsed = SearchSchema.safeParse(await req.json());
+        const body = await readJsonBody(req);
+        if (body.error) return body.error;
+        const parsed = SearchSchema.safeParse(body.data);
         if (!parsed.success) {
             return NextResponse.json({ error: 'Invalid input', details: parsed.error.flatten() }, { status: 400 });
         }

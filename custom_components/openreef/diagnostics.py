@@ -20,6 +20,11 @@ TO_REDACT = {
     "google_client_id",
     "refresh_token",
     "access_token",
+    "token",  # beta feedback portal bearer credential (stored outside settings)
+    "api_key",
+    "apiKey",
+    "password",
+    "secret",
 }
 
 

@@ -314,14 +314,19 @@ class OpenReefBetaFab extends HTMLElement {
     const message = err?.message || err?.error || "";
     if (/not_enrolled/.test(message)) return "Enter your invite code first.";
     if (/agreement_required/.test(message)) return "Tick the agreement box first — the links above are the short version of what you're agreeing to.";
-    if (/invalid_code|enrol_failed/.test(message)) return "That code didn't work. Check it and try again.";
+    if (/invalid_code|enrol_failed/.test(message)) return "That invitation could not be accepted. Ask Reece for a fresh invite code and paste the complete code.";
     return message && message.length < 160 ? message : fallback;
   }
 
   /** Portal page URL — follows a custom endpoint if one was set at enrolment,
    *  so the agreement links never point at a portal this install doesn't use. */
   _portalUrl(pagePath) {
-    const base = (this._state?.endpoint || "https://beta.openreef.co.uk").replace(/\/+$/, "");
+    let base = "https://beta.openreef.co.uk";
+    try {
+      const endpoint = new URL(this._state?.endpoint || base);
+      if (["https:", "http:"].includes(endpoint.protocol) && !endpoint.username && !endpoint.password
+          && !endpoint.search && !endpoint.hash) base = endpoint.href.replace(/\/+$/, "");
+    } catch { /* malformed stored endpoints cannot become executable links */ }
     return `${this._esc(base)}${pagePath}`;
   }
 
@@ -446,8 +451,9 @@ class OpenReefBetaFab extends HTMLElement {
       </p>
       ${this._error ? `<p class="orb-error">${this._esc(this._error)}</p>` : ""}
       <label class="orb-label" for="orb-code">Invite code</label>
-      <input class="orb-input" id="orb-code" type="text" placeholder="e.g. REEF-7K2Q"
-             autocomplete="off" spellcheck="false" value="${this._esc(this._code)}">
+      <input class="orb-input" id="orb-code" type="text" placeholder="REEF- followed by 32 letters and digits"
+             maxlength="37" autocomplete="off" spellcheck="false" value="${this._esc(this._code)}">
+      <p class="orb-fine">Use a fresh invitation from Reece. Older short codes no longer work; an already connected install stays connected.</p>
 
       <label class="orb-toggle" style="margin-top:14px">
         <input type="checkbox" data-orb="accept-terms" ${this._acceptTerms ? "checked" : ""}>

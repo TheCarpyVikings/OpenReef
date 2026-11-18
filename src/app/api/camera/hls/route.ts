@@ -13,7 +13,7 @@ export const dynamic = 'force-dynamic';
  */
 export async function GET(request: NextRequest) {
     const entityId = request.nextUrl.searchParams.get('entity');
-    if (!entityId || !/^[a-z0-9_.]+$/.test(entityId)) {
+    if (!entityId || !/^camera\.[a-z0-9_]+$/.test(entityId)) {
         return NextResponse.json(
             { error: 'Missing or invalid entity parameter' },
             { status: 400 },

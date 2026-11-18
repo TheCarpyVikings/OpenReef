@@ -1,81 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { constantTimeEqual, sameOriginRequest, SESSION_COOKIE, validApiSecret, validSession } from '@/lib/session';
 
-function timingSafeCompare(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    const bufA = new TextEncoder().encode(a);
-    const bufB = new TextEncoder().encode(b);
-    let mismatch = 0;
-    for (let i = 0; i < bufA.length; i++) {
-        mismatch |= bufA[i] ^ bufB[i];
-    }
-    return mismatch === 0;
-}
+export async function middleware(req: NextRequest) {
+    const pathname = req.nextUrl.pathname;
+    if (pathname === '/login') return NextResponse.next();
 
-export function middleware(req: NextRequest) {
-    // In addon mode, HA Ingress handles all authentication
-    if (process.env.HA_ADDON_MODE === 'true') {
-        return NextResponse.next();
-    }
-
-    const isApiRoute = req.nextUrl.pathname.startsWith('/api/');
     const apiSecret = process.env.API_SECRET;
-
-    // ──────────────────────────────────────────────
-    // PAGE ROUTES: auto-set the session cookie
-    // ──────────────────────────────────────────────
-    if (!isApiRoute) {
-        // If API_SECRET is configured and the cookie isn't set yet, set it now.
-        // This ensures the browser is authenticated before any client-side
-        // API calls are made (replaces the old NEXT_PUBLIC_API_SECRET approach).
-        if (apiSecret && !req.cookies.get('api_session')?.value) {
-            const response = NextResponse.next();
-            response.cookies.set('api_session', apiSecret, {
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'strict',
-                path: '/',
-                maxAge: 60 * 60 * 24 * 30, // 30 days
-            });
-            return response;
-        }
-        return NextResponse.next();
+    if (!validApiSecret(apiSecret)) {
+        return NextResponse.json({ error: 'Dashboard authentication is not configured' }, { status: 503 });
     }
 
-    // ──────────────────────────────────────────────
-    // API ROUTES: enforce authentication
-    // ──────────────────────────────────────────────
+    // The sole public API validates the supplied secret and rate-limits attempts.
+    if (pathname === '/api/auth/session') return NextResponse.next();
 
-    // Skip auth for OAuth endpoints and public data endpoints
-    if (
-        req.nextUrl.pathname.startsWith('/api/auth/callback') ||
-        req.nextUrl.pathname.startsWith('/api/auth/google') ||
-        req.nextUrl.pathname.startsWith('/api/auth/session') ||
-        req.nextUrl.pathname.startsWith('/api/spawning')
-    ) {
-        return NextResponse.next();
+    const authorization = req.headers.get('authorization') || '';
+    const bearer = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const bearerAuthenticated = Boolean(bearer && constantTimeEqual(bearer, apiSecret));
+    const cookieAuthenticated = !bearerAuthenticated && await validSession(
+        req.cookies.get(SESSION_COOKIE)?.value || '', apiSecret,
+    );
+
+    if (!bearerAuthenticated && !cookieAuthenticated) {
+        if (!pathname.startsWith('/api/')) return NextResponse.redirect(new URL('/login', req.url));
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // If no API_SECRET is configured, allow all requests (development mode)
-    if (!apiSecret) {
-        return NextResponse.next();
+    // Lax cookies allow the authenticated Google OAuth callback. Mutations must
+    // originate in this app; API clients can instead authenticate with Bearer.
+    if (!bearerAuthenticated && !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !sameOriginRequest(req)) {
+        return NextResponse.json({ error: 'Cross-origin request denied' }, { status: 403 });
     }
-
-    // Check Authorization header (Bearer token)
-    const authHeader = req.headers.get('Authorization');
-    const token = authHeader?.replace('Bearer ', '');
-
-    // Check session cookie as fallback
-    const cookieToken = req.cookies.get('api_session')?.value;
-
-    const providedToken = token || cookieToken || '';
-
-    if (!providedToken || !timingSafeCompare(providedToken, apiSecret)) {
-        return NextResponse.json(
-            { error: 'Unauthorized' },
-            { status: 401 }
-        );
-    }
-
     return NextResponse.next();
 }
 

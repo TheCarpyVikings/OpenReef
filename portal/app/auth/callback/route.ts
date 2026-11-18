@@ -25,6 +25,12 @@ export async function GET(request: Request) {
 
   // Relative paths only — an open redirect on a login callback would let an
   // attacker land the owner's freshly-authenticated browser anywhere.
-  const target = next.startsWith("/") && !next.startsWith("//") ? next : "/";
-  return NextResponse.redirect(new URL(target, url.origin));
+  let target = new URL("/", url.origin);
+  try {
+    const candidate = new URL(next, url.origin);
+    if (next.startsWith("/") && candidate.origin === url.origin) target = candidate;
+  } catch {
+    // Invalid URLs use the safe default.
+  }
+  return NextResponse.redirect(target);
 }

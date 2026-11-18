@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Chrome } from "@/app/components/Chrome";
-import { createTester, saveTesterNotes, setTesterStatus } from "@/app/actions";
+import { saveTesterNotes, setTesterStatus } from "@/app/actions";
+import { InviteForm } from "@/app/components/InviteForm";
 import { requireOwner } from "@/lib/auth";
 import { ago } from "@/lib/format";
 import { serviceClient } from "@/lib/supabase";
@@ -91,23 +92,7 @@ export default async function TestersPage() {
 
       <div className="panel">
         <h2>Invite someone</h2>
-        <form action={createTester} className="row" style={{ marginTop: 12, alignItems: "flex-end" }}>
-          <div style={{ flex: "1 1 200px" }}>
-            <label className="label" htmlFor="name">
-              Name
-            </label>
-            <input id="name" name="name" className="field" required autoComplete="off" />
-          </div>
-          <div style={{ flex: "1 1 220px" }}>
-            <label className="label" htmlFor="email">
-              Email (optional)
-            </label>
-            <input id="email" name="email" className="field" type="email" autoComplete="off" />
-          </div>
-          <button className="btn primary" type="submit">
-            Generate code
-          </button>
-        </form>
+        <InviteForm />
       </div>
 
       {rows.length === 0 ? (
@@ -120,7 +105,7 @@ export default async function TestersPage() {
               <thead>
                 <tr>
                   <th>Tester</th>
-                  <th>Code</th>
+                  <th>Invitation</th>
                   <th>Status</th>
                   <th>Setup</th>
                   <th>Trust</th>
@@ -142,7 +127,15 @@ export default async function TestersPage() {
                       ) : null}
                     </td>
                     <td>
-                      <code>{tester.code}</code>
+                      {tester.status === "invited" || tester.status === "active" ? (
+                        <>
+                          <div className="who" style={{ marginBottom: 6 }}>
+                            {tester.invite_expires_at && Date.parse(tester.invite_expires_at) > now
+                              ? "Unused invitation issued" : "No usable invitation"}
+                          </div>
+                          <InviteForm testerId={tester.id} />
+                        </>
+                      ) : <span className="who">Resume or restore first</span>}
                     </td>
                     <td>
                       <span className={`badge ${STATUS_TONE[tester.status] ?? "tone-seen"}`}>
@@ -252,8 +245,9 @@ export default async function TestersPage() {
           </div>
           <p style={{ color: "var(--fg-subtle)", fontSize: 12, marginTop: 12 }}>
             Revoking clears the install&apos;s token, so it stops talking to the portal on its
-            very next request — not at some later cleanup. Restoring issues a fresh code
-            redemption; they&apos;ll need to paste the code again.
+            next request. Pause also cancels unused invitations. After restoring a
+            revoked tester, issue a new code. New codes replace older unused codes;
+            an active install keeps working until the new code is redeemed.
           </p>
         </div>
       )}
@@ -338,21 +332,7 @@ export default async function TestersPage() {
                   <td className="who">{signup.source}</td>
                   <td className="when">{ago(signup.created_at)}</td>
                   <td>
-                    <form action={createTester} className="row" style={{ gap: 6 }}>
-                      <input type="hidden" name="signup_id" value={signup.id} />
-                      <input type="hidden" name="email" value={signup.email} />
-                      <input
-                        name="name"
-                        className="field"
-                        style={{ width: 150 }}
-                        placeholder="Their name"
-                        required
-                        autoComplete="off"
-                      />
-                      <button className="btn small primary" type="submit">
-                        Invite
-                      </button>
-                    </form>
+                    <InviteForm signupId={signup.id} email={signup.email} />
                   </td>
                 </tr>
               ))}
