@@ -14,6 +14,19 @@ frontend:
 config:
 api:
 
+# Tailnet previews arrive through Tailscale serve and then the socat proxy, with an X-Forwarded-For
+# header. HA rejects that (400) unless the proxy is trusted. The proxy's address changes for every
+# worktree's network, so trust the private ranges. That's safe only because HA sits on an
+# `internal: true` network where the socat proxy is the only other member.
+# HA 2026.10 records its HTTP settings in .storage on first boot, so a change here needs a fresh
+# demo: down.sh, then up.sh.
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
 input_boolean:
   demo_return_pump:  {name: Demo return pump backing, initial: true}
   demo_heater:       {name: Demo heater backing, initial: true}
