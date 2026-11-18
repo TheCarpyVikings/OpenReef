@@ -1,0 +1,43 @@
+# Disposable demo Home Assistant for OpenReef panel screenshots.
+# Started by up.sh, which sets COMPOSE_PROJECT_NAME, DEMO_PORT and OPENREEF_SRC.
+#
+# Isolation: HA sits on an `internal: true` network, so it has no gateway and no route to the
+# host, the LAN, libvirt, MQTT or the internet. The only way in is the socat proxy, which
+# forwards one TCP port and is published on 127.0.0.1 only.
+name: ${COMPOSE_PROJECT_NAME}
+services:
+  ha:
+    image: ghcr.io/home-assistant/home-assistant:2026.10.4
+    restart: "no"
+    environment:
+      TZ: UTC
+    networks: [demo_internal]
+    volumes:
+      - ha_config:/config
+      - ./config/configuration.yaml:/config/configuration.yaml:ro
+      - ${OPENREEF_SRC}:/config/custom_components/openreef:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8123/manifest.json', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+  proxy:
+    image: alpine/socat:latest
+    restart: "no"
+    command: ["TCP-LISTEN:8123,fork,reuseaddr", "TCP:ha:8123"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [demo_internal, egress]
+    ports:
+      - "127.0.0.1:${DEMO_PORT}:8123"
+    depends_on:
+      ha:
+        condition: service_started
+networks:
+  demo_internal:
+    internal: true
+  egress: {}
+volumes:
+  ha_config: {}

@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Write a Playwright storage-state JSON that is logged in to the demo HA (127.0.0.1 only).
+#   scripts/demo-ha/auth-state [OUT.json]    (default: ~/.cache/agent-proof/demo-ha-<slug>-auth.json)
+#   node ~/.claude/skills/proof/shoot.mjs --storage OUT.json openreef=http://127.0.0.1:<port>/openreef
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+DEMO_PORT="$(running_port)"; [ -n "$DEMO_PORT" ] || { echo "demo is not running; run scripts/demo-ha/up.sh" >&2; exit 1; }
+export DEMO_PORT
+OUT="${1:-${XDG_CACHE_HOME:-$HOME/.cache}/agent-proof/demo-ha-$SLUG-auth.json}"
+mkdir -p "$(dirname "$OUT")"
+export OUT
+node --input-type=module -e '
+import { login, demoBase } from "'"$DEMO_DIR"'/lib.mjs";
+import fs from "node:fs";
+const { base, clientId } = demoBase();
+const t = await login();
+const hassTokens = { access_token: t.access_token, token_type: t.token_type, expires_in: t.expires_in,
+  refresh_token: t.refresh_token, clientId, hassUrl: base, expires: Date.now() + t.expires_in * 1000 };
+const state = { cookies: [], origins: [{ origin: base, localStorage: [
+  { name: "hassTokens", value: JSON.stringify(hassTokens) },
+  { name: "selectedLanguage", value: JSON.stringify("en") } ] }] };
+fs.writeFileSync(process.env.OUT, JSON.stringify(state), { mode: 0o600 });
+'
+echo "$OUT"

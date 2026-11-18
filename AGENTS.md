@@ -1,7 +1,7 @@
 # OpenReef: instructions for coding agents
 
 OpenReef is an open-source reef-aquarium controller built on Home Assistant. **This repository is
-public**, and beta testers install the integration from it through HACS.
+public**, and beta testers install the integration from it through the Home Assistant Marketplace (formerly HACS).
 
 | Path | What it is |
 |---|---|
@@ -17,7 +17,7 @@ This code runs a live aquarium. A wrong pump or heater action can kill livestock
 - **Never touch real hardware.** Don't flash or OTA-upload firmware, don't call Home Assistant
   services or webhooks, don't publish MQTT messages, and don't toggle equipment. Write code and
   tests only. Validate firmware with `esphome config` / `esphome compile` at most.
-- **Never deploy.** Supabase migrations, Vercel deploys, GitHub releases and HACS publishing are
+- **Never deploy.** Supabase migrations, Vercel deploys, GitHub releases and Home Assistant Marketplace (formerly HACS) publishing are
   done by Reece.
 - **Public repo:** never commit secrets, `.env` contents, hostnames or IPs of Reece's network,
   security audit write-ups, or details of unpatched vulnerabilities.
@@ -53,6 +53,26 @@ Also run the following, depending on what you touched:
   - `python3 portal/tests/test_security_sql.py`, which needs Docker
 
 Tests use fakes (`tests/_fake_ha.py`). Never point them at a real Home Assistant.
+
+## Demo Home Assistant (panel screenshots)
+`scripts/demo-ha/` runs a disposable Home Assistant 2026.10.4 in Docker with **your worktree's**
+`custom_components/openreef` mounted read-only and fake "Demo" reef data (sensors, switches backed
+by input helpers). It is the **only Home Assistant agents may call**.
+```bash
+scripts/demo-ha/up.sh                      # start, seed, print the local URL (and tailnet URL for Reece)
+scripts/demo-ha/auth-state /tmp/demo.json  # Playwright storage state, logged in to the demo
+node ~/.claude/skills/proof/shoot.mjs --storage /tmp/demo.json openreef=http://127.0.0.1:<port>/openreef
+scripts/demo-ha/down.sh                    # remove containers, network, volume and the tailnet share
+```
+- Port is 8300-8399, derived from the worktree name; `up.sh` prints it. Login is `demo` /
+  `demo-reef-only` (fixed, local-only).
+- The code is mounted live, but HA loads Python at startup: after backend changes, run `down.sh`
+  then `up.sh`. Panel-only (JS) changes need just a hard browser reload.
+- **Isolation:** HA is on a Docker `internal: true` network with no route to the host, LAN, libvirt,
+  MQTT or internet. It is reached only through a socat proxy published on `127.0.0.1`. No mqtt or
+  esphome is configured. `scripts/demo-ha/isolation-probe.sh` proves it.
+- Its scripts refuse any target other than `127.0.0.1:<demo port>`. Never point agents, tests or
+  scripts at any other Home Assistant. Buttons in the demo only flip fake helpers.
 
 ## Agent skills
 

@@ -1,0 +1,84 @@
+# Minimal demo configuration. Deliberately NOT default_config: no mqtt, esphome, zeroconf, ssdp,
+# dhcp, usb, cloud or analytics. Every entity below is fake and obviously labelled "Demo".
+homeassistant:
+  name: OpenReef Demo
+  latitude: 51.5
+  longitude: -0.12
+  elevation: 10
+  unit_system: metric
+  currency: GBP
+  country: GB
+  time_zone: UTC
+
+frontend:
+config:
+api:
+
+input_boolean:
+  demo_return_pump:  {name: Demo return pump backing, initial: true}
+  demo_heater:       {name: Demo heater backing, initial: true}
+  demo_skimmer:      {name: Demo skimmer backing, initial: true}
+  demo_wavemaker:    {name: Demo wavemaker backing, initial: true}
+  demo_ato:          {name: Demo ATO backing, initial: false}
+  demo_light:        {name: Demo light backing, initial: true}
+
+input_number:
+  demo_temp:        {name: Demo temp, min: 0, max: 40, step: 0.1, initial: 25.8, unit_of_measurement: "°C"}
+  demo_sump_temp:   {name: Demo sump temp, min: 0, max: 40, step: 0.1, initial: 25.6, unit_of_measurement: "°C"}
+  demo_ph:          {name: Demo pH, min: 6, max: 9, step: 0.01, initial: 8.12}
+  demo_salinity:    {name: Demo salinity, min: 25, max: 40, step: 0.1, initial: 35.0, unit_of_measurement: ppt}
+  demo_alkalinity:  {name: Demo alkalinity, min: 4, max: 14, step: 0.1, initial: 8.2, unit_of_measurement: dKH}
+  demo_calcium:     {name: Demo calcium, min: 300, max: 550, step: 1, initial: 420, unit_of_measurement: ppm}
+  demo_magnesium:   {name: Demo magnesium, min: 1000, max: 1700, step: 1, initial: 1350, unit_of_measurement: ppm}
+  demo_nitrate:     {name: Demo nitrate, min: 0, max: 50, step: 0.1, initial: 4.0, unit_of_measurement: ppm}
+  demo_phosphate:   {name: Demo phosphate, min: 0, max: 1, step: 0.01, initial: 0.04, unit_of_measurement: ppm}
+  demo_orp:         {name: Demo ORP, min: 100, max: 500, step: 1, initial: 345, unit_of_measurement: mV}
+
+template:
+  - sensor:
+      - {name: Demo tank temperature, unique_id: demo_tank_temperature, state: "{{ states('input_number.demo_temp') }}", unit_of_measurement: "°C", device_class: temperature, state_class: measurement}
+      - {name: Demo sump temperature, unique_id: demo_sump_temperature, state: "{{ states('input_number.demo_sump_temp') }}", unit_of_measurement: "°C", device_class: temperature, state_class: measurement}
+      - {name: Demo tank pH, unique_id: demo_tank_ph, state: "{{ states('input_number.demo_ph') }}", state_class: measurement}
+      - {name: Demo tank salinity, unique_id: demo_tank_salinity, state: "{{ states('input_number.demo_salinity') }}", unit_of_measurement: ppt, state_class: measurement}
+      - {name: Demo tank alkalinity, unique_id: demo_tank_alkalinity, state: "{{ states('input_number.demo_alkalinity') }}", unit_of_measurement: dKH, state_class: measurement}
+      - {name: Demo tank calcium, unique_id: demo_tank_calcium, state: "{{ states('input_number.demo_calcium') }}", unit_of_measurement: ppm, state_class: measurement}
+      - {name: Demo tank magnesium, unique_id: demo_tank_magnesium, state: "{{ states('input_number.demo_magnesium') }}", unit_of_measurement: ppm, state_class: measurement}
+      - {name: Demo tank nitrate, unique_id: demo_tank_nitrate, state: "{{ states('input_number.demo_nitrate') }}", unit_of_measurement: ppm, state_class: measurement}
+      - {name: Demo tank phosphate, unique_id: demo_tank_phosphate, state: "{{ states('input_number.demo_phosphate') }}", unit_of_measurement: ppm, state_class: measurement}
+      - {name: Demo tank ORP, unique_id: demo_tank_orp, state: "{{ states('input_number.demo_orp') }}", unit_of_measurement: mV, state_class: measurement}
+      - {name: Demo return pump power, unique_id: demo_return_pump_power, state: "{{ 38 if is_state('input_boolean.demo_return_pump','on') else 0 }}", unit_of_measurement: W, device_class: power, state_class: measurement}
+      - {name: Demo heater power, unique_id: demo_heater_power, state: "{{ 150 if is_state('input_boolean.demo_heater','on') else 0 }}", unit_of_measurement: W, device_class: power, state_class: measurement}
+      - {name: Demo skimmer power, unique_id: demo_skimmer_power, state: "{{ 22 if is_state('input_boolean.demo_skimmer','on') else 0 }}", unit_of_measurement: W, device_class: power, state_class: measurement}
+      - {name: Demo wavemaker power, unique_id: demo_wavemaker_power, state: "{{ 18 if is_state('input_boolean.demo_wavemaker','on') else 0 }}", unit_of_measurement: W, device_class: power, state_class: measurement}
+  # Fake switches. Turning one on or off only flips its input_boolean; nothing leaves this container.
+  - switch:
+      - name: Demo return pump
+        unique_id: demo_return_pump_switch
+        state: "{{ is_state('input_boolean.demo_return_pump','on') }}"
+        turn_on:  {action: input_boolean.turn_on,  target: {entity_id: input_boolean.demo_return_pump}}
+        turn_off: {action: input_boolean.turn_off, target: {entity_id: input_boolean.demo_return_pump}}
+      - name: Demo heater
+        unique_id: demo_heater_switch
+        state: "{{ is_state('input_boolean.demo_heater','on') }}"
+        turn_on:  {action: input_boolean.turn_on,  target: {entity_id: input_boolean.demo_heater}}
+        turn_off: {action: input_boolean.turn_off, target: {entity_id: input_boolean.demo_heater}}
+      - name: Demo skimmer
+        unique_id: demo_skimmer_switch
+        state: "{{ is_state('input_boolean.demo_skimmer','on') }}"
+        turn_on:  {action: input_boolean.turn_on,  target: {entity_id: input_boolean.demo_skimmer}}
+        turn_off: {action: input_boolean.turn_off, target: {entity_id: input_boolean.demo_skimmer}}
+      - name: Demo wavemaker
+        unique_id: demo_wavemaker_switch
+        state: "{{ is_state('input_boolean.demo_wavemaker','on') }}"
+        turn_on:  {action: input_boolean.turn_on,  target: {entity_id: input_boolean.demo_wavemaker}}
+        turn_off: {action: input_boolean.turn_off, target: {entity_id: input_boolean.demo_wavemaker}}
+      - name: Demo ATO
+        unique_id: demo_ato_switch
+        state: "{{ is_state('input_boolean.demo_ato','on') }}"
+        turn_on:  {action: input_boolean.turn_on,  target: {entity_id: input_boolean.demo_ato}}
+        turn_off: {action: input_boolean.turn_off, target: {entity_id: input_boolean.demo_ato}}
+      - name: Demo light
+        unique_id: demo_light_switch
+        state: "{{ is_state('input_boolean.demo_light','on') }}"
+        turn_on:  {action: input_boolean.turn_on,  target: {entity_id: input_boolean.demo_light}}
+        turn_off: {action: input_boolean.turn_off, target: {entity_id: input_boolean.demo_light}}
