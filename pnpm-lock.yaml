@@ -42,8 +42,8 @@ importers:
         specifier: 19.2.9
         version: 19.2.9(react@19.2.9)
       suncalc:
-        specifier: ^1.9.0
-        version: 1.9.0
+        specifier: ^2.1.4
+        version: 2.1.4
       tailwind-merge:
         specifier: ^3.7.0
         version: 3.7.0
@@ -1830,8 +1830,8 @@ packages:
       babel-plugin-macros:
         optional: true
 
-  suncalc@1.9.0:
-    resolution: {integrity: sha512-vMJ8Byp1uIPoj+wb9c1AdK4jpkSKVAywgHX0lqY7zt6+EWRRC3Z+0Ucfjy/0yxTVO1hwwchZe4uoFNqrIC24+A==}
+  suncalc@2.1.4:
+    resolution: {integrity: sha512-V7oSdbSezigEpbqnNWKujDlZaE/QA/0w5IbP/vXX+eIF+EtiE8e9BkSapsOFZc84jJkI3QlklYTWtMqzj9tZQg==}
 
   supports-color@7.2.0:
     resolution: {integrity: sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==}
@@ -3973,7 +3973,7 @@ snapshots:
     optionalDependencies:
       '@babel/core': 7.29.7
 
-  suncalc@1.9.0: {}
+  suncalc@2.1.4: {}
 
   supports-color@7.2.0:
     dependencies:
